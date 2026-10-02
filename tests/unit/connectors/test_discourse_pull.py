@@ -30,6 +30,15 @@ def test_titles_come_from_search_topics_when_there_is_no_headline() -> None:
     assert {p["topic_title"] for p in page.payloads} == {"Dark mode", "Login loop"}
 
 
+def test_the_topic_title_wins_over_the_search_headline() -> None:
+    found = routes([[1]], topics=True)
+    search = found[f"{BASE}/search.json", "1"]
+    assert isinstance(search, dict)
+    search["posts"][0]["topic_title_headline"] = "Dark mode is…"
+    [page] = PULLER.pull(pull_source(), StubHttp(found), CLOCK, DEADLINE)
+    assert [p["topic_title"] for p in page.payloads] == ["Dark mode"]
+
+
 def test_newest_timestamp_is_carried_to_an_empty_final_page() -> None:
     _, last = PULLER.pull(
         pull_source(), StubHttp(routes([list(range(1, 51)), []])), CLOCK, DEADLINE

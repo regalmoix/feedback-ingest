@@ -16,3 +16,7 @@ def test_strip_tags_hides_script_and_style_and_breaks_on_non_inline_tags() -> No
     assert strip_tags("<style>p { color: red }</style><p>hi</p><script>x()</script>") == "hi"
     assert strip_tags("<h4>T</h4>body") == "T body"
     assert strip_tags("<tr><td>a</td><td>b</td></tr>") == "a b"
+
+
+def test_a_stray_closing_script_tag_does_not_hide_the_rest() -> None:
+    assert strip_tags("before</script>after") == "before after"

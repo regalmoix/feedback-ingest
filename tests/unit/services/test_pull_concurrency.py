@@ -1,5 +1,6 @@
 import logging
 import threading
+import time
 from collections.abc import Sequence
 from typing import Any
 
@@ -81,3 +82,39 @@ def test_a_sync_that_crashes_during_shutdown_is_logged_as_abandoned(
     scheduler._sync(add_pull_source(adapters, "src-forum"))  # noqa: SLF001
     [record] = [r for r in caplog.records if r.name.endswith("scheduler")]
     assert (record.levelno, record.getMessage()) == (logging.INFO, "sync abandoned at shutdown")
+
+
+def _counting(
+    adapters: Adapters, monkeypatch: pytest.MonkeyPatch, interval: float
+) -> tuple[SchedulerService, list[str]]:
+    add_pull_source(adapters, "src-forum")
+    scheduler, calls = SchedulerService(service(adapters), interval_seconds=interval), []
+
+    def counting(source: Source) -> PullResult:
+        calls.append(source.id)
+        return PullResult(source_id=source.id)
+
+    monkeypatch.setattr(scheduler.pull, "sync", counting)
+    return scheduler, calls
+
+
+def test_a_stopped_scheduler_starts_again(
+    adapters: Adapters, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scheduler, calls = _counting(adapters, monkeypatch, 0.01)
+    scheduler.start()
+    scheduler.stop()
+    calls.clear()
+    scheduler.start()
+    wait_until(lambda: len(calls) >= 1, timeout=2)
+    scheduler.stop()
+
+
+def test_the_scheduler_waits_one_interval_before_the_first_tick(
+    adapters: Adapters, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scheduler, calls = _counting(adapters, monkeypatch, 60)
+    scheduler.start()
+    time.sleep(0.2)
+    scheduler.stop()
+    assert calls == []

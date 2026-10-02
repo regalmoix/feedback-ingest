@@ -98,8 +98,9 @@ def test_failures_back_off_exponentially_then_go_dead(
     assert f"dead: {stored_error}" in caplog.text
 
 
-def test_unknown_source_is_dead(adapters: Adapters) -> None:
-    ghost = seed_source(adapters, "tenant-a", KEY_A).model_copy(update={"id": "ghost"})
+@pytest.mark.parametrize("change", [{"id": "ghost"}, {"tenant_id": "tenant-b"}])
+def test_an_unknown_or_foreign_source_is_dead(adapters: Adapters, change: dict[str, str]) -> None:
+    ghost = seed_source(adapters, "tenant-a", KEY_A).model_copy(update=change)
     event = claimed(adapters, source=ghost)
     assert make_pipeline(adapters).process(event) == EventStatus.DEAD
     assert stored(adapters, event).error == "source not found"

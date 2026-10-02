@@ -91,6 +91,20 @@ def same_version_from_a_newer_connector_replaces_the_row(a: Adapters) -> None:
     assert (stored.text, stored.connector_version) == ("new", 2)
 
 
+def an_older_tombstone_does_not_move_an_existing_one(a: Adapters) -> None:
+    seed(a)
+    now = a.clock.now()
+    first_delete = now + timedelta(minutes=10)
+    a.feedback.upsert(record(SOURCE_A1, "r1", now))
+    a.feedback.upsert(
+        record(SOURCE_A1, "r1", now, source_updated_at=first_delete, deleted_at=first_delete)
+    )
+    late = record(SOURCE_A1, "r1", now, deleted_at=now + timedelta(minutes=5))
+    assert a.feedback.upsert(late) == UpsertOutcome.SKIPPED_OLDER
+    [stored] = a.feedback.list_for_tenant(TENANT_A.id, include_deleted=True)
+    assert stored.deleted_at == first_delete
+
+
 UPSERT_CASES: list[Case] = [
     upsert_keeps_row_id_and_store_owned_fields,
     older_update_is_skipped,
@@ -99,4 +113,5 @@ UPSERT_CASES: list[Case] = [
     older_tombstone_still_deletes,
     version_advances_without_updated_at,
     same_version_from_a_newer_connector_replaces_the_row,
+    an_older_tombstone_does_not_move_an_existing_one,
 ]

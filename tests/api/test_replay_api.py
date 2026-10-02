@@ -1,5 +1,7 @@
+import json
+
 from fastapi.testclient import TestClient
-from helpers import KEY_A, KEY_B, MINE, app_state, fixture_body, push
+from helpers import KEY_A, KEY_B, MINE, app_state, fixture_body, load, push
 
 from feedback_ingest.api.deps import Adapters
 from feedback_ingest.domain.enums import SourceType
@@ -49,3 +51,16 @@ def test_responses_leave_out_the_tenant_id(app_client: TestClient, source_a: Sou
     [record] = app_client.get("/v1/records", headers=MINE).json()
     assert "tenant_id" not in record
     assert "tenant_id" not in app_client.get(f"/v1/records/{record['id']}", headers=MINE).json()
+
+
+def test_the_dead_list_shows_why_and_honours_limit(
+    app_client: TestClient, source_a: Source
+) -> None:
+    for n in range(2):
+        body = load(SourceType.PLAYSTORE, "malformed") | {"n": n}
+        push(app_client, source_a.id, json.dumps(body).encode())
+    app_state(app_client).worker.run_once()
+    listed = app_client.get("/admin/raw-events", headers=MINE).json()
+    assert len(listed) == 2
+    assert all("comments" in e["error"] for e in listed)
+    assert len(app_client.get("/admin/raw-events?limit=1", headers=MINE).json()) == 1

@@ -103,3 +103,16 @@ def test_attempt_cap_without_a_recorded_error_says_the_worker_crashed(
     assert make_pipeline(adapters).process(event) == EventStatus.DEAD
     expected = "attempt limit exceeded; last error: none recorded (worker crashed; see logs)"
     assert stored(adapters, event).error == expected
+
+
+def test_the_attempt_limit_error_is_truncated_too(
+    adapters: Adapters, clock: FixedClock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fail_with(monkeypatch, TransientError("x" * 600))
+    event, pipeline = claimed(adapters), make_pipeline(adapters)
+    assert pipeline.process(event) == EventStatus.FAILED
+    for _ in range(MAX_ATTEMPTS):
+        clock.advance(300)
+        [event] = adapters.queue.claim(clock.now(), LEASE, 1)
+    assert pipeline.process(event) == EventStatus.DEAD
+    assert len(stored(adapters, event).error or "") == 500

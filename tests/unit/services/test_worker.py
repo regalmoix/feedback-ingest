@@ -4,6 +4,7 @@ from collections.abc import Iterator
 import pytest
 from helpers import KEY_A, load, seed_source, wait_until
 
+from feedback_ingest.adapters.memory.clock import FixedClock
 from feedback_ingest.api.deps import Adapters
 from feedback_ingest.domain.enums import EventStatus, SourceType
 from feedback_ingest.domain.models import RawEvent
@@ -53,16 +54,20 @@ def test_a_backlog_drains_without_sleeping_between_non_empty_batches(
     wait_until(lambda: adapters.queue.counts()[EventStatus.PROCESSED] == 3, timeout=2)
 
 
-def test_an_idle_loop_sleeps_between_empty_claims(
-    worker: WorkerService, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("fails", [False, True])
+def test_an_idle_or_failing_loop_sleeps_between_claims(
+    worker: WorkerService, monkeypatch: pytest.MonkeyPatch, fails: bool
 ) -> None:
     calls: list[object] = []
 
-    def empty(*args: object) -> list[RawEvent]:
+    def claim(*args: object) -> list[RawEvent]:
         calls.append(args)
+        if fails:
+            msg = "database is locked"
+            raise RuntimeError(msg)
         return []
 
-    monkeypatch.setattr(worker.queue, "claim", empty)
+    monkeypatch.setattr(worker.queue, "claim", claim)
     worker.poll_seconds = 0.05
     worker.start()
     time.sleep(0.25)
@@ -101,3 +106,15 @@ def test_a_batch_that_only_crashes_is_not_progress_and_start_is_repeatable(
     worker.stop()
     worker.start()  # stop() set the event; start() clears it
     assert worker.alive
+
+
+def test_the_health_window_is_three_polls_when_that_exceeds_ten_seconds(
+    adapters: Adapters, worker: WorkerService, clock: FixedClock
+) -> None:
+    worker.poll_seconds = 10
+    worker.start()
+    wait_until(lambda: adapters.queue.counts()[EventStatus.PROCESSED] == 3)
+    clock.advance(25)
+    assert worker.healthy
+    clock.advance(6)
+    assert not worker.healthy

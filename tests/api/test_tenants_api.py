@@ -21,6 +21,7 @@ def test_bootstrap_token_is_required_and_the_api_key_works(
         assert created.status_code == 201
         tenant = created.json()
         assert tenant["name"] == "acme"
+        assert len(tenant["api_key"]) >= 43  # token_urlsafe(32): 256 bits
         sources = client.get("/v1/sources", headers={"X-API-Key": tenant["api_key"]})
         assert (sources.status_code, sources.json()) == (200, [])
     assert "FI_BOOTSTRAP_TOKEN" not in caplog.text

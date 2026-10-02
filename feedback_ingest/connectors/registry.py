@@ -27,6 +27,10 @@ CONNECTORS: dict[SourceType, SourceConnector] = {
 }
 PULLERS: dict[SourceType, PullConnector] = {SourceType.DISCOURSE: _DISCOURSE}
 _MAX_WINDOW_DAYS = 31
+_EMBEDS_IPV4 = (
+    ipaddress.ip_network("64:ff9b::/96"),
+    ipaddress.ip_network("::/96"),
+)  # NAT64, compat
 
 
 def check_source(source: Source) -> None:
@@ -82,4 +86,6 @@ def _is_internal(host: str) -> bool:
             ip = ipaddress.ip_address(socket.inet_aton(host))
         except OSError:
             return False
+    if isinstance(ip, ipaddress.IPv6Address) and any(ip in net for net in _EMBEDS_IPV4):
+        ip = ipaddress.IPv4Address(int(ip) & 0xFFFFFFFF)
     return not ip.is_global
