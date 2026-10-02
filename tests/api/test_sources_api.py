@@ -1,8 +1,8 @@
 import httpx2
 import pytest
 from fastapi.testclient import TestClient
+from helpers import KEY_A, MINE, SECRET, THEIRS, fixture_body, push
 
-from api.conftest import KEY_A, MINE, SECRET, THEIRS, fixture_body, push
 from feedback_ingest.api.deps import Adapters
 from feedback_ingest.domain.enums import SourceMode, SourceType
 from feedback_ingest.domain.models import Source

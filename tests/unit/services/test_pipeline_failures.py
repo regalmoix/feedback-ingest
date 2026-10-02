@@ -2,7 +2,7 @@ import json
 from datetime import timedelta
 
 import pytest
-from api.conftest import KEY_A, fixture_body, memory_adapters, seed_source
+from helpers import KEY_A, fixture_body, seed_source
 
 from feedback_ingest.adapters.memory.clock import FixedClock
 from feedback_ingest.api.deps import Adapters
@@ -14,11 +14,6 @@ from feedback_ingest.services.ingestion import IngestionService
 from feedback_ingest.services.pipeline import PipelineService
 
 LEASE = 30
-
-
-@pytest.fixture
-def adapters(clock: FixedClock) -> Adapters:
-    return memory_adapters(clock)
 
 
 def _pipeline(a: Adapters, backoff_cap_seconds: int = 300) -> PipelineService:

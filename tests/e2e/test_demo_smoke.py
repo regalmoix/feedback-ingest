@@ -1,6 +1,6 @@
 import pytest
-from api.conftest import memory_adapters
 from fastapi.testclient import TestClient
+from helpers import memory_adapters
 
 from feedback_ingest.adapters.memory.clock import FixedClock
 from feedback_ingest.config import Settings

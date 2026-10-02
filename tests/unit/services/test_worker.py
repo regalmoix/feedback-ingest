@@ -2,8 +2,7 @@ import json
 from collections.abc import Iterator
 
 import pytest
-from api.conftest import KEY_A, fixture_body, memory_adapters, seed_source
-from e2e.conftest import wait_until
+from helpers import KEY_A, fixture_body, memory_adapters, seed_source, wait_until
 
 from feedback_ingest.adapters.memory.clock import FixedClock
 from feedback_ingest.api.deps import Adapters

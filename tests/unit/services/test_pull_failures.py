@@ -3,8 +3,7 @@ from datetime import datetime
 
 import httpx
 import pytest
-from api.conftest import KEY_A, memory_adapters, seed_source
-from e2e.conftest import add_pull_source, discourse_http
+from helpers import KEY_A, add_pull_source, discourse_http, memory_adapters, seed_source
 
 from feedback_ingest.adapters.http.httpx_client import HttpxClient
 from feedback_ingest.adapters.memory.clock import FixedClock

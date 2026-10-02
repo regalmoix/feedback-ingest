@@ -3,8 +3,7 @@ from collections.abc import Iterator
 from datetime import datetime
 
 import pytest
-from api.conftest import memory_adapters
-from e2e.conftest import add_pull_source, discourse_http, wait_until
+from helpers import add_pull_source, discourse_http, memory_adapters, wait_until
 
 from feedback_ingest.adapters.memory.clock import FixedClock
 from feedback_ingest.api.deps import Adapters

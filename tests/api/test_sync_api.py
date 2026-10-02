@@ -2,10 +2,17 @@ from dataclasses import replace
 from datetime import datetime
 
 import pytest
-from e2e.conftest import add_pull_source, discourse_http
 from fastapi.testclient import TestClient
+from helpers import (
+    KEY_A,
+    KEY_B,
+    add_pull_source,
+    app_state,
+    discourse_http,
+    memory_adapters,
+    seed_source,
+)
 
-from api.conftest import KEY_A, KEY_B, app_state, memory_adapters, seed_source
 from feedback_ingest.adapters.memory.clock import FixedClock
 from feedback_ingest.api.deps import Adapters
 from feedback_ingest.domain.enums import SourceMode, SourceType

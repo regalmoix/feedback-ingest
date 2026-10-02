@@ -17,7 +17,7 @@ def bootstrap(client: TestClient, token: str | None, name: str = "acme") -> http
 def test_bootstrap_token_is_required_and_the_api_key_works(
     adapters: Adapters, caplog: pytest.LogCaptureFixture
 ) -> None:
-    settings = Settings(worker_enabled=False, bootstrap_token=TOKEN)
+    settings = Settings(worker_enabled=False, scheduler_enabled=False, bootstrap_token=TOKEN)
     with TestClient(create_app(settings, adapters=adapters)) as client:
         assert [bootstrap(client, t).status_code for t in (None, "", "wrong")] == [401, 401, 401]
         created = bootstrap(client, TOKEN)
@@ -30,7 +30,7 @@ def test_bootstrap_token_is_required_and_the_api_key_works(
 
 
 def test_tenant_names_are_unique_and_non_empty(adapters: Adapters) -> None:
-    settings = Settings(worker_enabled=False, bootstrap_token=TOKEN)
+    settings = Settings(worker_enabled=False, scheduler_enabled=False, bootstrap_token=TOKEN)
     with TestClient(create_app(settings, adapters=adapters)) as client:
         assert bootstrap(client, TOKEN).status_code == 201
         duplicate = bootstrap(client, TOKEN)
@@ -44,10 +44,12 @@ def test_tenant_names_are_unique_and_non_empty(adapters: Adapters) -> None:
 def test_default_token_warns_and_empty_token_locks_bootstrap(
     adapters: Adapters, caplog: pytest.LogCaptureFixture
 ) -> None:
-    with TestClient(create_app(Settings(worker_enabled=False), adapters=adapters)):
+    with TestClient(
+        create_app(Settings(worker_enabled=False, scheduler_enabled=False), adapters=adapters)
+    ):
         pass
     assert "FI_BOOTSTRAP_TOKEN is the default" in caplog.text
-    settings = Settings(worker_enabled=False, bootstrap_token="")
+    settings = Settings(worker_enabled=False, scheduler_enabled=False, bootstrap_token="")
     with TestClient(create_app(settings, adapters=adapters)) as client:
         assert bootstrap(client, "").status_code == 401
     assert "FI_BOOTSTRAP_TOKEN is empty; POST /admin/tenants is disabled" in caplog.text

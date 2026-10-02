@@ -84,9 +84,10 @@ tests/fixtures/discourse/{search_page1,search_page2,posts_topic_*.json}
 ```
 
 ## Deviations recorded
-- `ConfigError` lives in `services/pull.py`, not in `domain/errors.py`.
+- `ConfigError` lives in `services/pull.py`, not in `domain/errors.py`. It stays a separate class
+  because it maps to 409, while `NotFoundError` maps to 404.
 - `PullResult` carries `source_id`, so `sync_all` results can be told apart.
-- The `MockTransport` helpers (`discourse_http`, `add_pull_source`) live in `tests/e2e/conftest.py`.
+- The `MockTransport` helpers (`discourse_http`, `add_pull_source`) live in `tests/helpers.py` (moved in Phase 6).
 - Pull fixtures are under `tests/fixtures/discourse/pull/`.
 - The scheduler waits one interval before its first tick.
 - The sync endpoint is in `api/sync.py`, not `api/sources.py`.

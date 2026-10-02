@@ -6,10 +6,15 @@ from typing import override
 from fastapi import FastAPI
 
 from feedback_ingest.api import admin, health, ingest, records, sources, sync, tenants
-from feedback_ingest.api.deps import Adapters
+from feedback_ingest.api.deps import Adapters, AppState
 from feedback_ingest.api.errors import add_error_handlers
 from feedback_ingest.config import Settings
-from feedback_ingest.wiring import app_state, sql_adapters
+from feedback_ingest.services.ingestion import IngestionService
+from feedback_ingest.services.pipeline import PipelineService
+from feedback_ingest.services.pull import PullService
+from feedback_ingest.services.scheduler import SchedulerService
+from feedback_ingest.services.worker import WorkerService
+from feedback_ingest.wiring import sql_adapters
 
 _LOG = logging.getLogger("feedback_ingest")
 _LOG_KEYS = ("raw_event_id", "tenant_id", "source_id", "attempts")
@@ -24,49 +29,47 @@ class _DefaultLogKeys(logging.Filter):
         return True
 
 
-def _configure_logging() -> None:
-    logger = logging.getLogger("feedback_ingest")
-    if logger.handlers:
-        return
-    handler = logging.StreamHandler()
-    handler.addFilter(_DefaultLogKeys())
-    keys = " ".join(f"{key}=%({key})s" for key in _LOG_KEYS)
-    handler.setFormatter(
-        logging.Formatter(f"%(asctime)s %(levelname)s %(name)s %(message)s {keys}")
-    )
-    logger.addHandler(handler)
-    logger.setLevel(logging.INFO)
-
-
-def _warn_about_bootstrap_token(token: str) -> None:
-    if not token:
-        _LOG.warning("FI_BOOTSTRAP_TOKEN is empty; POST /admin/tenants is disabled")
-    elif token == Settings.model_fields["bootstrap_token"].default:
-        _LOG.warning("FI_BOOTSTRAP_TOKEN is the default; set it before exposing /admin/tenants")
-
-
 def create_app(settings: Settings | None = None, adapters: Adapters | None = None) -> FastAPI:
-    settings = settings or Settings()
-    _configure_logging()
+    s = settings or Settings()
+    if not _LOG.handlers:
+        handler = logging.StreamHandler()
+        handler.addFilter(_DefaultLogKeys())
+        keys = " ".join(f"{key}=%({key})s" for key in _LOG_KEYS)
+        handler.setFormatter(
+            logging.Formatter(f"%(asctime)s %(levelname)s %(name)s %(message)s {keys}")
+        )
+        _LOG.addHandler(handler)
+        _LOG.setLevel(logging.INFO)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        built = (
-            nullcontext(adapters) if adapters is not None else sql_adapters(settings.database_url)
-        )
-        with built as active:
-            ctx = app_state(settings, active)
-            _warn_about_bootstrap_token(settings.bootstrap_token)
-            app.state.ctx = ctx
-            if settings.worker_enabled:
-                ctx.worker.start()
-            if settings.scheduler_enabled:
-                ctx.scheduler.start()
+        built = nullcontext(adapters) if adapters is not None else sql_adapters(s.database_url)
+        with built as a:
+            if not s.bootstrap_token:
+                _LOG.warning("FI_BOOTSTRAP_TOKEN is empty; POST /admin/tenants is disabled")
+            elif s.bootstrap_token == Settings.model_fields["bootstrap_token"].default:
+                _LOG.warning(
+                    "FI_BOOTSTRAP_TOKEN is the default; set it before exposing /admin/tenants"
+                )
+            pipeline = PipelineService(
+                a.sources, a.feedback, a.queue, a.clock, s.max_attempts, s.backoff_cap_seconds
+            )
+            worker = WorkerService(
+                a.queue, pipeline, a.clock, s.worker_poll_seconds, s.lease_seconds, s.claim_batch
+            )
+            ingestion = IngestionService(a.queue, a.clock)
+            pull = PullService(a.sources, ingestion, a.http, a.clock)
+            scheduler = SchedulerService(pull, s.pull_interval_seconds)
+            app.state.ctx = AppState(s, a, ingestion, worker, pull, scheduler)
+            if s.worker_enabled:
+                worker.start()
+            if s.scheduler_enabled:
+                scheduler.start()
             try:
                 yield
             finally:
-                ctx.scheduler.stop()
-                ctx.worker.stop()
+                scheduler.stop()
+                worker.stop()
 
     app = FastAPI(title="Feedback ingest", lifespan=lifespan)
     add_error_handlers(app)

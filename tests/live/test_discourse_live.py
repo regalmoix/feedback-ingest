@@ -4,7 +4,7 @@ from datetime import datetime
 
 import httpx
 import pytest
-from api.conftest import memory_adapters
+from helpers import memory_adapters
 
 from feedback_ingest.adapters.http.httpx_client import HttpxClient
 from feedback_ingest.adapters.memory.clock import FixedClock

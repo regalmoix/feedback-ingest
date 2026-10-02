@@ -1,7 +1,6 @@
-from api.conftest import KEY_A, app_state, fixture_body, push, seed_source
 from fastapi.testclient import TestClient
+from helpers import KEY_A, app_state, fixture_body, push, seed_source, wait_until
 
-from e2e.conftest import wait_until
 from feedback_ingest.config import Settings
 from feedback_ingest.domain.enums import EventStatus, SourceType
 from feedback_ingest.main import create_app

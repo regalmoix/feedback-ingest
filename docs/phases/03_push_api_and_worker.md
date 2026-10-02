@@ -153,10 +153,11 @@ tests/e2e/{conftest,test_push_to_query,test_restart_resume,test_dlq_replay}.py
   pull source without a secret answers 401).
 - `ReplayResponse` dropped: replay returns `{"status": "pending"}` as a plain dict.
 
-## Deferred trims (Phase 6)
-- Inline `_sql_adapters` and `_app_state` into `create_app` in `main.py`.
-- Move the shared test fixtures into a root conftest or helpers module.
-- Then delete `tests/api/__init__.py` and `tests/e2e/__init__.py`.
+## Deferred trims (done in Phase 6)
+- Done: service construction and the logging and bootstrap-token helpers are inlined into `create_app`;
+  `wiring.py` keeps only `sql_adapters`, which the pull e2e test reuses.
+- Done: shared helpers are in `tests/helpers.py`, shared fixtures in the root `tests/conftest.py`.
+- Done: `tests/api/__init__.py`, `tests/e2e/__init__.py` and both sub-conftests are deleted.
 
 ## How to explain this phase in the interview
 "The webhook does three checks and one write: whose tenant, which source, is the signature right, then insert

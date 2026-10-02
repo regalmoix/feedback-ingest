@@ -1,7 +1,7 @@
 import json
 
 import pytest
-from api.conftest import KEY_A, fixture_body, memory_adapters, seed_source
+from helpers import KEY_A, fixture_body, memory_adapters, seed_source
 
 from feedback_ingest.adapters.memory.clock import FixedClock
 from feedback_ingest.connectors.registry import CONNECTORS

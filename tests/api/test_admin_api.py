@@ -2,8 +2,8 @@ from collections.abc import Iterator
 
 import pytest
 from fastapi.testclient import TestClient
+from helpers import KEY_A, KEY_B, app_state, fixture_body, push
 
-from api.conftest import KEY_A, KEY_B, app_state, fixture_body, push
 from feedback_ingest.adapters.memory.clock import FixedClock
 from feedback_ingest.api.deps import Adapters
 from feedback_ingest.config import Settings
@@ -68,7 +68,7 @@ def test_replay_of_a_processing_event_is_409(
 
 @pytest.fixture
 def flaky_client(adapters: Adapters) -> Iterator[TestClient]:
-    settings = Settings(worker_enabled=False, max_attempts=2)
+    settings = Settings(worker_enabled=False, scheduler_enabled=False, max_attempts=2)
     with TestClient(create_app(settings, adapters=adapters)) as client:
         yield client
 
