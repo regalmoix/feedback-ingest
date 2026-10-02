@@ -16,6 +16,13 @@ write it. Repo-agnostic: copy this file as is and put repo-specific rules in `CL
 Keep the orchestrator's own token use for thinking: planning, design docs, deciding between conflicting
 findings, final review. Everything mechanical goes to agents.
 
+Model tiers, cheapest that can do the job:
+- Research, web reading, summarising, bulk doc drafting from sources, fixture generation: the fast tier
+  (for example Sonnet).
+- Implementation, fixes, reviews, mutation testing, deck building: the capable tier (for example Opus).
+- Plans, design docs, council framing and synthesis, vetting conflicting findings, final judgement: the
+  premium tier (for example Fable), and nothing else. If a task could be a Sonnet task, it is.
+
 ## 2. Skills every agent loads first
 
 Vendor the skills under `.claude/skills/` so they work without plugin setup, then every implementer and
