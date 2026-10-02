@@ -23,7 +23,7 @@ _v1, expanded in phase 6._
                                    Worker (asyncio loop, lease + retry/backoff)
                                             │  CONNECTORS[source.type].transform(raw) → FeedbackRecord
                                             ▼
-                                   FeedbackRepository.upsert (UNIQUE dedupe_key)
+                                   FeedbackStore.upsert (UNIQUE source_id+external_id)
                                             │
                                  raw_events.status = processed | failed(n) | dead (DLQ)
                                             │
@@ -35,6 +35,6 @@ _v1, expanded in phase 6._
 - `Tenant(id, name, api_key_hash)`
 - `Source(id, tenant_id, type: SourceType, name, mode: pull|push, config: dict, webhook_secret, cursor: dict|None)`
 - `RawEvent(id, tenant_id, source_id, payload: dict, received_at, status: EventStatus, attempts, next_attempt_at, error)`
-- `FeedbackRecord(id, tenant_id, source_id, source_type, external_id, dedupe_key, kind: FeedbackKind, title, text, author, language, rating, source_created_at, source_updated_at, ingested_at, metadata: dict)`
+- `FeedbackRecord(id, tenant_id, source_id, source_type, external_id, kind: FeedbackKind, deleted_at, connector_version, title, text, author, language, rating, source_created_at, source_updated_at, ingested_at, metadata: dict)`
 - Per-source metadata models: `DiscourseMetadata(topic_id, post_number, like_count, topic_title, url)`, `PlaystoreMetadata(app_version, device, country)`, `TwitterMetadata(country, retweets, handle)`, `IntercomMetadata(conversation_id, part_count, tags)`
-- Enums: `SourceType{discourse,playstore,twitter,intercom}`, `FeedbackKind{review,conversation,post,tweet}`, `EventStatus{pending,processing,processed,failed,dead}`
+- Enums: `SourceType{discourse,playstore,twitter,intercom}`, `FeedbackKind{review,conversation,post}`, `EventStatus{pending,processing,processed,failed,dead}`

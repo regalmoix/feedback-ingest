@@ -1,5 +1,7 @@
 # Plan: Feedback Ingestion Service (take-home round 3)
 
+> Progress (2026-10-03): Phase 0 and Phase 1 committed after three review rounds; ADR-001..003 accepted; Phase 2–5 designs written in `docs/phases/`.
+
 ## Context
 
 The assignment ([docs/problem_statement.pdf](docs/problem_statement.pdf)) asks for a backend that ingests
@@ -22,14 +24,14 @@ Repo state: empty except the PDF. Not a git repo yet. Toolchain present: uv 0.8,
 | Decision | Choice | Why | Why not the alternatives |
 |---|---|---|---|
 | Storage | SQLite file via SQLAlchemy 2.0, `DATABASE_URL` env | Zero infra for demo; swap to Postgres is a URL change; unique index = idempotency in the DB, not app code | Postgres+docker: demo friction. stdlib sqlite3: hand row-mapping, harder DB swap |
-| Async processing | DB-backed outbox (`raw_events` table is the queue) + in-process asyncio worker | Durable across restarts, no broker, replayable, one process to run | Redis/arq or Kafka: extra runtime; same repository interface lets us swap later. Sync inline: weak failure story |
+| Async processing | DB-backed inbox (`raw_events` table is both the durable log and the queue) + in-process worker thread | Durable across restarts, no broker, replayable, one process to run | Redis/arq or Kafka: extra runtime; same repository interface lets us swap later. Sync inline: weak failure story |
 | Connectors | All four: Discourse (pull, live), Playstore / Twitter / Intercom (push, fixtures) | Maximises "requirements addressed"; each ~40 lines | Fewer connectors proves less |
 | Idempotency | `dedupe_key = sha256(tenant_id, source_id, external_id)` with UNIQUE index; upsert last-writer-wins on `source_updated_at` | DB constraint beats app-level checks under concurrency | In-memory set / Redis set: lost on restart, second component |
 | Multi-tenancy | `tenant_id` column on every table; API key per tenant (`X-API-Key`); all repo queries tenant-scoped; push URL carries source id and is checked against tenant | Simple, auditable row-level isolation | Schema-per-tenant / DB-per-tenant: overkill for demo, discussed as scale path |
 | Raw retention | Every inbound payload stored verbatim in `raw_events` before any transform | Enables replay after a transformer bug, DLQ, audit | Transform-then-store loses the ability to recover |
 | Uniform record | One `feedback_records` table, typed common columns + `metadata` JSON validated by per-source Pydantic model | Uniform querying across sources, typed at the edge | Table-per-source: joins for cross-source queries, schema sprawl |
 | Extensibility | `SourceConnector` protocol + `CONNECTORS` registry dict; new source = one file + one registry line | Clear, demonstrable on whiteboard | Plugin entry points / dynamic import: speculative |
-| Infra swappability | Ports & adapters: every external interface (DB, queue, outbound HTTP, clock) is a `Protocol` in `ports/`, with one real adapter and one in-memory fake. Services depend only on ports | Swapping SQLite→Postgres or outbox→Kafka/SQS touches one adapter file; fakes make unit tests fast and prove the port has two implementations (satisfies ponytail's "no interface with one implementation") | Services calling SQLAlchemy/httpx directly: cheap now, rewrite later |
+| Infra swappability | Ports & adapters: every external interface (DB, queue, outbound HTTP, clock) is a `Protocol` in `ports/`, with one real adapter and one in-memory fake. Services depend only on ports | Swapping SQLite→Postgres or the table-queue→Kafka/SQS touches one adapter file (plus an honest change of retry model, see ADR-001); fakes make unit tests fast and prove the port has two implementations (satisfies ponytail's "no interface with one implementation") | Services calling SQLAlchemy/httpx directly: cheap now, rewrite later |
 | Web/HTTP | FastAPI + httpx (MockTransport in tests, no respx) | Standard, Pydantic-native, typed | Flask/Django: heavier or less typed |
 | Migrations | `metadata.create_all` at startup | Demo scope | Alembic: mentioned as prod path, not built |
 | Language detection | Field exists; filled from source if provided else `None` | Requirement is a common attribute, not a detector | langdetect/fastText: enrichment stage, discussed not built |
@@ -48,7 +50,7 @@ Operating model (from user):
 - `mypy --strict`, no `Any` outside the raw payload boundary (`dict[str, Any]` only for inbound JSON). Pydantic v2 models for every data shape crossing a boundary (API in/out, connector output, settings, stored rows via `model_validate`).
 - Services are classes (`IngestionService`, `PipelineService`, `PullService`, `WorkerService`, `SchedulerService`) constructed with their ports; no module-level state except the connector registry.
 - Public API of a module is the small set of methods a caller needs; helpers are `_private`. One responsibility per file, target ≤120 lines, split when larger.
-- Shared helpers live in `feedback_ingest/utils/` (`hashing.py` for dedupe key, `time.py` for a `Clock` port + `utcnow`, `signing.py` for HMAC) rather than being re-implemented.
+- Shared helpers live in `feedback_ingest/utils/` (`hashing.py` for dedupe key, `time.py` for a `Clock` port + `to_naive_utc`, `signing.py` for HMAC) rather than being re-implemented.
 - Minimal comments: only `# ponytail:` markers and the rare "why", never "what". Readable names do the explaining.
 - Tests: pytest strict, one `test_*.py` per module, fakes from `adapters/memory/` for unit tests, real SQLite for repository/e2e tests, `httpx.MockTransport` for outbound HTTP.
 
@@ -103,7 +105,7 @@ feedback_ingest/
   domain/{enums,models,metadata,errors}.py
   connectors/{base,discourse,playstore,twitter,intercom}.py
   ports/{stores,queue,http,clock}.py                     Protocols only: TenantStore, SourceStore, FeedbackStore, RawEventQueue, HttpClient, Clock
-  adapters/sqlalchemy/{db,tables,stores,outbox_queue}.py SQLite/Postgres via DATABASE_URL; outbox queue on raw_events table
+  adapters/sqlalchemy/{db,tables,stores,raw_event_queue}.py SQLite/Postgres via DATABASE_URL; durable-log queue on the raw_events table
   adapters/memory/{stores,queue,clock}.py                in-memory fakes (tests, and proof the ports swap)
   adapters/http/httpx_client.py
   services/{ingestion,pipeline,pull,worker,scheduler}.py service classes depending on ports only
@@ -111,7 +113,7 @@ feedback_ingest/
 tests/
   conftest.py  fixtures/*.json
   unit/        test_models.py test_connectors.py test_pipeline.py test_pull.py test_worker.py (memory adapters)
-  adapters/    test_sqlalchemy_stores.py test_outbox_queue.py (real SQLite file, lease + unique index)
+  adapters/    test_sqlalchemy_stores.py test_raw_event_queue.py (real SQLite file, lease + unique index)
   api/         test_push_api.py test_sources_api.py test_records_api.py test_tenancy.py test_admin_api.py
   e2e/         test_push_to_query.py test_pull_to_query.py test_restart_resume.py test_dlq_replay.py
   live/        test_discourse_live.py   (marker `live`, skipped by default)
@@ -128,7 +130,7 @@ docs/
   interview/firefight_runbook.md "client says reviews missing since yesterday" step-by-step
   interview/alternatives.md      every rejected option and why
   interview/extensions.md        new source in 5 steps, Kafka swap, Postgres swap, scale-out
-  interview/glossary.md          plain-language terms (outbox, DLQ, idempotency, cursor, HMAC, lease)
+  interview/glossary.md          plain-language terms (inbox/durable log, DLQ, idempotency, cursor, HMAC, lease)
   slides/deck.pptx               built last from 00_architecture + interview docs (private, local file)
 ```
 
@@ -141,13 +143,13 @@ Each phase = (a) Fable writes a 1-page LLD in `docs/phases/NN_*.md` in plain lan
 ### Phase 0 — Scaffold + ADRs (no business code)
 - `git init` (private, never pushed publicly), `uv init`, pyproject with strict tool config, empty package, `tests/conftest.py`, README skeleton, `docs/00_architecture.md` v1, `.gitignore`.
 - Copy this plan to `docs/PLAN.md`; every later phase updates its status line there.
-- 🏛️ Council #1: storage+queue shape (confirm SQLite outbox vs alternatives) → `ADR-001`.
+- 🏛️ Council #1: storage+queue shape (confirm SQLite inbox-table queue vs alternatives) → `ADR-001`.
 - 🏛️ Council #2: uniform record schema + dedupe key + metadata-as-JSON → `ADR-002`.
 - Verify: `uv run pytest` (0 tests, exit 0), `mypy`, `ruff` all pass on empty package.
 
 ### Phase 1 — Domain, ports, adapters
 - Enums, Pydantic models, per-source metadata models, `domain/errors.py`.
-- `ports/`: `TenantStore.by_api_key`, `SourceStore.get/list_pull/create/update_cursor`, `FeedbackStore.upsert/list`, `RawEventQueue.enqueue/claim(lease)/mark_processed/mark_failed/mark_dead/replay/list_by_status`, `HttpClient.get_json`, `Clock.now`.
+- `ports/`: `TenantStore.by_api_key`, `SourceStore.get/list_pull/create/update_cursor`, `FeedbackStore.upsert/list`, `RawEventQueue.enqueue/claim(lease)/mark_processed(event)/mark_failed(event, error, next_attempt_at)/mark_dead(event, error)/requeue/list_by_status`, `HttpClient.get_json`, `Clock.now`.
 - `adapters/sqlalchemy/`: tables (UNIQUE `dedupe_key`, index `(tenant_id, source_id, status, next_attempt_at)` on raw_events), engine from `DATABASE_URL`, one class per port. `adapters/memory/`: dict-backed fakes with identical behaviour.
 - `utils/hashing.dedupe_key`, `utils/time` (`SystemClock`), `utils/signing` (HMAC).
 - Tests: a shared contract test module runs the same cases against both the SQLite and memory adapters (upsert twice → one row; older `source_updated_at` doesn't overwrite; claim leases and skips leased; lease expiry re-claims; tenant A cannot read B).
