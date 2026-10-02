@@ -1,0 +1,5 @@
+{
+  "type": "notification_event",
+  "topic": "conversation.user.replied",
+  "data": {"item": {"type": "conversation", "id": "conv_test_1002", "state": "open"}}
+}

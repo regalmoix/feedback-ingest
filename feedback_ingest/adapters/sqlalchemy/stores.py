@@ -5,7 +5,7 @@ from sqlalchemy.orm import sessionmaker
 
 from feedback_ingest.adapters.sqlalchemy.tables import FeedbackRecordRow, SourceRow, TenantRow
 from feedback_ingest.domain.enums import FeedbackKind, SourceMode, UpsertOutcome
-from feedback_ingest.domain.errors import NotFoundError
+from feedback_ingest.domain.errors import NotFoundError, check_limit
 from feedback_ingest.domain.models import FeedbackRecord, Source, Tenant
 from feedback_ingest.utils.time import to_naive_utc
 
@@ -111,7 +111,7 @@ class SqlFeedbackStore:
             query = query.where(FeedbackRecordRow.deleted_at.is_(None))
         query = query.order_by(FeedbackRecordRow.source_created_at, FeedbackRecordRow.id)
         with self._read.begin() as session:
-            return [_to_record(row) for row in session.scalars(query.limit(limit))]
+            return [_to_record(row) for row in session.scalars(query.limit(check_limit(limit)))]
 
 
 def _to_record(row: FeedbackRecordRow) -> FeedbackRecord:

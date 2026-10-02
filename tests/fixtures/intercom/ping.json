@@ -1,0 +1,7 @@
+{
+  "type": "notification_event",
+  "topic": "ping",
+  "id": "notif_test_ping",
+  "created_at": 1771000000,
+  "data": {"item": {"type": "ping", "message": "something interesting happened"}}
+}

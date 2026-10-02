@@ -1,7 +1,7 @@
 from datetime import datetime
 
 from feedback_ingest.domain.enums import FeedbackKind, SourceMode, UpsertOutcome
-from feedback_ingest.domain.errors import NotFoundError
+from feedback_ingest.domain.errors import NotFoundError, check_limit
 from feedback_ingest.domain.models import FeedbackRecord, Source, Tenant
 from feedback_ingest.utils.time import to_naive_utc
 
@@ -94,4 +94,4 @@ class MemoryFeedbackStore:
             and (since is None or r.source_created_at >= to_naive_utc(since))
             and (include_deleted or r.deleted_at is None)
         ]
-        return sorted(matches, key=lambda r: (r.source_created_at, r.id))[:limit]
+        return sorted(matches, key=lambda r: (r.source_created_at, r.id))[: check_limit(limit)]

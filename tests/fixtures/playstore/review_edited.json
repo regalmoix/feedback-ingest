@@ -1,0 +1,23 @@
+{
+  "reviewId": "gp:AOqpTEST-review-0001",
+  "authorName": "Jordan Sample",
+  "comments": [
+    {
+      "userComment": {
+        "text": "Fixed in 4.2.2, thanks. Checkout works after rotating now.",
+        "lastModified": {"seconds": "1770086400", "nanos": 0},
+        "starRating": 4,
+        "reviewerLanguage": "en",
+        "device": "testdevice_a1",
+        "androidOsVersion": 34,
+        "appVersionName": "4.2.2"
+      }
+    },
+    {
+      "developerComment": {
+        "text": "Thanks for the update!",
+        "lastModified": {"seconds": "1770090000", "nanos": 0}
+      }
+    }
+  ]
+}

@@ -15,7 +15,7 @@ from contract import (
 )
 from sqlalchemy.exc import IntegrityError
 
-from feedback_ingest.domain.enums import FeedbackKind, SourceMode, SourceType
+from feedback_ingest.domain.enums import EventStatus, FeedbackKind, SourceMode, SourceType
 from feedback_ingest.domain.errors import NotFoundError
 from feedback_ingest.domain.metadata import TwitterMetadata
 
@@ -72,9 +72,19 @@ def duplicates_and_unknown_ids_raise(a: Adapters) -> None:
         a.sources.update_cursor("missing", "cursor")
 
 
+def list_limits_below_one_raise(a: Adapters) -> None:
+    seed(a)
+    for limit in (0, -1):
+        with pytest.raises(ValueError, match="limit"):
+            a.feedback.list_for_tenant(TENANT_A.id, limit=limit)
+        with pytest.raises(ValueError, match="limit"):
+            a.queue.list_by_status(EventStatus.PENDING, limit=limit)
+
+
 STORE_CASES: list[Case] = [
     same_external_id_in_two_sources_is_two_rows,
     tenants_are_isolated,
     filters_and_lookups_match,
     duplicates_and_unknown_ids_raise,
+    list_limits_below_one_raise,
 ]

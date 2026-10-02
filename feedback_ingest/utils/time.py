@@ -10,3 +10,7 @@ def to_naive_utc(value: datetime) -> datetime:
 class SystemClock:
     def now(self) -> datetime:
         return datetime.now(UTC).replace(tzinfo=None)
+
+
+def from_epoch(seconds: int) -> datetime:
+    return datetime.fromtimestamp(seconds, UTC).replace(tzinfo=None)

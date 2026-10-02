@@ -1,0 +1,18 @@
+{
+  "reviewId": "gp:AOqpTEST-review-0001",
+  "authorName": "Jordan Sample",
+  "comments": [
+    {
+      "userComment": {
+        "text": "App crashes when I rotate the phone on the checkout screen.",
+        "lastModified": {"seconds": "1770000000", "nanos": 0},
+        "starRating": 2,
+        "reviewerLanguage": "en",
+        "device": "testdevice_a1",
+        "androidOsVersion": 34,
+        "appVersionCode": 4021,
+        "appVersionName": "4.2.1"
+      }
+    }
+  ]
+}

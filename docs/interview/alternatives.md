@@ -1,0 +1,73 @@
+# Alternatives: what we chose, what we didn't, and when we would
+
+Use this when an interviewer says "why not X?". Every row comes from ADR-001, ADR-002, ADR-003 or the PLAN.md Decisions table. For any term you don't know, see `glossary.md`.
+
+## Read this first
+
+- **Built** means it is in the code today (Phase 1: models, ports, SQLite and memory adapters).
+- **Planned (Phase N)** means it is designed in `docs/phases/` but not written yet.
+- A **source instance** is one tenant's configured connection (a row in `sources`). A **source type** is the kind of service, like Playstore.
+- `raw_events` is the table where every incoming payload is saved before we reply. It is also the work queue.
+- A **connector** is the code for one source type. It turns a raw payload into feedback records.
+- One correction to know: the PLAN.md Decisions table first said `dedupe_key = sha256(...)`. ADR-002 replaced that with `UNIQUE(source_id, external_id)`. The ADR wins.
+
+## The table
+
+| Decision | What we chose | Alternative | Why not now | When it becomes the right call |
+|---|---|---|---|---|
+| Database | SQLite through SQLAlchemy 2.0, URL from `DATABASE_URL` (built) | Postgres in docker-compose | More infra to run and explain in a demo. Grading is on code and extensibility, not ops. | When we need more than one writer at a time. It is a `DATABASE_URL` change plus two queries: the claim, and the upsert (its `ponytail:` note says so). |
+| Database library | SQLAlchemy 2.0 | stdlib `sqlite3` | Hand-written row mapping, and a harder switch to Postgres. | For a small one-file script that will never leave SQLite. |
+| Sync or async DB | Sync SQLAlchemy sessions, run through a threadpool | asyncio with `aiosqlite` | Mixing sync and async sessions is where the hours go. | When the whole stack goes async together and one process must wait on many I/O calls at once. |
+| How work is queued | `raw_events` table is the durable queue (built), read by an in-process worker (planned, Phase 3) | Redis with arq or rq | A second system to run. The table already gives durability, retries and replay by ID. | When polling the database for work becomes the bottleneck, or several services must share one queue. |
+| How work is queued | Same | Kafka or SQS | No per-message delayed retry and no lookup by ID. Heavy infra for a take-home. It changes the retry model: Kafka needs retry topics, SQS uses visibility timeouts. | When volume or the number of consumers outgrows one table, and we accept a new queue adapter plus a new retry model. |
+| How work is queued | Same | Synchronous inline (transform inside the request) | A crash or slow transform loses the event or makes the sender time out. Nothing to replay. | Only for a one-off script run by hand, where the operator can simply run it again. |
+| Keep raw payloads | Store every payload as-is before any transform | Transform first, store only the record | Loses the ability to recover after a transformer bug. No dead letter, no audit. | Not really. The answer to cost or personal data is a retention purge after N days, which is a named gap, not built. |
+| Claim query | One conditional `UPDATE ... RETURNING` that is safe on SQLite (built) | Use `FOR UPDATE SKIP LOCKED` now | SQLite has no row locks. SQLAlchemy silently ignores `with_for_update(skip_locked=True)` on SQLite, so it would do nothing. | On Postgres with many workers. Only that one query changes. Never say it runs today. |
+| Name of the table's role | "Inbox" or "durable log" | "Outbox" | An outbox holds messages we will send out. This table holds what came in. | If we ever add write-back to sources (named as an extension in ADR-003), the table of pending sends would be the outbox. |
+| Ports | A port on every external interface, each used by at least one test through its in-memory fake (built) | Cut every port except `Connector` (three council advisors) | The owner required the seams. Each one keeps a migration to one file. The fake proves the port has two real implementations. | If a port stops being used by any test, it is no longer earning its place and should go. |
+| Clock | Keep a `Clock` port (built) | Drop it as gold-plating | Retry and lease tests use the fake clock so they don't really sleep. | If no test needs a fixed time any more. |
+| Where services get data | Services call ports only (planned, Phase 3) | Services call SQLAlchemy or httpx directly | Cheap now, rewrite later when the DB or queue changes. | For a throwaway script with no tests. |
+| Scope of `raw_events` | Durable log plus filtered replay | Pitch it as a platform: append-only log with enrichment and LLM stages | Extra surface to build and defend. | When a real downstream stage exists, like language detection. Mention it only as "what comes next". |
+| Where dedupe lives | Unique constraints in the database (built) | In-memory set or Redis set | A set in memory is lost on restart. Redis is a second component. A DB constraint holds under concurrency. | Never as the source of truth. At most a cache in front of the constraint. |
+| Record identity | `UNIQUE(source_id, external_id)` (built) | sha256 `dedupe_key` (first draft in PLAN.md) | Same guarantee, but nobody can read it. The tenant is already implied by the source. | If an item's identity ever spans several awkward fields, a hash could stand in for a long composite key. |
+| Record identity | Same | Content-hash dedupe | An edit changes the hash, so an edited review becomes a second record. Two people writing "app crashes" would merge. | Where there is no natural id. That is exactly where we use it: a delivery with no event id gets `payload_hash` as its `external_event_id`. |
+| Record identity | Same | Key on the upstream identity (app package plus review id) | Needs a different key format for every source. The re-add risk is solved another way: sources are disabled, never hard-deleted. | If sources had to be truly deleted and re-created as new rows. |
+| Tie-break in the upsert | `>=`: on equal times, the later arrival wins | `>`: on equal times, keep the old row | Duplicate deliveries are stopped in `raw_events` and never reach the upsert. So a tie means two real versions, and the later one is the better guess. | If duplicates could reach the upsert, for example if the `raw_events` unique key were removed. |
+| Record shape | One `feedback_records` table, typed common columns plus JSON `metadata` checked by Pydantic (built) | One table per source type | Every cross-source query becomes a `UNION`. Every new source needs a migration. | When one source's data dwarfs the rest and needs its own indexes and storage. |
+| Record shape | Same | EAV (one row per attribute in a key-value table) | Loses types. Simple reads turn into pivots. | When end users define their own fields at runtime and we cannot know them in code. |
+| Record shape | One current row per item | Append-only versioned records | Every query needs "latest version per item" logic. History already lives in `raw_events`. | When users need to query how an item changed over time. |
+| Record shape | One row per Intercom conversation, messages joined into `text`, parts in metadata | Separate `conversations` parent table | A second entity only Intercom uses. Parts in metadata plus the full-snapshot rule cover it. | When several sources have threads and people query single messages. |
+| Record shape | Intercom pushes are full snapshots, upserted as-is | A merge-by-part-id step | Intercom's real webhooks send the whole conversation, so a merge is not needed. | When a source sends only deltas. Even then, the rule says fetch the full object first if the source has an API. |
+| Record shape | Keep only `connector_version` from the growth ideas | `parent_external_id`, Postgres generated columns, an enrichment stage | Not needed, don't fit SQLite, and each one is another thing to defend. | After a Postgres move, when a real query needs one of them. |
+| Language | `language` column, filled only when the source sends it | Built-in language detection (langdetect or fastText) | It is a model choice with its own accuracy problems, and it is not ingestion. | As a later enrichment step that writes the same column. No schema change. |
+| Cross-source duplicates | Out of scope: the same complaint on Twitter and Discourse stays two records | Match them during ingestion | Needs content similarity. That is analysis, not ingestion. | In an analysis layer on top of the records. |
+| Connector shape | `typing.Protocol` plus a registry dict, no inheritance (planned, Phase 2) | Abstract base class with template methods | Hides control flow in the base class. Each source fights the template: Intercom joins parts, Twitter remaps ids. | If many connectors share long, truly identical steps. Even then, a shared helper function comes first. |
+| Connector shape | Same | Config-driven mapping (declarative JSON-path fields) | Field mapping is not the hard part. Identity, edits, threading and paging are. The mapping would grow into a small language with its own tests. | When many simple, flat sources arrive. A mapped connector can fit the same Protocol later. |
+| Connector shape | One class per source does fetch and transform | Separate Fetcher and Transformer classes | Twice the registration for no gain. A fetcher must produce what its own transformer reads. `PULLERS` already gives the split where it matters. | When one fetcher has to feed several different transformers. |
+| Connector shape | Static `CONNECTORS` and `PULLERS` dicts | Plugin discovery via entry points | Nobody installs third-party connectors here. A static dict can be searched, type-checked and tested for completeness. | When outside teams ship connectors as separate packages. |
+| Connector shape | Static registries | `runtime_checkable` Protocol found by `isinstance` | `isinstance` on a Protocol checks only that method names exist, not signatures. Weaker than mypy. | Rarely. Static typing already does the job better. |
+| Connector shape | Structural typing: connectors inherit nothing | Connectors explicitly inherit the Protocol | It only moves where the error shows up. The signature default is a plain function, so nothing needs inheriting. | If we wanted default methods to live on the Protocol itself. |
+| Connector extras | `config: dict[str, str]` plus `check_source` | A Config model per connector | Enough for four sources. | When a self-serve UI needs a JSON schema and a form for setting up a source. |
+| Connector extras | Plain connectors | `MappedConnector` | Same reasons as config-driven mapping. | Same as config-driven mapping. |
+| Connector extras | Not built | `ReplyConnector` write-back, Backfill capability | Not in the brief. | When the product needs replies to reviews, or a backfill for a newly connected push source. Each is one more Protocol and one more registry. |
+| Connector extras | A script over `raw_events` (named, not built) | Shadow-running v2 as a feature | Raw is kept, so running v2 and diffing against stored records is just a script. | When transform changes are frequent and risky enough to automate the diff. |
+| Transform output | `transform` returns a list of 0 to N records | Return exactly one record | A ping or bot message has no honest single-record answer. One payload can hold several items. | Not needed. A list already covers it. |
+| Transform output | A plain list | A result type with skip and delete cases | Empty list means skip. `deleted_at` set means delete. Several items means many. | If callers needed a reason for every skip. |
+| Registries | `CONNECTORS` and `PULLERS` | A separate PUSH registry too | Every connector can transform a pushed payload, so it would just copy `CONNECTORS`. | If some type could pull but never accept a pushed payload. |
+| What transform receives | The whole `Source`, with `webhook_secret` as `SecretStr` | A slim `SourceRef` model | `SecretStr` prints asterisks everywhere (logs, `repr`, the API), so it fixes the leak everywhere with no new model. | If we had to stop transforms reading other fields, like `cursor`, by type rather than by rule. |
+| Twitter webhooks | Fixtures stand in for a poller | Add a `handshake()` method now for Twitter's CRC check | No source here has a live webhook that needs one. | When Twitter becomes a real webhook. |
+| Tenancy | `tenant_id` on every table, API key per tenant, composite foreign keys (built) | Schema-per-tenant or database-per-tenant | Overkill for a demo. | As the scale path, when a customer needs physical separation or per-tenant backup and restore. |
+| Migrations | `metadata.create_all` (today in `tests/conftest.py`; at app startup once the server exists, planned Phase 3) | Alembic | Demo scope. Listed in PLAN.md as out of scope. | The first time real data exists and a schema change must keep it. |
+| Web framework | FastAPI plus httpx (planned, Phase 3; httpx client built) | Flask or Django | Heavier or less typed. | When a project already runs on one of them. |
+| Coverage | All four connectors (planned, Phase 2) | Build fewer connectors | Fewer connectors proves less of the brief. | Never for this brief. |
+
+## If they push: the honest one-liners
+
+1. "You're right that Kafka gives ordering per partition and huge throughput; here it would need a new queue adapter and a different retry model, because Kafka has no per-message delay, and that is where the line is."
+2. "Postgres is where this goes next: it is a `DATABASE_URL` change plus two queries, the claim becoming `SKIP LOCKED` and the upsert becoming `INSERT ... ON CONFLICT`, and I would do it the day we need more than one writer."
+3. "Redis would work, but it is a second system to run, and the table already gives me durability, retries and replay by ID, so I'd add it only when polling the database becomes the bottleneck."
+4. "Processing inline is simpler, but a crash mid-request loses the event and leaves nothing to replay, so I save first and say yes second."
+5. "An abstract base class gives the same type check; I chose a Protocol because each source fights a shared template, and mypy still catches a broken connector at the registry line."
+6. "Config-driven mapping solves the easy part; identity, edits, threading and paging are the hard part, and a mapped connector can still be added later behind the same Protocol."
+7. "A content hash turns every edit into a new record, so the source's own id is the identity, and the full history is already kept in `raw_events`."
+8. "Schema-per-tenant gives stronger isolation; here the database already refuses a row whose tenant differs from its source, and per-tenant schemas are the scale path when a customer needs physical separation."

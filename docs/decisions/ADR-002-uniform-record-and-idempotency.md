@@ -82,7 +82,7 @@ There is no `raw_event_id` column: every input payload stays in `raw_events` und
 
 ### Update rule (the upsert)
 
-There is one statement, an `INSERT ... ON CONFLICT (source_id, external_id) DO UPDATE ... WHERE`:
+The adapter reads the existing row and then inserts or updates, inside one `BEGIN IMMEDIATE` transaction so no other writer can interleave (a single `INSERT ... ON CONFLICT ... DO UPDATE ... WHERE` is the Postgres-scale upgrade, noted in a `ponytail:` comment). The rule it applies:
 
 ```sql
 WHERE COALESCE(excluded.source_updated_at, excluded.source_created_at)
@@ -139,7 +139,7 @@ General rule: every write must be a full snapshot of the item.
 ### `raw_events` duplicates
 
 - `UNIQUE(source_id, external_event_id)`. `external_event_id` is the source's own event id when it sends one. Otherwise it is the sha256 of the payload as canonical JSON (`json.dumps(sort_keys=True)`).
-- Inserts use `ON CONFLICT DO NOTHING`, and the caller still gets `202`. A duplicate webhook is stored once and processed once.
+- A duplicate `(source_id, external_event_id)` is detected inside the same write transaction and the insert is skipped; the caller still gets `202` with `duplicate: true`. A duplicate webhook is stored once and processed once.
 - This is the only hash in the design. It exists because a delivery has no natural id, while a feedback item always has one.
 - The webhook URL carries the source id. Its signature is checked against `source.webhook_secret` before anything is written to `raw_events`.
 - The pull cursor moves forward only after the raw rows are committed. The overlap window then re-sends a few items, and the rule above absorbs them.

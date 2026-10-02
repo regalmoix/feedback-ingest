@@ -1,0 +1,22 @@
+{
+  "type": "notification_event",
+  "topic": "conversation.user.created",
+  "id": "notif_test_0001",
+  "created_at": 1771000000,
+  "data": {
+    "item": {
+      "type": "conversation",
+      "id": "conv_test_1001",
+      "created_at": 1771000000,
+      "updated_at": 1771000000,
+      "state": "open",
+      "source": {
+        "subject": "Billing page shows wrong currency",
+        "body": "<p>The billing page shows <b>USD</b> but my account is in EUR.</p>",
+        "author": {"type": "user", "name": "Riley Placeholder"}
+      },
+      "conversation_parts": {"conversation_parts": []},
+      "tags": {"tags": [{"name": "billing"}]}
+    }
+  }
+}

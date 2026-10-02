@@ -1,0 +1,10 @@
+{
+  "id": "1900000000000000001",
+  "text": "@exampleapp the new search is so much faster, nice work",
+  "created_at": "2026-03-01T18:20:00.000Z",
+  "lang": "en",
+  "author": {"id": "4400000001", "username": "sample_tweeter"},
+  "edit_history_tweet_ids": ["1900000000000000001"],
+  "public_metrics": {"retweet_count": 3, "like_count": 17, "reply_count": 1},
+  "country": "CA"
+}

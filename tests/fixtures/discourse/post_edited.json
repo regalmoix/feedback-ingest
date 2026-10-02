@@ -1,0 +1,14 @@
+{
+  "id": 9001,
+  "name": "Avery Example",
+  "username": "avery_example",
+  "created_at": "2026-02-10T09:15:00.000Z",
+  "updated_at": "2026-02-11T14:30:00.000Z",
+  "cooked": "<p>Dark mode makes the <strong>export</strong> button invisible. Still happens in 2.4.</p>",
+  "post_number": 3,
+  "topic_id": 512,
+  "topic_slug": "dark-mode-export-button",
+  "topic_title": "Dark mode export button",
+  "like_count": 6,
+  "deleted_at": null
+}

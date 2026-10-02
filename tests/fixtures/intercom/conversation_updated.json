@@ -1,0 +1,46 @@
+{
+  "type": "notification_event",
+  "topic": "conversation.admin.replied",
+  "id": "notif_test_0002",
+  "created_at": 1771003600,
+  "data": {
+    "item": {
+      "type": "conversation",
+      "id": "conv_test_1001",
+      "created_at": 1771000000,
+      "updated_at": 1771003600,
+      "state": "closed",
+      "source": {
+        "subject": "Billing page shows wrong currency",
+        "body": "<p>The billing page shows <b>USD</b> but my account is in EUR.</p>",
+        "author": {"type": "user", "name": "Riley Placeholder"}
+      },
+      "conversation_parts": {
+        "conversation_parts": [
+          {
+            "id": "part_test_2",
+            "part_type": "comment",
+            "body": "<p>Thanks, it shows EUR now.</p>",
+            "created_at": 1771003000,
+            "author": {"type": "user", "name": "Riley Placeholder"}
+          },
+          {
+            "id": "part_test_1",
+            "part_type": "comment",
+            "body": "<p>Fixed &mdash; please refresh.</p>",
+            "created_at": 1771002000,
+            "author": {"type": "admin", "name": "Support Bot Example"}
+          },
+          {
+            "id": "part_test_3",
+            "part_type": "close",
+            "body": null,
+            "created_at": 1771003600,
+            "author": {"type": "admin", "name": "Support Bot Example"}
+          }
+        ]
+      },
+      "tags": {"tags": [{"name": "billing"}, {"name": "resolved"}]}
+    }
+  }
+}

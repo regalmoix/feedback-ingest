@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta
 
 from feedback_ingest.domain.enums import EventStatus
+from feedback_ingest.domain.errors import check_limit
 from feedback_ingest.domain.models import RawEvent
 from feedback_ingest.utils.time import to_naive_utc
 
@@ -79,7 +80,7 @@ class MemoryRawEventQueue:
             for e in self._events.values()
             if e.status == status and (tenant_id is None or e.tenant_id == tenant_id)
         ]
-        return sorted(matches, key=lambda e: (e.received_at, e.id))[:limit]
+        return sorted(matches, key=lambda e: (e.received_at, e.id))[: check_limit(limit)]
 
     def counts(self, tenant_id: str | None = None) -> dict[EventStatus, int]:
         result = dict.fromkeys(EventStatus, 0)

@@ -14,8 +14,8 @@ class HttpxClient:
 
     def get_json(self, url: str, params: dict[str, str]) -> dict[str, Any]:
         try:
-            response = self._client.get(url, params=params)
-        except httpx.InvalidURL as exc:
+            response = self._client.get(url, params=params or None)
+        except (httpx.InvalidURL, httpx.UnsupportedProtocol) as exc:
             raise TransformError(str(exc)) from exc
         except httpx.RequestError as exc:
             raise TransientError(str(exc)) from exc

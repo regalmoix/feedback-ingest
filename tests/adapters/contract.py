@@ -67,7 +67,7 @@ def record(src: Source, external_id: str, created: datetime, **changes: object) 
         ingested_at=created,
         deleted_at=None,
         connector_version=1,
-        metadata=PlaystoreMetadata(app_version="1.0", device="pixel", country="US"),
+        metadata=PlaystoreMetadata(app_version="1.0", device="pixel", android_os_version=34),
     )
     return FeedbackRecord.model_validate(base.model_dump() | changes)
 
