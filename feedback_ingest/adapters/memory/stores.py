@@ -40,12 +40,20 @@ class MemorySourceStore:
         )
 
     def list_by_mode(self, mode: SourceMode) -> list[Source]:
-        return sorted((s for s in self._sources.values() if s.mode == mode), key=lambda s: s.id)
+        return sorted(
+            (s for s in self._sources.values() if s.mode == mode and s.enabled), key=lambda s: s.id
+        )
 
     def update_cursor(self, source_id: str, cursor: str) -> None:
         if source_id not in self._sources:
             raise NotFoundError(source_id)
         self._sources[source_id] = self._sources[source_id].model_copy(update={"cursor": cursor})
+
+    def set_enabled(self, source_id: str, tenant_id: str, enabled: bool) -> None:
+        source = self.get(source_id, tenant_id)
+        if source is None:
+            raise NotFoundError(source_id)
+        self._sources[source_id] = source.model_copy(update={"enabled": enabled})
 
 
 # ponytail: no FK check in the fake; the SQLite contract test covers tenant mismatch
@@ -74,6 +82,12 @@ class MemoryFeedbackStore:
             }
         )
         return UpsertOutcome.UPDATED
+
+    def get(self, record_id: str, tenant_id: str) -> FeedbackRecord | None:
+        return next(
+            (r for r in self._records.values() if r.id == record_id and r.tenant_id == tenant_id),
+            None,
+        )
 
     def list_for_tenant(  # noqa: PLR0913  keyword-only query filters
         self,

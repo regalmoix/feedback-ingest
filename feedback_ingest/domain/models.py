@@ -37,6 +37,7 @@ class Source(_Model):
     config: Mapping[str, str]
     webhook_secret: SecretStr | None = None
     cursor: str | None
+    enabled: bool = True
 
     @model_validator(mode="after")
     def _push_needs_secret(self) -> Self:

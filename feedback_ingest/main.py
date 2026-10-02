@@ -15,7 +15,7 @@ from feedback_ingest.adapters.sqlalchemy.stores import (
     SqlTenantStore,
 )
 from feedback_ingest.adapters.sqlalchemy.tables import Base
-from feedback_ingest.api import admin, health, ingest
+from feedback_ingest.api import admin, health, ingest, records, sources, tenants
 from feedback_ingest.api.deps import Adapters, AppState
 from feedback_ingest.api.errors import add_error_handlers
 from feedback_ingest.config import Settings
@@ -24,6 +24,7 @@ from feedback_ingest.services.pipeline import PipelineService
 from feedback_ingest.services.worker import WorkerService
 from feedback_ingest.utils.time import SystemClock
 
+_LOG = logging.getLogger("feedback_ingest")
 _LOG_KEYS = ("raw_event_id", "tenant_id", "source_id", "attempts")
 
 
@@ -89,6 +90,8 @@ def create_app(settings: Settings | None = None, adapters: Adapters | None = Non
             Base.metadata.create_all(engine)
             active = _sql_adapters(engine)
         ctx = _app_state(settings, active)
+        if settings.bootstrap_token == Settings.model_fields["bootstrap_token"].default:
+            _LOG.warning("FI_BOOTSTRAP_TOKEN is the default; set it before exposing /admin/tenants")
         app.state.ctx = ctx
         if settings.worker_enabled:
             ctx.worker.start()
@@ -101,7 +104,7 @@ def create_app(settings: Settings | None = None, adapters: Adapters | None = Non
 
     app = FastAPI(title="Feedback ingest", lifespan=lifespan)
     add_error_handlers(app)
-    for module in (ingest, admin, health):
+    for module in (ingest, admin, health, sources, records, tenants):
         app.include_router(module.router)
     return app
 

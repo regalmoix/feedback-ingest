@@ -81,10 +81,32 @@ def list_limits_below_one_raise(a: Adapters) -> None:
             a.queue.list_by_status(EventStatus.PENDING, limit=limit)
 
 
+def disabled_sources_leave_list_by_mode(a: Adapters) -> None:
+    seed(a)
+    a.sources.set_enabled(SOURCE_A2.id, TENANT_A.id, False)
+    assert a.sources.list_by_mode(SourceMode.PULL) == []
+    assert [s.enabled for s in a.sources.list_for_tenant(TENANT_A.id)] == [True, False]
+    with pytest.raises(NotFoundError):
+        a.sources.set_enabled(SOURCE_A2.id, TENANT_B.id, True)
+    a.sources.set_enabled(SOURCE_A2.id, TENANT_A.id, True)
+    assert a.sources.list_by_mode(SourceMode.PULL) == [SOURCE_A2]
+
+
+def get_record_is_tenant_scoped(a: Adapters) -> None:
+    seed(a)
+    stored = record(SOURCE_A1, "r1", a.clock.now())
+    a.feedback.upsert(stored)
+    assert a.feedback.get(stored.id, TENANT_A.id) == stored
+    assert a.feedback.get(stored.id, TENANT_B.id) is None
+    assert a.feedback.get("missing", TENANT_A.id) is None
+
+
 STORE_CASES: list[Case] = [
     same_external_id_in_two_sources_is_two_rows,
     tenants_are_isolated,
     filters_and_lookups_match,
     duplicates_and_unknown_ids_raise,
     list_limits_below_one_raise,
+    disabled_sources_leave_list_by_mode,
+    get_record_is_tenant_scoped,
 ]
