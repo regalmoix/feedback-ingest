@@ -1,7 +1,7 @@
 # Feedback Ingestion Service
 
 A multi-tenant backend that ingests customer feedback from heterogeneous sources (Intercom, Play Store,
-Twitter, Discourse) by both push (signed webhooks) and pull (polling Discourse's public API). Every payload
+Twitter, Discourse, and a custom webhook that takes Enterpret's public record shape) by both push (signed webhooks) and pull (polling Discourse's public API). Every payload
 is saved verbatim in a `raw_events` table before the API answers 202. A background worker transforms each
 one into a uniform, de-duplicated `FeedbackRecord` that keeps common fields (kind, text, author, language,
 rating, tenant, source) plus typed source-specific metadata. Failures retry with backoff, then park in a
@@ -20,14 +20,15 @@ uv run uvicorn feedback_ingest.main:app
 `scripts/demo.sh` (needs `uv`, `curl`, `jq`; uses `demo.db` and port 8000) runs the whole story:
 
 1. Starts the server and shows `/health`.
-2. Seeds two tenants (`acme`, `globex`), each with a Discourse pull source, two Play Store, one Twitter and one Intercom push source.
+2. Seeds two synthetic tenants: `lumenote` (consumer app: a Discourse pull source, two Play Store and one custom push source) and `brightwave` (B2B SaaS: Intercom, Twitter and custom push sources).
 3. Pushes the same signed Play Store review twice: `duplicate=false`, then `duplicate=true`.
 4. Pushes it to a second Play Store source of the same tenant.
-5. `acme` sees two review records (same `external_id`, two sources); `globex` sees none.
-6. A malformed payload goes dead; replay runs it again and it goes dead again.
-7. A live Discourse sync against meta.discourse.org (2021-01-01 to 2021-01-05) and the resulting posts.
-8. Twenty pushes queued with the worker off, `kill -9`, restart: the backlog drains.
-9. Stops the server.
+5. `lumenote` sees two review records (same `external_id`, two sources); `brightwave` sees none.
+6. One custom webhook batch becomes three records of three kinds; `kind=survey` lists the survey.
+7. A malformed payload goes dead; replay runs it again and it goes dead again.
+8. A live Discourse sync against meta.discourse.org (2021-01-01 to 2021-01-05) and the resulting posts.
+9. Twenty pushes queued with the worker off, `kill -9`, restart: the backlog drains.
+10. Stops the server.
 
 `uv run pytest -m live` runs the live Discourse test (`tests/live/test_discourse_live.py`, needs network).
 
@@ -83,6 +84,13 @@ All read from the environment by `feedback_ingest/config.py` (prefix `FI_`).
 | `GET /admin/queue` | `X-API-Key` | The tenant's raw-event counts per status |
 
 A source or event id that belongs to another tenant answers 404.
+
+Sources (`type` on `POST /v1/sources`): `discourse` (push or pull), `playstore`, `twitter`, `intercom`, and
+`custom`. A `custom` source's webhook body is Enterpret's public shape, `{"records": [{"id", "type",
+"createdAt", "text", "title"?, "author"?, "language"?, "rating"?, "updatedAt"?, "metadata"?}]}`, with
+`createdAt` in epoch seconds (or milliseconds), flat string/number/bool `metadata`, and `type` one of `REVIEW`,
+`CONVERSATION`, `FORUM_CONVERSATION_THREAD`, `SURVEY` (kinds review, conversation, post, survey). One push is
+one raw event; any other `type` sends the batch to the dead list.
 
 ## Docs
 

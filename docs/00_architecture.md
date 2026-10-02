@@ -77,6 +77,7 @@ flowchart LR
     PLAY["PlaystoreConnector"]
     TW["TwitterConnector"]
     IC["IntercomConnector"]
+    CUS["CustomConnector<br/>Enterpret webhook shape"]
   end
 
   subgraph PORTS["ports/ - Protocols"]
@@ -112,7 +113,7 @@ flowchart LR
   ING -.->|external_event_id| REG
   PULL -.->|pull| REG
   PIPE -.->|transform| REG
-  REG --- DIS & PLAY & TW & IC
+  REG --- DIS & PLAY & TW & IC & CUS
   TS & SS & FS & Q --- SQL
   TS & SS & FS & Q --- MEM
   HTTP --- HX
@@ -228,9 +229,9 @@ match the claim, so a slow worker whose lease was taken over cannot overwrite th
 flowchart LR
   KEY["X-API-Key header"] --> HASH["sha256_text"]
   HASH --> T["tenants row<br/>UNIQUE api_key_hash"]
-  T --> S1["source acme-android<br/>playstore, push"]
-  T --> S2["source acme-ios-wrapper<br/>playstore, push"]
-  T --> S3["source acme-forum<br/>discourse, pull"]
+  T --> S1["source lumenote-android<br/>playstore, push"]
+  T --> S2["source lumenote-android-beta<br/>playstore, push"]
+  T --> S3["source lumenote-community<br/>discourse, pull"]
   S1 & S2 & S3 --> RAW["raw_events<br/>FK source_id + tenant_id<br/>UNIQUE source_id + external_event_id"]
   S1 & S2 & S3 --> REC["feedback_records<br/>FK source_id + tenant_id<br/>UNIQUE source_id + external_id"]
 ```
@@ -257,9 +258,9 @@ flowchart LR
   rating, source_created_at, source_updated_at, ingested_at, deleted_at, connector_version, metadata)`
 - Metadata, one model per source: `DiscourseMetadata(topic_id, post_number, like_count, url)`,
   `PlaystoreMetadata(app_version, device, android_os_version)`, `TwitterMetadata(country, retweets, likes)`,
-  `IntercomMetadata(part_count, tags, state)`
-- Enums: `SourceType{discourse, playstore, twitter, intercom}`, `SourceMode{push, pull}`,
-  `FeedbackKind{review, conversation, post}`, `EventStatus{pending, processing, processed, failed, dead}`,
+  `IntercomMetadata(part_count, tags, state)`, `CustomMetadata(record_type, score, fields)`
+- Enums: `SourceType{discourse, playstore, twitter, intercom, custom}`, `SourceMode{push, pull}`,
+  `FeedbackKind{review, conversation, post, survey}`, `EventStatus{pending, processing, processed, failed, dead}`,
   `UpsertOutcome{inserted, updated, skipped_older}`
 
 ## Module map
@@ -282,7 +283,7 @@ Every `__init__.py` under `feedback_ingest/` is an empty package marker.
 | `api/tenants.py` | Tenant bootstrap behind `X-Bootstrap-Token`; returns the API key once |
 | `api/health.py` | Worker and scheduler liveness, failing pull-source count, queue counts; 503 when degraded |
 | `domain/enums.py` | `SourceType`, `SourceMode`, `FeedbackKind`, `EventStatus`, `UpsertOutcome` |
-| `domain/models.py` | `Tenant`, `Source`, `RawEvent`, `FeedbackRecord`, naive-UTC datetimes, kind per source |
+| `domain/models.py` | `Tenant`, `Source`, `RawEvent`, `FeedbackRecord`, naive-UTC datetimes, kind per source (`KIND_BY_SOURCE`), and per record type for `custom` (`KIND_BY_RECORD_TYPE`) |
 | `domain/metadata.py` | Per-source metadata models, discriminated by `source_type` |
 | `domain/errors.py` | `TransformError`, `TransientError`, `NotFoundError`, `UnauthorizedError`, `check_limit` |
 | `ports/stores.py` | `TenantStore`, `SourceStore`, `FeedbackStore` Protocols |
@@ -306,6 +307,7 @@ Every `__init__.py` under `feedback_ingest/` is an empty package marker.
 | `connectors/playstore.py` | Play Store review to record (developer replies dropped) |
 | `connectors/twitter.py` | Tweet to record |
 | `connectors/intercom.py` | Intercom conversation webhook to record; `ping` skipped, other topics rejected |
+| `connectors/custom.py` | Enterpret-shaped webhook batch (`{"records": [...]}`) to one record per entry; kind from each record's `type` |
 | `services/ingestion.py` | `IngestionService.accept`: build the `RawEvent`, enqueue, report duplicate |
 | `services/pipeline.py` | `PipelineService.process`: transform, upsert, then processed, failed with backoff, or dead |
 | `services/worker.py` | `WorkerService`: background thread that claims batches and calls the pipeline |
@@ -320,12 +322,12 @@ Every `__init__.py` under `feedback_ingest/` is an empty package marker.
 
 | Requirement | Level | Implemented in | Proved by |
 |---|---|---|---|
-| Heterogeneous sources: Intercom, Play Store, Twitter, Discourse | Must | `connectors/{intercom,playstore,twitter,discourse}.py`, `connectors/registry.py` | `tests/unit/connectors/test_contract.py`, `test_registry.py`, `test_{intercom,playstore,twitter,discourse}.py` |
+| Heterogeneous sources: Intercom, Play Store, Twitter, Discourse, plus a custom webhook in Enterpret's public shape | Must | `connectors/{intercom,playstore,twitter,discourse,custom}.py`, `connectors/registry.py` | `tests/unit/connectors/test_contract.py`, `test_registry.py`, `test_{intercom,playstore,twitter,discourse,custom}.py`, `tests/api/test_custom_webhook.py` |
 | Push integration | Must | `api/ingest.py`, `services/ingestion.py`, `utils/signing.py` | `tests/api/test_push_api.py`, `tests/e2e/test_push_to_query.py` |
 | Pull integration | Must | `services/pull.py`, `services/scheduler.py`, `api/sync.py`, `connectors/discourse_pull.py` | `tests/unit/services/test_pull.py`, `tests/unit/connectors/test_discourse_pull.py`, `tests/unit/services/test_scheduler.py`, `tests/api/test_sync_api.py`, `tests/e2e/test_pull_to_query.py`, `tests/live/test_discourse_live.py` (opt-in: `uv run pytest -m live`) |
 | Source-specific metadata (app version, country, ...) | Must | `domain/metadata.py`, each connector's `transform` | `tests/unit/test_models.py`, `tests/unit/connectors/test_contract.py`, the per-connector golden tests `tests/unit/connectors/test_{intercom,playstore,twitter,discourse}.py`, `tests/adapters/contract_upsert.py` (whole records, metadata included, round-tripped through SQL by `test_sqlalchemy.py`) |
 | Multi-tenancy | Must | `api/deps.py`, `api/tenants.py`, tenant-scoped stores, composite FKs in `adapters/sqlalchemy/tables.py` | `tests/adapters/contract_stores.py`, `tests/adapters/test_sqlalchemy.py`, `tests/api/test_records_api.py`, `tests/api/test_push_api.py`, `tests/api/test_admin_api.py` |
-| Uniform structure: record types (`kind`) and common attributes (language, tenant, source, ...) | Must | `domain/models.py` (`FeedbackRecord`, `KIND_BY_SOURCE`), `domain/enums.py` | `tests/unit/test_models.py`, `tests/unit/connectors/test_contract.py` |
+| Uniform structure: record types (`kind`) and common attributes (language, tenant, source, ...) | Must | `domain/models.py` (`FeedbackRecord`, `KIND_BY_SOURCE`, `KIND_BY_RECORD_TYPE`), `domain/enums.py` | `tests/unit/test_models.py`, `tests/unit/connectors/test_contract.py`, `tests/unit/connectors/test_custom.py` (survey kind, kind per record type) |
 | Idempotency (de-dupe) | Good-to-have | UNIQUE keys in `adapters/sqlalchemy/tables.py`, `SqlRawEventQueue.enqueue`, `SqlFeedbackStore.upsert` | `tests/e2e/test_push_to_query.py`, `tests/adapters/contract_queue.py`, `tests/adapters/contract_upsert.py` (incl. `same_version_from_a_newer_connector_replaces_the_row`), `tests/unit/services/test_pull.py` |
 | Multiple sources of the same type per tenant | Good-to-have | keys on `source_id`, `api/sources.py` | `tests/e2e/test_multi_source_same_type.py`, `tests/adapters/contract_stores.py` |
 | Beyond the brief: durable before ack, retry, dead letter, replay, restart | Extra | `services/pipeline.py`, `services/worker.py`, `api/admin.py`, `api/errors.py` | `tests/api/test_push_api.py::test_storage_down_is_503_never_202_and_logged`, `tests/api/test_admin_api.py::test_transient_failures_go_dead_then_replay_processes_after_the_fix`, `tests/unit/services/test_worker.py`, `tests/unit/services/test_pipeline.py`, `test_pipeline_failures.py`, `tests/e2e/test_dlq_replay.py`, `tests/e2e/test_restart_resume.py` |

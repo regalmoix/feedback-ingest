@@ -185,6 +185,19 @@ tests/unit/connectors/{test_contract,test_registry,test_discourse,test_playstore
 tests/unit/test_html.py
 ```
 
+## Custom connector (added in the tailoring pass)
+
+`connectors/custom.py` takes Enterpret's public webhook shape: `{"records": [{id, type, createdAt, updatedAt?,
+text, title?, author?, language?, rating?, metadata}]}`. One push is one raw event (`external_event_id` is the
+batch's payload hash); `transform` returns one record per entry with `external_id = id`, `source_created_at =
+createdAt` (epoch seconds; 13-digit milliseconds are converted), `source_updated_at = updatedAt`. Metadata is
+`CustomMetadata(record_type, score, fields)`: flat string/number/bool values, `score` taken from
+`metadata["score"]`. The kind is the one exception to "kind per source": `KIND_BY_RECORD_TYPE` in
+`domain/models.py` maps `REVIEW`, `CONVERSATION`, `FORUM_CONVERSATION_THREAD`, `SURVEY` to review,
+conversation, post and the new `survey` kind; any other `type` is a `TransformError`. No config, default HMAC,
+no puller. One bad record dead-letters the whole batch (marked `ponytail:`). The contract test skips
+`malformed` and `unsupported_type` fixtures as transform inputs.
+
 ## How to explain this phase in the interview
 "A connector turns a raw dict into feedback records. It validates the payload with a Pydantic model first, so a
 bad payload fails at one obvious line and goes to the dead-letter list instead of being retried forever. A dict

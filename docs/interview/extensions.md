@@ -1,7 +1,8 @@
 # Extensions: how to grow it
 
 Numbered recipes for "how would you add X?". Each one names the files to touch, in order, and the honest catch.
-None of these are built. Every recipe says what is true in the code today, so you can tell "built" from
+None of these are built, except that recipe 1 has a worked example in the code (the `custom`
+connector). Every recipe says what is true in the code today, so you can tell "built" from
 "planned" out loud.
 
 Paths are from the repo root. Terms are in [glossary.md](glossary.md). "Why not X" is in
@@ -9,7 +10,7 @@ Paths are from the repo root. Terms are in [glossary.md](glossary.md). "Why not 
 
 | # | Recipe | Size | Touches the core? |
 |---|---|---|---|
-| 1 | Add a source (Zendesk) | 5 files | No |
+| 1 | Add a source (Zendesk; worked example: `custom`) | 5 files | No |
 | 2 | Postgres swap | 1 setting, 1 dependency, 3 queries, migrations | Adapters only |
 | 3 | Kafka or SQS swap | 1 new adapter, a new retry model | Adapter, plus the retry story |
 | 4 | Horizontal workers | Deployment, plus one small entry point | No |
@@ -39,13 +40,13 @@ The contract tests fail until all five steps are done. That is the point: you ca
    - `source_type`, `version = 1`, `required_config = ()`;
    - `external_event_id(payload)`: `f"{ticket id}:{updated_at}"`, falling back to `payload_hash` on a
      `ValidationError`, so it never raises;
-   - `transform(source, payload)`: validate first, return a list (empty for non-feedback events), id from
-     `record_id(source.id, external_id)`;
+   - `transform(source, payload)`: validate first, return a list (empty for non-feedback events), each record
+     built with `new_record(source, self, external_id, ...)` from `connectors/base.py`;
    - `verify_signature`: Zendesk signs a timestamp header plus the body with HMAC-SHA256, base64, in
      `X-Zendesk-Webhook-Signature`, so override the default here.
    - Add `pull` and `pull_config` only if Zendesk will be polled.
-4. **Register it.** In `feedback_ingest/connectors/registry.py` add `ZendeskConnector()` to `_ALL` (and to
-   `_PULL` if it pulls). mypy checks it against the Protocol on that line.
+4. **Register it.** In `feedback_ingest/connectors/registry.py` add `ZendeskConnector()` to the tuple that
+   builds `CONNECTORS` (and to `PULLERS` if it pulls). mypy checks it against the Protocol on that line.
 5. **Fixtures and one golden test.** Add `tests/fixtures/zendesk/ticket.json`, `ticket_edited.json` (same id,
    later `updated_at`) and `malformed.json`, all synthetic. The contract test needs the edited pair to prove
    an edit is a new event and the newer text wins, and needs `malformed` to prove it goes dead. Add
@@ -56,6 +57,31 @@ Catch to say out loud: `test_verify_signature_accepts_signed_body_and_rejects_ta
 the signature needs that test taught its scheme.
 
 Not touched: routes, services, the worker, the tables. Run `uv run pytest tests/unit/connectors` until green.
+
+### Worked example: the `custom` connector (built)
+
+This is exactly the five-step recipe, done against Enterpret's public webhook shape
+(`{"records": [{id, type, createdAt, text, title?, metadata}]}`, see `docs/research/01_product_and_integrations.md`):
+
+1. `SourceType.CUSTOM` in `domain/enums.py`, plus one new kind, `FeedbackKind.SURVEY`. The one twist: a custom
+   source carries several kinds, so instead of a `KIND_BY_SOURCE` entry, `domain/models.py` has
+   `KIND_BY_RECORD_TYPE` (`REVIEW`→review, `CONVERSATION`→conversation, `FORUM_CONVERSATION_THREAD`→post,
+   `SURVEY`→survey) and `FeedbackRecord.kind` reads the record's `type` from its metadata. That is the only
+   place the rule lives.
+2. `CustomMetadata(record_type, score, fields)` in `domain/metadata.py`, in the union; `fields` is flat
+   string/number/bool metadata, `score` is lifted out of `metadata["score"]`.
+3. `connectors/custom.py`: input models `CustomBatchIn` / `CustomRecordIn` (epoch seconds or milliseconds),
+   one record per entry, `external_event_id` = hash of the whole batch (one delivery), default HMAC, no config.
+   Any other `type` is a `TransformError`, so the batch goes dead with "unsupported record type".
+4. `CustomConnector()` in the `CONNECTORS` tuple; no puller.
+5. `tests/fixtures/custom/` (`batch`, `batch_edited`, `malformed`, `unsupported_type`), golden tests in
+   `tests/unit/connectors/test_custom.py`, and `tests/api/test_custom_webhook.py` (one push, three records of three
+   kinds, a resend is a duplicate). Demo step 6 pushes the batch.
+
+Their semantics already matched ours: a resent delivery is a duplicate (raw-event key), a newer `updatedAt`
+wins on upsert, and 202 means accepted, not processed. Not copied: their nested typed metadata arrays (we take
+the flat form), the `surveyResponse` / `conversation.msgs` content shapes (we take one `text`), and partial
+acceptance of a batch (one bad record dead-letters the batch; marked `ponytail:` in `custom.py`).
 
 ---
 
@@ -257,7 +283,9 @@ Because raw payloads are kept, "try v2 before switching" is a script, not a feat
 
 ## 10. A generic JSON-webhook connector
 
-For simple flat sources where field mapping really is the whole job. ADR-003 rejected config-driven mapping as
+For simple flat sources where field mapping really is the whole job. (A sender that can adopt a fixed shape
+already has one: the built `custom` connector, recipe 1's worked example. This recipe is for senders that
+cannot change their payload.) ADR-003 rejected config-driven mapping as
 the core design, because identity, edits, threads and paging are the hard parts. This is one more connector
 behind the same Protocol, not a new core.
 
