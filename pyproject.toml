@@ -1,0 +1,64 @@
+[project]
+name = "feedback-ingest"
+version = "0.1.0"
+description = "Multi-tenant feedback ingestion service (push webhooks + pull connectors)"
+authors = [
+    { name = "Nachiket Agrawal", email = "nagrawal@eightfold.ai" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.142.2",
+    "httpx>=0.28.1",
+    "pydantic>=2",
+    "pydantic-settings>=2.15.0",
+    "sqlalchemy>=2",
+    "uvicorn>=0.54.0",
+]
+
+[build-system]
+requires = ["uv_build>=0.8.11,<0.9.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-root = ""
+
+[dependency-groups]
+dev = [
+    "mypy>=2.4.0",
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+    "ruff>=0.16.10",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+extend-exclude = ["docs"]
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = [
+    "CPY",    # no copyright headers in a take-home
+    "D",      # no docstrings by convention; names do the explaining
+    "COM812", # conflicts with ruff format
+    "ISC001", # conflicts with ruff format
+    "FBT",    # boolean positional args are fine here
+    "TD",     # deliberate-shortcut markers (ponytail) are allowed
+    "FIX",    # deliberate-shortcut markers (ponytail) are allowed
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "PLR2004", "INP001"]  # rootdir conftest, no __init__.py
+"scripts/**" = ["INP001"]                     # standalone scripts, not a package
+
+[tool.mypy]
+strict = true
+warn_unreachable = true
+plugins = ["pydantic.mypy"]
+files = ["feedback_ingest", "tests", "scripts"]
+
+[tool.pytest.ini_options]
+addopts = "-W error --strict-markers -q --no-header -m 'not live'"
+testpaths = ["tests"]
+markers = ["live: hits real external APIs, run with -m live"]
+asyncio_mode = "auto"
