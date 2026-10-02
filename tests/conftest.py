@@ -1,3 +1,4 @@
+import os
 from collections.abc import Iterator
 from datetime import datetime
 from pathlib import Path
@@ -13,6 +14,13 @@ from feedback_ingest.adapters.sqlalchemy.tables import Base
 from feedback_ingest.api.deps import Adapters
 from feedback_ingest.config import Settings
 from feedback_ingest.domain.models import Source
+
+
+@pytest.fixture(autouse=True)
+def _no_fi_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Settings read FI_* from the environment; a developer's shell must not change test results."""
+    for name in [n for n in os.environ if n.startswith("FI_")]:
+        monkeypatch.delenv(name)
 
 
 @pytest.fixture

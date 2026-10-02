@@ -57,3 +57,10 @@ def test_the_cursor_never_moves_backwards(adapters: Adapters) -> None:
     adapters.sources.update_cursor(source.id, later)  # a concurrent sync got further
     assert service(adapters).sync(source).cursor == later
     assert stored_cursor(adapters, "src-forum") == later
+
+
+def test_a_stored_cursor_with_an_offset_is_compared_as_an_instant(adapters: Adapters) -> None:
+    source = add_pull_source(adapters, "src-forum")
+    adapters.sources.update_cursor(source.id, "2026-02-08T05:00:00+05:30")  # 2026-02-07T23:30Z
+    assert service(adapters).sync(source).cursor == WINDOW_END
+    assert stored_cursor(adapters, "src-forum") == WINDOW_END

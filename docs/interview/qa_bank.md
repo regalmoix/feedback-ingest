@@ -273,8 +273,8 @@ fetch the same pages; that wastes calls but the unique key drops the repeats. On
 saved. The cursor does not move, so the next tick starts from the same bookmark and the repeats are dropped.
 
 **Go deeper:** 408, 429, 5xx, network errors and the 10-second timeout are all transient; other 4xx are
-permanent. The manual sync answers 502 with `"error": "429 from …/search.json"` in the result, and `/health` lists the
-source in `failing_sources` after a failed scheduled tick. The Discourse cursor only moves on
+permanent. The manual sync answers 502 with `"error": "429 from …/search.json"` in the result, and `/health` counts the
+source in `failing_sources` after a failed scheduled tick (a count only: health has no auth). The Discourse cursor only moves on
 the final page of a run, because search results are not guaranteed oldest first. Gaps to admit: we do not read
 `Retry-After`, and the scheduler does not back off per source; it just tries again every 300 seconds.
 
@@ -284,8 +284,8 @@ the final page of a run, because search results are not guaranteed oldest first.
 ### Q19. The pull cursor is stuck. Why?
 
 **Say:** Four causes: a repeated error like a 429, a window too busy to reach its last page within 10 pages, a
-bad config, or the scheduler is not running or the source is disabled. `/health` lists the source under
-`failing_sources` when its last scheduled sync failed, and a manual sync shows the reason: it answers 502 with
+bad config, or the scheduler is not running or the source is disabled. `/health` counts the source in
+`failing_sources` when its last scheduled sync failed (the log line names it), and a manual sync shows the reason: it answers 502 with
 the error in the result.
 
 **Go deeper:** A window that needs more than 10 search pages (Discourse refuses page 11) stops after page 10

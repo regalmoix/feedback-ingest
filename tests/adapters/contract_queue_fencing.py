@@ -73,9 +73,22 @@ def claim_rejects_non_positive_limit_and_lease(a: Adapters) -> None:
             a.queue.claim(now, lease_seconds=lease_seconds, limit=limit)
 
 
+def claim_takes_the_earliest_due_row_whatever_its_status(a: Adapters) -> None:
+    seed(a)
+    now = a.clock.now()
+    a.queue.enqueue(event(SOURCE_A1, "e1", now))  # first in insertion and in the status index
+    [failed] = a.queue.claim(now, lease_seconds=30, limit=1)
+    assert a.queue.mark_failed(failed, "boom", now + timedelta(seconds=20))
+    pending = event(SOURCE_A1, "e2", now + timedelta(seconds=10))
+    a.queue.enqueue(pending)
+    [claimed] = a.queue.claim(now + timedelta(seconds=30), lease_seconds=30, limit=1)
+    assert claimed.id == pending.id
+
+
 FENCING_CASES: list[Case] = [
     stale_worker_cannot_finish,
     requeue_and_marks_are_checked,
     requeued_row_is_fenced_from_the_first_worker,
     claim_rejects_non_positive_limit_and_lease,
+    claim_takes_the_earliest_due_row_whatever_its_status,
 ]

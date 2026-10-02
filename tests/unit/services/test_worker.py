@@ -1,4 +1,5 @@
 import json
+import time
 from collections.abc import Iterator
 
 import pytest
@@ -44,6 +45,31 @@ def test_start_and_stop_the_thread(adapters: Adapters, worker: WorkerService) ->
     wait_until(lambda: adapters.queue.counts()[EventStatus.PROCESSED] == 3)
     worker.stop()
     assert not worker.alive
+
+
+def test_a_backlog_drains_without_sleeping_between_non_empty_batches(
+    adapters: Adapters, worker: WorkerService
+) -> None:
+    worker.poll_seconds, worker.batch = 60, 1
+    worker.start()
+    wait_until(lambda: adapters.queue.counts()[EventStatus.PROCESSED] == 3, timeout=2)
+
+
+def test_an_idle_loop_sleeps_between_empty_claims(
+    worker: WorkerService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[object] = []
+
+    def empty(*args: object) -> list[RawEvent]:
+        calls.append(args)
+        return []
+
+    monkeypatch.setattr(worker.queue, "claim", empty)
+    worker.poll_seconds = 0.05
+    worker.start()
+    time.sleep(0.25)
+    worker.stop()
+    assert 2 <= len(calls) <= 10
 
 
 def test_a_crashing_process_does_not_kill_the_loop(

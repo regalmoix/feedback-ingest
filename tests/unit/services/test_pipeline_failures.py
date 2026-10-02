@@ -1,6 +1,7 @@
 from datetime import timedelta
 
 import pytest
+from pydantic import BaseModel, ValidationError
 from test_pipeline import LEASE, MAX_ATTEMPTS, claimed, fail_with, make_pipeline, stored
 
 from feedback_ingest.adapters.memory.clock import FixedClock
@@ -43,11 +44,24 @@ def test_backoff_is_capped(
     assert stored(adapters, event).next_attempt_at == clock.now() + timedelta(seconds=1)
 
 
+class _Ints(BaseModel):
+    values: list[int]
+
+
+def _fifty_part_validation_error() -> ValidationError:
+    try:
+        _Ints.model_validate({"values": ["x"] * 50})
+    except ValidationError as exc:
+        return exc
+    raise AssertionError
+
+
 @pytest.mark.parametrize(
     ("exc", "status"),
     [
         (TransientError("x" * 600), EventStatus.FAILED),
         (TransformError("x" * 600), EventStatus.DEAD),
+        (_fifty_part_validation_error(), EventStatus.DEAD),
     ],
 )
 def test_error_text_is_truncated_to_500_chars(

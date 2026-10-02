@@ -41,6 +41,7 @@ def test_push_does_not_need_pull_only_keys() -> None:
         ("base_url", "forum.example.test"),
         ("base_url", "ftp://forum.example.test"),
         ("base_url", "https://user:pw@forum.example.test"),
+        ("base_url", "https://:pw@forum.example.test"),
         ("base_url", "http://127.0.0.1"),
         ("base_url", "http://[::1]:8000"),
         ("base_url", "http://169.254.169.254/latest"),

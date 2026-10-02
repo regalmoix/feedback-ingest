@@ -191,7 +191,7 @@ sequenceDiagram
   Note over PC,SS: the cursor moves only on the final page, to the newest post minus a 60 s overlap
   Note over PS,SS: a TransientError or TransformError stops the run, the cursor stays put and the message lands in PullResult.error (POST sync answers 502); any other error propagates (503 from the endpoint, logged by the scheduler tick)
   PS-->>T: PullResult with pages, accepted, duplicates, cursor, error
-  Note over T: the scheduler keeps the latest tick's errors per source; /health is degraded and lists failing_sources
+  Note over T: the scheduler keeps the latest tick's errors per source; /health is degraded and counts failing_sources
   Note over I: from here the worker path is identical to push
 ```
 
@@ -280,7 +280,7 @@ Every `__init__.py` under `feedback_ingest/` is an empty package marker.
 | `api/records.py` | Tenant-scoped record query and single-record read |
 | `api/admin.py` | Raw-event list (newest first), detail, replay, and queue counts per tenant |
 | `api/tenants.py` | Tenant bootstrap behind `X-Bootstrap-Token`; returns the API key once |
-| `api/health.py` | Worker and scheduler liveness, failing pull sources, queue counts; 503 when degraded |
+| `api/health.py` | Worker and scheduler liveness, failing pull-source count, queue counts; 503 when degraded |
 | `domain/enums.py` | `SourceType`, `SourceMode`, `FeedbackKind`, `EventStatus`, `UpsertOutcome` |
 | `domain/models.py` | `Tenant`, `Source`, `RawEvent`, `FeedbackRecord`, naive-UTC datetimes, kind per source |
 | `domain/metadata.py` | Per-source metadata models, discriminated by `source_type` |
@@ -322,10 +322,10 @@ Every `__init__.py` under `feedback_ingest/` is an empty package marker.
 |---|---|---|---|
 | Heterogeneous sources: Intercom, Play Store, Twitter, Discourse | Must | `connectors/{intercom,playstore,twitter,discourse}.py`, `connectors/registry.py` | `tests/unit/connectors/test_contract.py`, `test_registry.py`, `test_{intercom,playstore,twitter,discourse}.py` |
 | Push integration | Must | `api/ingest.py`, `services/ingestion.py`, `utils/signing.py` | `tests/api/test_push_api.py`, `tests/e2e/test_push_to_query.py` |
-| Pull integration | Must | `services/pull.py`, `services/scheduler.py`, `api/sync.py`, `connectors/discourse_pull.py` | `tests/unit/services/test_pull.py`, `tests/unit/connectors/test_discourse_pull.py`, `tests/api/test_sync_api.py`, `tests/e2e/test_pull_to_query.py`, `tests/live/test_discourse_live.py` |
-| Source-specific metadata (app version, country, ...) | Must | `domain/metadata.py`, each connector's `transform` | `tests/unit/test_models.py`, `tests/unit/connectors/test_contract.py` |
+| Pull integration | Must | `services/pull.py`, `services/scheduler.py`, `api/sync.py`, `connectors/discourse_pull.py` | `tests/unit/services/test_pull.py`, `tests/unit/connectors/test_discourse_pull.py`, `tests/unit/services/test_scheduler.py`, `tests/api/test_sync_api.py`, `tests/e2e/test_pull_to_query.py`, `tests/live/test_discourse_live.py` (opt-in: `uv run pytest -m live`) |
+| Source-specific metadata (app version, country, ...) | Must | `domain/metadata.py`, each connector's `transform` | `tests/unit/test_models.py`, `tests/unit/connectors/test_contract.py`, the per-connector golden tests `tests/unit/connectors/test_{intercom,playstore,twitter,discourse}.py`, `tests/adapters/contract_upsert.py` (whole records, metadata included, round-tripped through SQL by `test_sqlalchemy.py`) |
 | Multi-tenancy | Must | `api/deps.py`, `api/tenants.py`, tenant-scoped stores, composite FKs in `adapters/sqlalchemy/tables.py` | `tests/adapters/contract_stores.py`, `tests/adapters/test_sqlalchemy.py`, `tests/api/test_records_api.py`, `tests/api/test_push_api.py`, `tests/api/test_admin_api.py` |
 | Uniform structure: record types (`kind`) and common attributes (language, tenant, source, ...) | Must | `domain/models.py` (`FeedbackRecord`, `KIND_BY_SOURCE`), `domain/enums.py` | `tests/unit/test_models.py`, `tests/unit/connectors/test_contract.py` |
-| Idempotency (de-dupe) | Good-to-have | UNIQUE keys in `adapters/sqlalchemy/tables.py`, `SqlRawEventQueue.enqueue`, `SqlFeedbackStore.upsert` | `tests/e2e/test_push_to_query.py`, `tests/adapters/contract_queue.py`, `tests/adapters/contract_upsert.py`, `tests/unit/services/test_pull.py` |
+| Idempotency (de-dupe) | Good-to-have | UNIQUE keys in `adapters/sqlalchemy/tables.py`, `SqlRawEventQueue.enqueue`, `SqlFeedbackStore.upsert` | `tests/e2e/test_push_to_query.py`, `tests/adapters/contract_queue.py`, `tests/adapters/contract_upsert.py` (incl. `same_version_from_a_newer_connector_replaces_the_row`), `tests/unit/services/test_pull.py` |
 | Multiple sources of the same type per tenant | Good-to-have | keys on `source_id`, `api/sources.py` | `tests/e2e/test_multi_source_same_type.py`, `tests/adapters/contract_stores.py` |
-| Beyond the brief: durable before ack, retry, dead letter, replay, restart | Extra | `services/pipeline.py`, `services/worker.py`, `api/admin.py`, `api/errors.py` | `tests/unit/services/test_pipeline.py`, `test_pipeline_failures.py`, `tests/e2e/test_dlq_replay.py`, `tests/e2e/test_restart_resume.py` |
+| Beyond the brief: durable before ack, retry, dead letter, replay, restart | Extra | `services/pipeline.py`, `services/worker.py`, `api/admin.py`, `api/errors.py` | `tests/api/test_push_api.py::test_storage_down_is_503_never_202_and_logged`, `tests/api/test_admin_api.py::test_transient_failures_go_dead_then_replay_processes_after_the_fix`, `tests/unit/services/test_worker.py`, `tests/unit/services/test_pipeline.py`, `test_pipeline_failures.py`, `tests/e2e/test_dlq_replay.py`, `tests/e2e/test_restart_resume.py` |

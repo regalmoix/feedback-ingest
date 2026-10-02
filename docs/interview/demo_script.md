@@ -200,7 +200,7 @@ are on disk. The seed fixes the window to four days in January 2021, so the demo
 **Follow-up:** "What if Discourse rate-limits us halfway?"
 **Answer:** The 429 becomes a transient error, the pull stops, saved pages stay saved, and the cursor has not
 moved, so the next run starts from the same place and repeats are dropped; the sync answers 502 with the error,
-and `/health` lists the source in `failing_sources` (`feedback_ingest/services/pull.py`).
+and `/health` counts it in `failing_sources`; the WARNING log line names the source (`feedback_ingest/services/pull.py`).
 
 ## Step 8. 20 pushes queued, kill -9, restart
 

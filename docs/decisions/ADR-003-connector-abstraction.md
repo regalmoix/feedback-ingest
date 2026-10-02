@@ -67,9 +67,22 @@ def default_verify_signature(secret: str, body: bytes, headers: Mapping[str, str
     return signing.verify(secret, body, headers.get("X-Signature", ""))
 
 
-def record_id(source_id: str, external_id: str) -> str:
-    """Deterministic record id: the same item in the same source always gets the same id."""
-    return uuid5(NAMESPACE_URL, f"{source_id}:{external_id}").hex
+def new_record(
+    source: Source, connector: SourceConnector, external_id: str, **content: object
+) -> FeedbackRecord:
+    # kind comes from source_type; the pipeline replaces ingested_at with its clock
+    return FeedbackRecord.model_validate(
+        {
+            "id": uuid5(NAMESPACE_URL, f"{source.id}:{external_id}").hex,
+            "tenant_id": source.tenant_id,
+            "source_id": source.id,
+            "source_type": connector.source_type,
+            "external_id": external_id,
+            "connector_version": connector.version,
+            "ingested_at": content["source_created_at"],
+            **content,
+        }
+    )
 
 
 class SourceConnector(Protocol):
@@ -168,7 +181,7 @@ A push source without a `webhook_secret` is rejected by the `Source` model itsel
 ### Small consequences for the Phase 1 models
 
 - `Source.webhook_secret` becomes `SecretStr | None` (ruling 7).
-- `transform` stays free of clocks and random ids, so the same input always gives the same output. The connector sets `id` itself with `record_id(source.id, external_id)`, a `uuid5`, so it is deterministic. The worker stamps only `ingested_at`, with `model_copy(update=...)`. The contract test compares whole records.
+- `transform` stays free of clocks and random ids, so the same input always gives the same output. The connector builds each record with `new_record(source, connector, external_id, **content)`, which sets `id` to a `uuid5` of the source id and external id, so it is deterministic. The worker stamps only `ingested_at`, with `model_copy(update=...)`. The contract test compares whole records.
 
 ## Where the council agrees
 

@@ -12,11 +12,11 @@ router = APIRouter()
 def health(ctx: Ctx, response: Response) -> HealthResponse:
     enabled, alive = ctx.settings.worker_enabled, ctx.worker.alive
     scheduler_enabled = ctx.settings.scheduler_enabled
-    failing = sorted(ctx.scheduler.last_errors)
+    failing = len(ctx.scheduler.last_errors)  # ids stay in the pull WARNING log lines
     degraded = (
         (enabled and not ctx.worker.healthy)
         or (scheduler_enabled and not ctx.scheduler.alive)
-        or bool(failing)
+        or failing > 0
     )
     if degraded:
         response.status_code = HTTPStatus.SERVICE_UNAVAILABLE

@@ -57,8 +57,9 @@ def test_url_without_http_scheme_is_a_transform_error(url: str) -> None:
 @pytest.mark.parametrize("body", ["<html>", "[" * 100_000])
 def test_invalid_json_is_transient(body: str) -> None:
     client = HttpxClient(httpx.MockTransport(lambda _: httpx.Response(200, text=body)))
-    with pytest.raises(TransientError, match="invalid JSON"):
-        client.get_json("https://example.test", {})
+    with pytest.raises(TransientError, match="invalid JSON") as raised:
+        client.get_json("https://user:hunter2@example.test", {})
+    assert "hunter2" not in str(raised.value)
 
 
 @pytest.mark.parametrize("error", [httpx.ConnectError, httpx.TooManyRedirects])

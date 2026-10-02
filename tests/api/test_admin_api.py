@@ -6,7 +6,7 @@ from helpers import KEY_A, KEY_B, app_state, client_for, fixture_body, push
 
 from feedback_ingest.adapters.memory.clock import FixedClock
 from feedback_ingest.api.deps import Adapters
-from feedback_ingest.connectors.registry import CONNECTORS
+from feedback_ingest.connectors.playstore import PlaystoreConnector
 from feedback_ingest.domain.enums import EventStatus, SourceType
 from feedback_ingest.domain.errors import TransientError
 from feedback_ingest.domain.models import FeedbackRecord, Source
@@ -81,7 +81,7 @@ def test_transient_failures_go_dead_then_replay_processes_after_the_fix(
         msg = "upstream timeout"
         raise TransientError(msg)
 
-    monkeypatch.setattr(CONNECTORS[SourceType.PLAYSTORE], "transform", flaky)
+    monkeypatch.setattr(PlaystoreConnector, "transform", flaky)
     worker = app_state(flaky_client).worker
     event_id = push(flaky_client, source_a.id, REVIEW).json()["raw_event_id"]
     worker.run_once()

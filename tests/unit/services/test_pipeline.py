@@ -6,7 +6,7 @@ from helpers import KEY_A, fixture_body, seed_source
 
 from feedback_ingest.adapters.memory.clock import FixedClock
 from feedback_ingest.api.deps import Adapters
-from feedback_ingest.connectors.registry import CONNECTORS
+from feedback_ingest.connectors.playstore import PlaystoreConnector
 from feedback_ingest.domain.enums import EventStatus, SourceType
 from feedback_ingest.domain.errors import TransientError
 from feedback_ingest.domain.models import FeedbackRecord, RawEvent, Source
@@ -34,7 +34,7 @@ def fail_with(monkeypatch: pytest.MonkeyPatch, exc: Exception) -> None:
     def failing(*_args: object) -> list[FeedbackRecord]:
         raise exc
 
-    monkeypatch.setattr(CONNECTORS[SourceType.PLAYSTORE], "transform", failing)
+    monkeypatch.setattr(PlaystoreConnector, "transform", failing)
 
 
 def stored(adapters: Adapters, event: RawEvent) -> RawEvent:

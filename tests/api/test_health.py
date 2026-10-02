@@ -42,8 +42,9 @@ def test_degraded_without_a_completed_pass_in_the_window_then_recovers(
 
     monkeypatch.setattr(adapters.queue, "claim", broken)
     with client_for(adapters, worker_enabled=True, worker_poll_seconds=0.05) as client:
+        clock.advance(10)  # the window never drops below 10 s, however short the poll
         assert client.get("/health").status_code == 200
-        clock.advance(11)
+        clock.advance(1)
         response = client.get("/health")
         assert (response.status_code, response.json()["worker_alive"]) == (503, True)
         monkeypatch.undo()
@@ -61,23 +62,21 @@ def test_degraded_when_the_enabled_scheduler_thread_is_dead(adapters: Adapters) 
     assert (body["scheduler_enabled"], body["scheduler_alive"]) == (True, False)
 
 
-def test_degraded_listing_sources_whose_last_scheduled_sync_failed(
+def test_degraded_counting_sources_whose_last_scheduled_sync_failed(
     app_client: TestClient,
 ) -> None:
     app_state(app_client).scheduler.last_errors = {"src-forum": "503 from x"}
     response = app_client.get("/health")
     assert response.status_code == 503
-    assert (response.json()["status"], response.json()["failing_sources"]) == (
-        "degraded",
-        ["src-forum"],
-    )
+    assert (response.json()["status"], response.json()["failing_sources"]) == ("degraded", 1)
+    assert "src-forum" not in response.text  # a source id is half of a webhook credential
 
 
-def test_lifespan_exit_stops_the_worker(adapters: Adapters) -> None:
-    with client_for(adapters, worker_enabled=True) as client:
-        worker = app_state(client).worker
-        assert worker.alive
-    assert not worker.alive
+def test_lifespan_exit_stops_the_worker_and_the_scheduler(adapters: Adapters) -> None:
+    with client_for(adapters, worker_enabled=True, scheduler_enabled=True) as client:
+        worker, scheduler = app_state(client).worker, app_state(client).scheduler
+        assert (worker.alive, scheduler.alive) == (True, True)
+    assert (worker.alive, scheduler.alive) == (False, False)
 
 
 def _sql_settings(tmp_path: Path) -> Settings:

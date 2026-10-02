@@ -80,6 +80,16 @@ def version_advances_without_updated_at(a: Adapters) -> None:
     assert [r.text for r in a.feedback.list_for_tenant(TENANT_A.id)] == ["v3"]
 
 
+def same_version_from_a_newer_connector_replaces_the_row(a: Adapters) -> None:
+    seed(a)
+    now = a.clock.now()
+    a.feedback.upsert(record(SOURCE_A1, "r1", now, text="old"))
+    reprocessed = record(SOURCE_A1, "r1", now, text="new", connector_version=2)
+    assert a.feedback.upsert(reprocessed) == UpsertOutcome.UPDATED
+    [stored] = a.feedback.list_for_tenant(TENANT_A.id)
+    assert (stored.text, stored.connector_version) == ("new", 2)
+
+
 UPSERT_CASES: list[Case] = [
     upsert_keeps_row_id_and_store_owned_fields,
     older_update_is_skipped,
@@ -87,4 +97,5 @@ UPSERT_CASES: list[Case] = [
     tombstone_survives_newer_edit,
     older_tombstone_still_deletes,
     version_advances_without_updated_at,
+    same_version_from_a_newer_connector_replaces_the_row,
 ]

@@ -23,7 +23,7 @@ class HealthResponse(BaseModel):
     worker_alive: bool
     scheduler_enabled: bool
     scheduler_alive: bool
-    failing_sources: list[str]  # pull sources whose latest scheduled sync failed
+    failing_sources: int  # pull sources whose latest scheduled sync failed; no ids, no auth here
     queue: dict[EventStatus, int]
 
 
