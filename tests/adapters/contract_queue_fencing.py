@@ -1,8 +1,9 @@
 from datetime import timedelta
 
 import pytest
-from contract import SOURCE_A1, Adapters, Case, event, seed
+from contract import SOURCE_A1, Case, event, seed
 
+from feedback_ingest.api.deps import Adapters
 from feedback_ingest.domain.enums import EventStatus
 
 
@@ -85,7 +86,19 @@ def claim_takes_the_earliest_due_row_whatever_its_status(a: Adapters) -> None:
     assert claimed.id == pending.id
 
 
+def duplicate_enqueue_reports_the_stored_status(a: Adapters) -> None:
+    seed(a)
+    now = a.clock.now()
+    first = event(SOURCE_A1, "e1", now)
+    a.queue.enqueue(first)
+    [claimed] = a.queue.claim(now, lease_seconds=30, limit=10)
+    assert a.queue.enqueue(event(SOURCE_A1, "e1", now)) == (first.id, EventStatus.PROCESSING)
+    assert a.queue.mark_dead(claimed, "bad")
+    assert a.queue.enqueue(event(SOURCE_A1, "e1", now)) == (first.id, EventStatus.DEAD)
+
+
 FENCING_CASES: list[Case] = [
+    duplicate_enqueue_reports_the_stored_status,
     stale_worker_cannot_finish,
     requeue_and_marks_are_checked,
     requeued_row_is_fenced_from_the_first_worker,

@@ -1,11 +1,9 @@
-import json
 import time
 from collections.abc import Iterator
 
 import pytest
-from helpers import KEY_A, fixture_body, memory_adapters, seed_source, wait_until
+from helpers import KEY_A, load, seed_source, wait_until
 
-from feedback_ingest.adapters.memory.clock import FixedClock
 from feedback_ingest.api.deps import Adapters
 from feedback_ingest.domain.enums import EventStatus, SourceType
 from feedback_ingest.domain.models import RawEvent
@@ -15,10 +13,10 @@ from feedback_ingest.services.worker import WorkerService
 
 
 @pytest.fixture
-def adapters(clock: FixedClock) -> Adapters:
-    a = memory_adapters(clock)
+def adapters(adapters: Adapters) -> Adapters:
+    a = adapters
     source = seed_source(a, "tenant-a", KEY_A)
-    review = json.loads(fixture_body(SourceType.PLAYSTORE, "review"))
+    review = load(SourceType.PLAYSTORE, "review")
     for n in range(3):
         payload = review | {"reviewId": f"review-{n}"}
         IngestionService(a.queue, a.clock).accept(source, payload)

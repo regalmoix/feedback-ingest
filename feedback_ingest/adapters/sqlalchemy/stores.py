@@ -1,7 +1,9 @@
+from collections.abc import Mapping
+
 from sqlalchemy import ColumnElement, Engine, select, update
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import sessionmaker
 
+from feedback_ingest.adapters.sqlalchemy.db import sessions
 from feedback_ingest.adapters.sqlalchemy.tables import SourceRow, TenantRow
 from feedback_ingest.domain.enums import SourceMode
 from feedback_ingest.domain.errors import NotFoundError
@@ -10,8 +12,7 @@ from feedback_ingest.domain.models import Source, Tenant
 
 class SqlTenantStore:
     def __init__(self, engine: Engine) -> None:
-        self._write = sessionmaker(engine, expire_on_commit=False)
-        self._read = sessionmaker(engine.execution_options(read_only=True), expire_on_commit=False)
+        self._write, self._read = sessions(engine)
 
     def add(self, tenant: Tenant) -> None:
         try:
@@ -29,8 +30,7 @@ class SqlTenantStore:
 
 class SqlSourceStore:
     def __init__(self, engine: Engine) -> None:
-        self._write = sessionmaker(engine, expire_on_commit=False)
-        self._read = sessionmaker(engine.execution_options(read_only=True), expire_on_commit=False)
+        self._write, self._read = sessions(engine)
 
     def add(self, source: Source) -> None:
         secret = source.webhook_secret
@@ -43,32 +43,31 @@ class SqlSourceStore:
 
     def get(self, source_id: str, tenant_id: str) -> Source | None:
         found = self._list(SourceRow.id == source_id, SourceRow.tenant_id == tenant_id)
-        return found[0] if found else None
+        return next(iter(found), None)
 
     def get_by_id(self, source_id: str) -> Source | None:
-        found = self._list(SourceRow.id == source_id)
-        return found[0] if found else None
+        return next(iter(self._list(SourceRow.id == source_id)), None)
 
     def list_for_tenant(self, tenant_id: str) -> list[Source]:
         return self._list(SourceRow.tenant_id == tenant_id)
 
-    def list_by_mode(self, mode: SourceMode) -> list[Source]:
+    def list_enabled(self, mode: SourceMode) -> list[Source]:
         return self._list(SourceRow.mode == mode, SourceRow.enabled.is_(True))
 
-    def update_cursor(self, source_id: str, cursor: str) -> None:
-        stmt = update(SourceRow).where(SourceRow.id == source_id).values(cursor=cursor)
-        with self._write.begin() as session:
-            if session.scalar(stmt.returning(SourceRow.id)) is None:
-                raise NotFoundError(source_id)
+    def update_cursor(self, source_id: str, tenant_id: str, cursor: str) -> None:
+        self._change(source_id, tenant_id, cursor=cursor)
 
     def set_enabled(self, source_id: str, tenant_id: str, enabled: bool) -> None:
-        stmt = (
-            update(SourceRow)
-            .where(SourceRow.id == source_id, SourceRow.tenant_id == tenant_id)
-            .values(enabled=enabled)
-        )
+        self._change(source_id, tenant_id, enabled=enabled)
+
+    def set_config(self, source_id: str, tenant_id: str, config: Mapping[str, str]) -> None:
+        self._change(source_id, tenant_id, config=dict(config))
+
+    def _change(self, source_id: str, tenant_id: str, **values: object) -> None:
+        where = (SourceRow.id == source_id, SourceRow.tenant_id == tenant_id)
+        stmt = update(SourceRow).where(*where).values(**values).returning(SourceRow.id)
         with self._write.begin() as session:
-            if session.scalar(stmt.returning(SourceRow.id)) is None:
+            if session.scalar(stmt) is None:
                 raise NotFoundError(source_id)
 
     def _list(self, *conditions: ColumnElement[bool]) -> list[Source]:

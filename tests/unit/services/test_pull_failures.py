@@ -2,16 +2,15 @@ import logging
 
 import httpx
 import pytest
-import test_pull
-from helpers import add_pull_source, discourse_http
+from discourse_mock import discourse_http
+from helpers import add_pull_source
 from test_pull import service, stored_cursor
 
 from feedback_ingest.adapters.http.httpx_client import HttpxClient
 from feedback_ingest.api.deps import Adapters
 from feedback_ingest.domain.enums import EventStatus
-from feedback_ingest.domain.models import RawEvent
+from feedback_ingest.domain.models import Enqueued, RawEvent
 
-adapters = test_pull.adapters  # the same fixture, registered for this module
 CURSOR = "2026-02-01T06:00:00"
 
 
@@ -33,7 +32,7 @@ def test_a_storage_failure_propagates_and_the_cursor_waits_for_the_whole_page(
     source = add_pull_source(adapters, "src-forum", cursor=CURSOR)
     enqueue, calls = adapters.queue.enqueue, []
 
-    def fails_on_the_final_pages_payload(event: RawEvent) -> str:
+    def fails_on_the_final_pages_payload(event: RawEvent) -> Enqueued:
         calls.append(event.id)
         if len(calls) == 4:  # page 1 holds 3 payloads, the final page 1
             msg = "disk full"
@@ -54,4 +53,5 @@ def test_a_window_past_the_page_cap_is_an_error_and_keeps_the_cursor(adapters: A
     assert result.pages == 10
     assert result.error is not None
     assert "window exceeds 10 pages" in result.error
+    assert "lower window_days via PATCH" in result.error
     assert stored_cursor(adapters, "src-forum") == CURSOR

@@ -10,7 +10,7 @@ from feedback_ingest.domain.models import FeedbackRecord
 router = APIRouter(prefix="/v1/records")
 
 
-@router.get("")
+@router.get("", response_model_exclude={"__all__": {"tenant_id"}})
 def list_records(
     query: Annotated[RecordQuery, Query()], tenant: CurrentTenant, ctx: Ctx
 ) -> list[FeedbackRecord]:
@@ -19,7 +19,7 @@ def list_records(
     return ctx.adapters.feedback.list_for_tenant(tenant.id, **query.model_dump())
 
 
-@router.get("/{record_id}")
+@router.get("/{record_id}", response_model_exclude={"tenant_id"})
 def get_record(
     record_id: str, tenant: CurrentTenant, ctx: Ctx, include_deleted: bool = False
 ) -> FeedbackRecord:

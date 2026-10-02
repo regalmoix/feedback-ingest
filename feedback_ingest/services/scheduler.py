@@ -3,6 +3,7 @@ import threading
 from dataclasses import dataclass, field
 
 from feedback_ingest.domain.enums import SourceMode
+from feedback_ingest.domain.errors import ConflictError
 from feedback_ingest.domain.models import Source
 from feedback_ingest.services.pull import PullService
 
@@ -18,7 +19,7 @@ class SchedulerService:
     interval_seconds: float
     _stop: threading.Event = field(default_factory=threading.Event, init=False, repr=False)
     _thread: threading.Thread | None = field(default=None, init=False, repr=False)
-    last_errors: dict[str, str] = field(default_factory=dict, init=False)  # source_id -> error
+    last_errors: dict[str, str] = field(default_factory=dict, init=False)
 
     def start(self) -> None:
         self._stop.clear()
@@ -40,8 +41,8 @@ class SchedulerService:
         while not self._stop.wait(self.interval_seconds):
             errors: dict[str, str] = {}
             try:
-                for source in self.pull.sources.list_by_mode(SourceMode.PULL):
-                    if error := self._sync(source):
+                for source in self.pull.sources.list_enabled(SourceMode.PULL):
+                    if (error := self._sync(source)) is not None:
                         errors[source.id] = error
             except Exception as exc:
                 log.exception("scheduler tick failed")
@@ -49,9 +50,15 @@ class SchedulerService:
             self.last_errors = errors  # health shows this tick only
 
     def _sync(self, source: Source) -> str | None:
+        extra = {"tenant_id": source.tenant_id, "source_id": source.id}
         try:
             return self.pull.sync(source).error
+        except ConflictError:
+            log.info("skipped: a manual sync is running", extra=extra)
+            return None
         except Exception:  # one broken source must not starve the rest of the tick
-            extra = {"tenant_id": source.tenant_id, "source_id": source.id}
-            log.exception("scheduled sync failed", extra=extra)
+            if self._stop.is_set():
+                log.info("sync abandoned at shutdown", extra=extra)
+            else:
+                log.exception("scheduled sync failed", extra=extra)
             return "internal error (see logs)"

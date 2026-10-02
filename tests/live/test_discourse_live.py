@@ -45,7 +45,7 @@ def adapters() -> Iterator[Adapters]:
 def test_a_closed_window_on_meta_discourse_ingests_once(adapters: Adapters) -> None:
     a = adapters
     a.sources.add(META)
-    pull = PullService(a.sources, IngestionService(a.queue, a.clock), a.http, a.clock)
+    pull = PullService(a.sources, IngestionService(a.queue, a.clock), a.http, a.clock, 60)
     pipeline = PipelineService(a.sources, a.feedback, a.queue, a.clock, 5, 300)
     worker = WorkerService(a.queue, pipeline, a.clock, 0, lease_seconds=30, batch=50)
 

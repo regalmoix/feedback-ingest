@@ -12,11 +12,9 @@ router = APIRouter()
 def health(ctx: Ctx, response: Response) -> HealthResponse:
     enabled, alive = ctx.settings.worker_enabled, ctx.worker.alive
     scheduler_enabled = ctx.settings.scheduler_enabled
-    failing = len(ctx.scheduler.last_errors)  # ids stay in the pull WARNING log lines
-    degraded = (
-        (enabled and not ctx.worker.healthy)
-        or (scheduler_enabled and not ctx.scheduler.alive)
-        or failing > 0
+    # a failing upstream is reported, not a reason to restart us
+    degraded = (enabled and not ctx.worker.healthy) or (
+        scheduler_enabled and not ctx.scheduler.alive
     )
     if degraded:
         response.status_code = HTTPStatus.SERVICE_UNAVAILABLE
@@ -26,6 +24,6 @@ def health(ctx: Ctx, response: Response) -> HealthResponse:
         worker_alive=alive,
         scheduler_enabled=scheduler_enabled,
         scheduler_alive=ctx.scheduler.alive,
-        failing_sources=failing,
+        failing_sources=len(ctx.scheduler.last_errors),  # ids stay in the pull log lines
         queue=ctx.adapters.queue.counts(),
     )

@@ -1,31 +1,21 @@
 import threading
 from collections.abc import Iterator
-from datetime import datetime
 
 import pytest
-from helpers import add_pull_source, discourse_http, memory_adapters, wait_until
+from helpers import add_pull_source, wait_until
+from test_pull import service
 
-from feedback_ingest.adapters.memory.clock import FixedClock
 from feedback_ingest.api.deps import Adapters
 from feedback_ingest.domain.enums import SourceMode
 from feedback_ingest.domain.models import Source
-from feedback_ingest.services.ingestion import IngestionService
-from feedback_ingest.services.pull import PullResult, PullService
+from feedback_ingest.services.pull import PullResult
 from feedback_ingest.services.scheduler import SchedulerService
 
 
 @pytest.fixture
-def adapters() -> Adapters:
-    a = memory_adapters(FixedClock(datetime(2026, 3, 1, 12, 0)))
-    add_pull_source(a, "src-forum")
-    return a
-
-
-@pytest.fixture
 def scheduler(adapters: Adapters) -> Iterator[SchedulerService]:
-    ingestion = IngestionService(adapters.queue, adapters.clock)
-    pull = PullService(adapters.sources, ingestion, discourse_http(), adapters.clock)
-    scheduler = SchedulerService(pull, interval_seconds=0.01)
+    add_pull_source(adapters, "src-forum")
+    scheduler = SchedulerService(service(adapters), interval_seconds=0.01)
     yield scheduler
     scheduler.stop()
 
@@ -48,7 +38,7 @@ def test_a_failing_tick_does_not_stop_the_next_and_shows_in_health(
         msg = "storage unavailable"
         raise RuntimeError(msg)
 
-    monkeypatch.setattr(scheduler.pull.sources, "list_by_mode", crash)
+    monkeypatch.setattr(scheduler.pull.sources, "list_enabled", crash)
     scheduler.start()
     wait_until(lambda: len(ticks) >= 2)
     assert scheduler.alive

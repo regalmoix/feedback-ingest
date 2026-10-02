@@ -1,5 +1,3 @@
-from pathlib import Path
-
 import pytest
 from fastapi.testclient import TestClient
 from helpers import app_state, client_for, wait_until
@@ -62,13 +60,11 @@ def test_degraded_when_the_enabled_scheduler_thread_is_dead(adapters: Adapters) 
     assert (body["scheduler_enabled"], body["scheduler_alive"]) == (True, False)
 
 
-def test_degraded_counting_sources_whose_last_scheduled_sync_failed(
-    app_client: TestClient,
-) -> None:
+def test_failing_sources_are_counted_but_do_not_degrade(app_client: TestClient) -> None:
     app_state(app_client).scheduler.last_errors = {"src-forum": "503 from x"}
     response = app_client.get("/health")
-    assert response.status_code == 503
-    assert (response.json()["status"], response.json()["failing_sources"]) == ("degraded", 1)
+    assert response.status_code == 200
+    assert (response.json()["status"], response.json()["failing_sources"]) == ("ok", 1)
     assert "src-forum" not in response.text  # a source id is half of a webhook credential
 
 
@@ -79,13 +75,8 @@ def test_lifespan_exit_stops_the_worker_and_the_scheduler(adapters: Adapters) ->
     assert (worker.alive, scheduler.alive) == (False, False)
 
 
-def _sql_settings(tmp_path: Path) -> Settings:
-    database_url = f"sqlite:///{tmp_path / 'app.db'}"
-    return Settings(database_url=database_url, worker_enabled=False, scheduler_enabled=False)
-
-
 def test_lifespan_closes_the_http_client_it_built(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     closed: list[HttpxClient] = []
     close = HttpxClient.close
@@ -95,13 +86,12 @@ def test_lifespan_closes_the_http_client_it_built(
         close(self)
 
     monkeypatch.setattr(HttpxClient, "close", spy)
-    with TestClient(create_app(_sql_settings(tmp_path))):
+    with TestClient(create_app(settings.model_copy(update={"worker_enabled": False}))):
         assert closed == []
     assert len(closed) == 1
 
 
-def test_startup_stops_on_a_table_missing_a_column(tmp_path: Path) -> None:
-    settings = _sql_settings(tmp_path)
+def test_startup_stops_on_a_table_missing_a_column(settings: Settings) -> None:
     engine = make_engine(settings.database_url)
     with engine.begin() as conn:  # the sources table as it was before `enabled` existed
         conn.execute(

@@ -22,8 +22,9 @@ def create_tenant(
     ctx: Ctx,
     x_bootstrap_token: Annotated[str, Header(alias="X-Bootstrap-Token")] = "",
 ) -> TenantCreated:
-    expected = ctx.settings.bootstrap_token
-    if not expected or not hmac.compare_digest(x_bootstrap_token.encode(), expected.encode()):
+    expected = ctx.settings.bootstrap_token.get_secret_value().encode()
+    given = x_bootstrap_token.encode()
+    if not (ctx.settings.bootstrap_open and hmac.compare_digest(given, expected)):
         msg = "missing or wrong X-Bootstrap-Token"
         raise UnauthorizedError(msg)
     api_key = secrets.token_urlsafe(32)

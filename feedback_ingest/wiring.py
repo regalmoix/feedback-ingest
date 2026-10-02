@@ -8,13 +8,14 @@ from feedback_ingest.adapters.sqlalchemy.raw_event_queue import SqlRawEventQueue
 from feedback_ingest.adapters.sqlalchemy.stores import SqlSourceStore, SqlTenantStore
 from feedback_ingest.adapters.sqlalchemy.tables import Base
 from feedback_ingest.api.deps import Adapters
+from feedback_ingest.config import Settings
 from feedback_ingest.utils.time import SystemClock
 
 
 @contextmanager
-def sql_adapters(database_url: str) -> Iterator[Adapters]:
-    engine = make_engine(database_url)
-    http = HttpxClient()
+def sql_adapters(settings: Settings) -> Iterator[Adapters]:
+    engine = make_engine(settings.database_url)
+    http = HttpxClient(max_bytes=settings.http_max_bytes)
     try:
         Base.metadata.create_all(engine)
         assert_schema_matches(engine)

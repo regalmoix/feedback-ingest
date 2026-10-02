@@ -37,18 +37,18 @@ def test_unknown_source_is_404(app_client: TestClient) -> None:
     assert push(app_client, "src-unknown", BODY).status_code == 404
 
 
-def test_a_source_without_a_secret_is_409_and_a_pull_source_with_one_is_accepted(
+def test_only_push_sources_take_webhooks_and_the_signature_is_checked_before_state(
     app_client: TestClient, adapters: Adapters, source_a: Source
 ) -> None:
-    pull = source_a.model_copy(update={"mode": SourceMode.PULL})
-    adapters.sources.add(pull.model_copy(update={"id": "no-secret", "webhook_secret": None}))
-    adapters.sources.add(pull.model_copy(update={"id": "signed"}))
-    response = push(app_client, "no-secret", BODY)
-    assert (response.status_code, response.json()) == (
+    adapters.sources.add(source_a.model_copy(update={"id": "pulled", "mode": SourceMode.PULL}))
+    pulled = push(app_client, "pulled", BODY)
+    assert (pulled.status_code, pulled.json()) == (
         409,
-        {"detail": "source has no webhook secret"},
+        {"detail": "source does not accept webhooks"},
     )
-    assert push(app_client, "signed", BODY).status_code == 202
+    adapters.sources.set_enabled(source_a.id, source_a.tenant_id, False)
+    assert push(app_client, source_a.id, BODY, "a-wrong-secret-0000").status_code == 401
+    assert push(app_client, source_a.id, BODY).status_code == 409
 
 
 @pytest.mark.parametrize("body", [b"[1, 2]", b'"text"', b"{not json", b"\xff", b"[" * 100_000])

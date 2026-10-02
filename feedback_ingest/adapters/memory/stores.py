@@ -1,3 +1,4 @@
+from collections.abc import Mapping
 from datetime import datetime
 
 from feedback_ingest.domain.enums import FeedbackKind, SourceMode, UpsertOutcome
@@ -42,21 +43,25 @@ class MemorySourceStore:
             (s for s in self._sources.values() if s.tenant_id == tenant_id), key=lambda s: s.id
         )
 
-    def list_by_mode(self, mode: SourceMode) -> list[Source]:
+    def list_enabled(self, mode: SourceMode) -> list[Source]:
         return sorted(
             (s for s in self._sources.values() if s.mode == mode and s.enabled), key=lambda s: s.id
         )
 
-    def update_cursor(self, source_id: str, cursor: str) -> None:
-        if source_id not in self._sources:
-            raise NotFoundError(source_id)
-        self._sources[source_id] = self._sources[source_id].model_copy(update={"cursor": cursor})
+    def update_cursor(self, source_id: str, tenant_id: str, cursor: str) -> None:
+        self._change(source_id, tenant_id, cursor=cursor)
 
     def set_enabled(self, source_id: str, tenant_id: str, enabled: bool) -> None:
+        self._change(source_id, tenant_id, enabled=enabled)
+
+    def set_config(self, source_id: str, tenant_id: str, config: Mapping[str, str]) -> None:
+        self._change(source_id, tenant_id, config=dict(config))
+
+    def _change(self, source_id: str, tenant_id: str, **changes: object) -> None:
         source = self.get(source_id, tenant_id)
         if source is None:
             raise NotFoundError(source_id)
-        self._sources[source_id] = source.model_copy(update={"enabled": enabled})
+        self._sources[source_id] = source.model_copy(update=changes)
 
 
 # ponytail: no FK check in the fake; the SQLite contract test covers tenant mismatch

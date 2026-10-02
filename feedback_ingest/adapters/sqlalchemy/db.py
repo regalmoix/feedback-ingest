@@ -1,6 +1,7 @@
 from sqlite3 import Connection as SqliteConnection
 
 from sqlalchemy import Connection, Engine, create_engine, event, inspect
+from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import ConnectionPoolEntry
 from sqlalchemy.schema import CreateColumn
 
@@ -25,6 +26,14 @@ def make_engine(database_url: str) -> Engine:
             conn.exec_driver_sql("BEGIN" if read_only else "BEGIN IMMEDIATE")
 
     return engine
+
+
+def sessions(engine: Engine) -> tuple[sessionmaker[Session], sessionmaker[Session]]:
+    read_only = engine.execution_options(read_only=True)
+    return (
+        sessionmaker(engine, expire_on_commit=False),
+        sessionmaker(read_only, expire_on_commit=False),
+    )
 
 
 # ponytail: create_all never alters an existing table; fail fast here until there are migrations

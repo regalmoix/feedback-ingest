@@ -1,10 +1,13 @@
 import logging
-from dataclasses import dataclass
+import threading
+from dataclasses import dataclass, field
+from datetime import timedelta
 
-from pydantic import BaseModel
+from pydantic import NonNegativeInt
 
 from feedback_ingest.connectors.registry import PULLERS
-from feedback_ingest.domain.errors import TransformError, TransientError
+from feedback_ingest.domain.errors import ConflictError, TransformError, TransientError
+from feedback_ingest.domain.metadata import FrozenModel
 from feedback_ingest.domain.models import Source
 from feedback_ingest.ports.clock import Clock
 from feedback_ingest.ports.http import HttpClient
@@ -15,31 +18,43 @@ from feedback_ingest.utils.time import NAIVE_UTC
 log = logging.getLogger(__name__)
 
 
-class PullResult(BaseModel):
+class PullResult(FrozenModel):
     source_id: str
-    pages: int = 0
-    accepted: int = 0
-    duplicates: int = 0
+    pages: NonNegativeInt = 0
+    accepted: NonNegativeInt = 0
+    duplicates: NonNegativeInt = 0
     cursor: str | None = None
     error: str | None = None
 
 
-# ponytail: no per-source lock; a manual sync racing the scheduler fetches twice (the unique
-# raw-event key absorbs it) and the read-then-write cursor max can lose that race; lock per source
-# if it matters
+# ponytail: the per-source lock is per process; a second process (uvicorn --workers N) can still
+# sync the same source at once (the unique raw-event key absorbs it). Use a DB lease if it matters.
 @dataclass
 class PullService:
     sources: SourceStore
     ingestion: IngestionService
     http: HttpClient
     clock: Clock
+    deadline_seconds: float
+    _running: dict[str, threading.Lock] = field(default_factory=dict, init=False, repr=False)
 
     def sync(self, source: Source) -> PullResult:
+        lock = self._running.setdefault(source.id, threading.Lock())
+        if not lock.acquire(blocking=False):
+            msg = f"source {source.id} is already syncing"
+            raise ConflictError(msg)
+        try:
+            return self._sync(source)
+        finally:
+            lock.release()
+
+    def _sync(self, source: Source) -> PullResult:
         extra = {"tenant_id": source.tenant_id, "source_id": source.id}
         pages = accepted = duplicates = 0
         cursor = error = None
+        deadline = self.clock.now() + timedelta(seconds=self.deadline_seconds)
         try:
-            for page in PULLERS[source.type].pull(source, self.http, self.clock.now()):
+            for page in PULLERS[source.type].pull(source, self.http, self.clock, deadline):
                 # ponytail: whole-page accept loop; batch enqueue if a page ever holds thousands
                 # of items
                 for payload in page.payloads:
@@ -68,5 +83,5 @@ class PullService:
         stored = self.sources.get(source.id, source.tenant_id)
         if stored is not None and stored.cursor is not None:
             cursor = max(stored.cursor, cursor, key=NAIVE_UTC.validate_python)
-        self.sources.update_cursor(source.id, cursor)
+        self.sources.update_cursor(source.id, source.tenant_id, cursor)
         return cursor

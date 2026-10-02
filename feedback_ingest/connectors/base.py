@@ -1,11 +1,12 @@
 from collections.abc import Iterator, Mapping
 from datetime import datetime
-from typing import Any, ClassVar, Protocol
+from typing import Any, ClassVar, Protocol, TypedDict, Unpack
 from uuid import NAMESPACE_URL, uuid5
 
 from feedback_ingest.domain.enums import SourceType
-from feedback_ingest.domain.metadata import FrozenModel
+from feedback_ingest.domain.metadata import FrozenModel, SourceMetadata
 from feedback_ingest.domain.models import FeedbackRecord, Source
+from feedback_ingest.ports.clock import Clock
 from feedback_ingest.ports.http import HttpClient
 from feedback_ingest.utils import signing
 
@@ -32,15 +33,30 @@ class SourceConnector(Protocol):
 class PullConnector(SourceConnector, Protocol):
     pull_config: ClassVar[tuple[str, ...]]  # extra config keys a pull-mode Source must have
 
-    def pull(self, source: Source, http: HttpClient, now: datetime) -> Iterator[PullPage]: ...
+    def pull(
+        self, source: Source, http: HttpClient, clock: Clock, deadline: datetime
+    ) -> Iterator[PullPage]: ...
+
+
+class RecordContent(TypedDict):
+    title: str | None
+    text: str
+    author: str | None
+    language: str | None
+    rating: int | None
+    source_created_at: datetime
+    source_updated_at: datetime | None
+    deleted_at: datetime | None
+    metadata: SourceMetadata
 
 
 def new_record(
-    source: Source, connector: SourceConnector, external_id: str, **content: object
+    source: Source, connector: SourceConnector, external_id: str, **content: Unpack[RecordContent]
 ) -> FeedbackRecord:
-    # kind comes from source_type; the pipeline replaces ingested_at with its clock
+    # identity keys go last so content cannot override them; the pipeline stamps ingested_at
     return FeedbackRecord.model_validate(
         {
+            **content,
             "id": uuid5(NAMESPACE_URL, f"{source.id}:{external_id}").hex,
             "tenant_id": source.tenant_id,
             "source_id": source.id,
@@ -48,6 +64,5 @@ def new_record(
             "external_id": external_id,
             "connector_version": connector.version,
             "ingested_at": content["source_created_at"],
-            **content,
         }
     )

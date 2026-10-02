@@ -2,11 +2,11 @@ from datetime import datetime
 from typing import Protocol
 
 from feedback_ingest.domain.enums import EventStatus
-from feedback_ingest.domain.models import RawEvent
+from feedback_ingest.domain.models import Enqueued, RawEvent
 
 
 class RawEventQueue(Protocol):
-    def enqueue(self, event: RawEvent) -> str: ...  # the stored row's id, new or existing
+    def enqueue(self, event: RawEvent) -> Enqueued: ...
     def claim(self, now: datetime, lease_seconds: int, limit: int) -> list[RawEvent]: ...
     def mark_processed(self, event: RawEvent) -> bool: ...
     def mark_failed(self, event: RawEvent, error: str, next_attempt_at: datetime) -> bool: ...
@@ -14,6 +14,11 @@ class RawEventQueue(Protocol):
     def requeue(self, event_id: str, now: datetime) -> bool: ...
     def get(self, event_id: str) -> RawEvent | None: ...
     def list_by_status(
-        self, status: EventStatus, *, tenant_id: str | None = None, limit: int = 100
+        self,
+        status: EventStatus,
+        *,
+        tenant_id: str | None = None,
+        source_id: str | None = None,
+        limit: int = 100,
     ) -> list[RawEvent]: ...
     def counts(self, tenant_id: str | None = None) -> dict[EventStatus, int]: ...

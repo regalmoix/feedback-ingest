@@ -1,9 +1,8 @@
 import ipaddress
 import socket
 from collections.abc import Mapping
+from datetime import timedelta
 from urllib.parse import urlsplit
-
-from pydantic import ValidationError
 
 from feedback_ingest.connectors.base import PullConnector, SourceConnector
 from feedback_ingest.connectors.discourse import DiscourseConnector
@@ -20,6 +19,7 @@ CONNECTORS: dict[SourceType, SourceConnector] = {
     for c in (_DISCOURSE, PlaystoreConnector(), TwitterConnector(), IntercomConnector())
 }
 PULLERS: dict[SourceType, PullConnector] = {SourceType.DISCOURSE: _DISCOURSE}
+_MAX_WINDOW_DAYS = 31
 
 
 def check_source(source: Source) -> None:
@@ -46,22 +46,24 @@ def _check_values(config: Mapping[str, str]) -> None:
             msg = "config['base_url'] must not point at an internal host"
             raise ValueError(msg)
     try:
-        window_ok = int(config.get("window_days", "1")) > 0
+        window_ok = 0 < int(config.get("window_days", "1")) <= _MAX_WINDOW_DAYS
     except ValueError:
         window_ok = False
     if not window_ok:
-        msg = f"config['window_days'] is not a positive integer: {config['window_days']!r}"
+        msg = f"config['window_days'] must be 1 to {_MAX_WINDOW_DAYS}: {config['window_days']!r}"
         raise ValueError(msg)
     if "start_after" in config:
         try:
-            NAIVE_UTC.validate_python(config["start_after"])
-        except ValidationError:
-            msg = f"config['start_after'] is not a datetime: {config['start_after']!r}"
+            start = NAIVE_UTC.validate_python(config["start_after"])
+            start + timedelta(days=_MAX_WINDOW_DAYS)  # the puller's window end must exist
+        except (OverflowError, ValueError):
+            msg = f"config['start_after'] is not a usable datetime: {config['start_after']!r}"
             raise ValueError(msg) from None
 
 
-# ponytail: checks the literal host only, no DNS; only a public name that resolves to a private
-# address gets through. Resolve and pin the address at request time if tenants are untrusted.
+# ponytail: checks the literal host only, no DNS (redirects and env proxies are off in HttpxClient),
+# so only a public name that resolves to a private address gets through: *.nip.io-style names and
+# DNS rebinding. Resolve and pin the address at request time if tenants are untrusted.
 def _is_internal(host: str) -> bool:
     host = host.rstrip(".")
     if host == "localhost" or host.endswith((".localhost", ".local", ".internal")):

@@ -11,20 +11,20 @@ from feedback_ingest.domain.errors import TransformError, TransientError
 
 
 @pytest.mark.parametrize(
-    ("fixture", "error"),
+    "case",
     [("review", None), ("malformed", None), ("review", TransientError("upstream timeout"))],
     ids=["mark_processed", "mark_dead", "mark_failed"],
 )
 def test_a_stale_copy_after_a_reclaim_leaves_the_row_with_the_newer_claim(
     adapters: Adapters,
+    clock: FixedClock,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
-    fixture: str,
-    error: Exception | None,
+    case: tuple[str, Exception | None],
 ) -> None:
+    fixture, error = case
     stale = claimed(adapters, fixture)
-    assert isinstance(adapters.clock, FixedClock)
-    adapters.clock.advance(LEASE + 1)
+    clock.advance(LEASE + 1)
     [newer] = adapters.queue.claim(adapters.clock.now(), LEASE, 1)
     if error is not None:
         fail_with(monkeypatch, error)

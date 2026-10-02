@@ -3,7 +3,8 @@ from collections import defaultdict
 from typing import TYPE_CHECKING, Any
 
 import pytest
-from connector_fixtures import SECRET, fixture_names, load, source
+from connector_fixtures import fixture_names, source
+from helpers import SECRET, load
 from pydantic import ValidationError
 
 from feedback_ingest.adapters.memory.stores import MemoryFeedbackStore

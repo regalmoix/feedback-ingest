@@ -49,7 +49,6 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S101", "PLR2004", "INP001", "DTZ001"]  # rootdir conftest, no __init__.py; naive UTC
-"scripts/**" = ["INP001"]                     # standalone scripts, not a package
 
 [tool.mypy]
 strict = true

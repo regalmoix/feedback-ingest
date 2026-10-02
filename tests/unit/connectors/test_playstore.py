@@ -1,9 +1,12 @@
 from datetime import datetime
 
-from connector_fixtures import load, source
+import pytest
+from connector_fixtures import source
+from helpers import load
 
 from feedback_ingest.connectors.playstore import PlaystoreConnector
 from feedback_ingest.domain.enums import FeedbackKind, SourceType
+from feedback_ingest.domain.errors import TransformError
 from feedback_ingest.domain.metadata import PlaystoreMetadata
 
 PLAYSTORE = PlaystoreConnector()
@@ -31,8 +34,9 @@ def test_developer_reply_is_ignored() -> None:
     assert record.rating == 4
 
 
-def test_review_without_a_user_comment_is_nothing_to_ingest() -> None:
+def test_review_without_a_user_comment_goes_dead_not_silently_empty() -> None:
     payload = load(SourceType.PLAYSTORE, "review_edited")
     payload["comments"] = payload["comments"][1:]
-    assert PLAYSTORE.transform(SOURCE, payload) == []
+    with pytest.raises(TransformError, match="review has no user comment"):
+        PLAYSTORE.transform(SOURCE, payload)
     assert PLAYSTORE.external_event_id(payload)

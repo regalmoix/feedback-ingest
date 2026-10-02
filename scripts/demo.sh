@@ -7,6 +7,7 @@ cd "$(dirname "$0")/.."
 PORT="${PORT:-8000}"
 export FI_BASE_URL="http://127.0.0.1:$PORT" FI_DATABASE_URL="sqlite:///./demo.db"
 export FI_WORKER_POLL_SECONDS=2
+export FI_BOOTSTRAP_TOKEN="$(openssl rand -hex 32)"  # the default token is refused
 BASE="$FI_BASE_URL" FIX=tests/fixtures PY=.venv/bin/python
 TMP="$(mktemp -d)" SERVER_PID=""
 
@@ -31,7 +32,7 @@ stop_server() {
 trap 'stop_server; rm -rf "$TMP"' EXIT
 
 push() {  # source_id secret file
-  local sig; sig="$("$PY" scripts/sign.py "$2" "$3")"
+  local sig; sig="$(FI_SIGN_SECRET="$2" "$PY" scripts/sign.py "$3")"
   show curl -sS --fail-with-body -X POST "$BASE/v1/sources/$1/events" -H "X-Signature: $sig" \
     --data-binary "@$3"
   echo

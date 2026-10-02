@@ -1,8 +1,8 @@
 from collections.abc import Mapping
 from datetime import datetime
-from typing import Annotated, Any, Self
+from typing import Annotated, Any, NamedTuple, Self
 
-from pydantic import Field, SecretStr, model_validator
+from pydantic import Field, SecretStr, StringConstraints, computed_field, model_validator
 
 from feedback_ingest.domain.enums import EventStatus, FeedbackKind, SourceMode, SourceType
 from feedback_ingest.domain.metadata import FrozenModel, SourceMetadata
@@ -14,11 +14,12 @@ KIND_BY_SOURCE: dict[SourceType, FeedbackKind] = {
     SourceType.TWITTER: FeedbackKind.POST,
     SourceType.DISCOURSE: FeedbackKind.POST,
 }
+Name = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)]
 
 
 class Tenant(FrozenModel):
     id: str
-    name: str
+    name: Name
     api_key_hash: str
 
 
@@ -26,7 +27,7 @@ class Source(FrozenModel):
     id: str
     tenant_id: str
     type: SourceType
-    name: str
+    name: Name
     mode: SourceMode
     config: Mapping[str, str]
     webhook_secret: SecretStr | None = None
@@ -55,6 +56,18 @@ class RawEvent(FrozenModel):
     lease_until: NaiveUtc | None = None
     error: str | None = None
 
+    @model_validator(mode="after")
+    def _lease_iff_processing(self) -> Self:
+        if (self.lease_until is not None) != (self.status is EventStatus.PROCESSING):
+            msg = "lease_until is set exactly when status is processing"
+            raise ValueError(msg)
+        return self
+
+
+class Enqueued(NamedTuple):
+    id: str  # the stored row's, new or existing
+    status: EventStatus
+
 
 class FeedbackRecord(FrozenModel):
     id: str
@@ -62,7 +75,6 @@ class FeedbackRecord(FrozenModel):
     source_id: str
     source_type: SourceType
     external_id: str
-    kind: FeedbackKind
     title: str | None
     text: str
     author: str | None
@@ -75,19 +87,17 @@ class FeedbackRecord(FrozenModel):
     connector_version: int = Field(ge=1)
     metadata: SourceMetadata
 
-    @model_validator(mode="before")
-    @classmethod
-    def _kind_from_source_type(cls, data: object) -> object:
-        if isinstance(data, dict) and "source_type" in data:
-            return data | {"kind": KIND_BY_SOURCE[SourceType(data["source_type"])]}
-        return data
-
     @model_validator(mode="after")
     def _source_type_agrees(self) -> Self:
         if self.metadata.source_type != self.source_type:
             msg = f"metadata is for {self.metadata.source_type}, record is {self.source_type}"
             raise ValueError(msg)
         return self
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def kind(self) -> FeedbackKind:
+        return KIND_BY_SOURCE[self.source_type]
 
     @property
     def version_at(self) -> datetime:

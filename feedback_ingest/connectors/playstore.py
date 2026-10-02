@@ -6,6 +6,7 @@ from pydantic.alias_generators import to_camel
 
 from feedback_ingest.connectors.base import default_verify_signature, new_record
 from feedback_ingest.domain.enums import SourceType
+from feedback_ingest.domain.errors import TransformError
 from feedback_ingest.domain.metadata import PlaystoreMetadata
 from feedback_ingest.domain.models import FeedbackRecord, Source
 from feedback_ingest.utils.hashing import payload_hash
@@ -55,17 +56,16 @@ class PlaystoreConnector:
     def external_event_id(self, payload: Mapping[str, Any]) -> str:
         try:
             review = PlaystoreReviewIn.model_validate(payload)
-        except ValidationError:
+            modified = review.comments[0].user_comment.last_modified.seconds
+        except (ValidationError, IndexError):
             return payload_hash(dict(payload))
-        if not review.comments:
-            return payload_hash(dict(payload))
-        modified = review.comments[0].user_comment.last_modified.seconds
         return f"{review.review_id}:{modified.isoformat()}"
 
     def transform(self, source: Source, payload: Mapping[str, Any]) -> list[FeedbackRecord]:
         review = PlaystoreReviewIn.model_validate(payload)
-        if not review.comments:
-            return []
+        if not review.comments:  # a bad payload must not look like "no data"
+            msg = "review has no user comment"
+            raise TransformError(msg)
         comment = review.comments[0].user_comment
         modified = comment.last_modified.seconds
         return [

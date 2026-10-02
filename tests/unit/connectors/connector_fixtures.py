@@ -1,17 +1,7 @@
-import json
-from pathlib import Path
-from typing import Any
+from helpers import FIXTURES, SECRET
 
 from feedback_ingest.domain.enums import SourceMode, SourceType
 from feedback_ingest.domain.models import Source
-
-FIXTURES = Path(__file__).parents[2] / "fixtures"
-SECRET = "test-secret"  # noqa: S105  synthetic test secret
-
-
-def load(source_type: SourceType, name: str) -> dict[str, Any]:
-    payload: dict[str, Any] = json.loads((FIXTURES / source_type / f"{name}.json").read_text())
-    return payload
 
 
 def fixture_names(source_type: SourceType) -> list[str]:

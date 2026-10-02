@@ -1,7 +1,8 @@
 from datetime import datetime
 
 import pytest
-from connector_fixtures import load, source
+from connector_fixtures import source
+from helpers import load
 
 from feedback_ingest.connectors.twitter import TwitterConnector
 from feedback_ingest.domain.enums import FeedbackKind, SourceType

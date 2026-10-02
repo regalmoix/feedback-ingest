@@ -210,5 +210,7 @@ fails until all four are there."
   is empty), because httpx's `params=` replaces a query string already in the URL; `posts.json?post_ids[]=…`
   relies on this.
 - Empty `text` is allowed: an image-only post or a rating with no words is still feedback.
+- Fleet 2: a Playstore review with no user comment raises `TransformError("review has no user comment")`
+  and goes dead (it used to return `[]`); a bad payload must not look like "no data".
 - Connector files split into `discourse.py` + `discourse_models.py` + `discourse_pull.py`; registry tests live
   in `test_registry.py`; pull error tests in `test_discourse_pull_errors.py`.

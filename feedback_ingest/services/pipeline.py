@@ -8,7 +8,7 @@ from pydantic import ValidationError
 from feedback_ingest.connectors.registry import CONNECTORS
 from feedback_ingest.domain.enums import EventStatus, UpsertOutcome
 from feedback_ingest.domain.errors import TransformError, TransientError
-from feedback_ingest.domain.models import RawEvent
+from feedback_ingest.domain.models import FeedbackRecord, RawEvent
 from feedback_ingest.ports.clock import Clock
 from feedback_ingest.ports.queue import RawEventQueue
 from feedback_ingest.ports.stores import FeedbackStore, SourceStore
@@ -51,12 +51,12 @@ class PipelineService:
             return _finish(self.queue.mark_dead(event, error), EventStatus.DEAD, extra)
         except TransientError as exc:
             log.warning("transient failure: %s", exc, extra=extra)
-            return self._retry(event, exc, extra)
+            return self._retry(event, f"TransientError: {exc}", extra)
         # ponytail: retries unknown exceptions too; classify more exceptions as permanent once we
         # see them in prod
-        except Exception as exc:
+        except Exception as exc:  # its text may hold customer data: it stays in the log only
             log.exception("unexpected failure", extra=extra)
-            return self._retry(event, exc, extra)
+            return self._retry(event, f"{type(exc).__name__} (see logs)", extra)
         status = _finish(self.queue.mark_processed(event), EventStatus.PROCESSED, extra)
         if status == EventStatus.PROCESSED:
             counts = [outcomes[outcome] for outcome in UpsertOutcome]
@@ -68,15 +68,17 @@ class PipelineService:
         if source is None:
             msg = "source not found"
             raise TransformError(msg)
-        records = CONNECTORS[source.type].transform(source, dict(event.payload))
+        records = CONNECTORS[source.type].transform(source, event.payload)
         now = self.clock.now()
-        return Counter(
-            self.feedback.upsert(r.model_copy(update={"ingested_at": now})) for r in records
+        stamped = (
+            FeedbackRecord.model_validate(r.model_dump() | {"ingested_at": now}) for r in records
         )
+        return Counter(self.feedback.upsert(record) for record in stamped)
 
-    def _retry(self, event: RawEvent, exc: Exception, extra: dict[str, object]) -> EventStatus:
-        error = f"{type(exc).__name__}: {exc}"[:_MAX_ERROR]
+    def _retry(self, event: RawEvent, error: str, extra: dict[str, object]) -> EventStatus:
+        error = error[:_MAX_ERROR]
         if event.attempts >= self.max_attempts:
+            log.warning("dead: %s", error, extra=extra)
             return _finish(self.queue.mark_dead(event, error), EventStatus.DEAD, extra)
         delay = min(2**event.attempts, self.backoff_cap_seconds)
         next_at = self.clock.now() + timedelta(seconds=delay)

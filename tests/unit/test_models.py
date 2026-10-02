@@ -28,6 +28,15 @@ _RECORD: dict[str, Any] = {
     "connector_version": 1,
     "metadata": {"source_type": "twitter", "country": None, "retweets": 0},
 }
+_EVENT: dict[str, Any] = {
+    "id": "e1",
+    "tenant_id": "t1",
+    "source_id": "s1",
+    "external_event_id": "x1",
+    "payload": {},
+    "received_at": _NOW,
+    "next_attempt_at": _NOW,
+}
 _SOURCE: dict[str, Any] = {
     "id": "s1",
     "tenant_id": "t1",
@@ -41,15 +50,11 @@ _SOURCE: dict[str, Any] = {
 
 def test_aware_datetimes_become_naive_utc() -> None:
     ist = timezone(timedelta(hours=5, minutes=30))
-    event = RawEvent(
-        id="e1",
-        tenant_id="t1",
-        source_id="s1",
-        external_event_id="x1",
-        payload={},
-        received_at=datetime(2026, 1, 1, 17, 30, tzinfo=ist),
-        next_attempt_at=datetime(2026, 1, 1, 12, 0, tzinfo=UTC),
+    received, next_at = (
+        datetime(2026, 1, 1, 17, 30, tzinfo=ist),
+        datetime(2026, 1, 1, 12, tzinfo=UTC),
     )
+    event = RawEvent.model_validate(_EVENT | {"received_at": received, "next_attempt_at": next_at})
     assert (event.received_at, event.next_attempt_at) == (_NOW, _NOW)
 
 
@@ -88,16 +93,7 @@ def test_record_rejects_inconsistent_or_out_of_range_fields(bad: dict[str, Any])
 
 def test_raw_event_attempts_cannot_be_negative() -> None:
     with pytest.raises(ValidationError):
-        RawEvent(
-            id="e1",
-            tenant_id="t1",
-            source_id="s1",
-            external_event_id="x1",
-            payload={},
-            received_at=_NOW,
-            next_attempt_at=_NOW,
-            attempts=-1,
-        )
+        RawEvent.model_validate(_EVENT | {"attempts": -1})
 
 
 @pytest.mark.parametrize("secret", [None, ""])

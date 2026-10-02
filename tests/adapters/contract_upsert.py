@@ -1,7 +1,8 @@
 from datetime import timedelta
 
-from contract import SOURCE_A1, TENANT_A, Adapters, Case, record, seed
+from contract import SOURCE_A1, TENANT_A, Case, record, seed
 
+from feedback_ingest.api.deps import Adapters
 from feedback_ingest.domain.enums import UpsertOutcome
 
 

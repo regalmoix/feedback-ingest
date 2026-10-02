@@ -1,11 +1,10 @@
 import httpx2
 import pytest
 from fastapi.testclient import TestClient
-from helpers import client_for
+from helpers import TOKEN, client_for
 
 from feedback_ingest.api.deps import Adapters
-
-TOKEN = "bootstrap-test"  # noqa: S105  synthetic test token
+from feedback_ingest.config import DEFAULT_BOOTSTRAP_TOKEN
 
 
 def bootstrap(client: TestClient, token: str | None, name: str = "acme") -> httpx2.Response:
@@ -35,15 +34,14 @@ def test_tenant_names_are_unique_and_non_empty(adapters: Adapters) -> None:
             409,
             {"detail": "tenant 'acme' exists"},
         )
-        assert bootstrap(client, TOKEN, name="").status_code == 422
+        for name in ("", "   ", "x" * 201):
+            assert bootstrap(client, TOKEN, name=name).status_code == 422
 
 
-def test_default_token_warns_and_empty_token_locks_bootstrap(
-    adapters: Adapters, caplog: pytest.LogCaptureFixture
+@pytest.mark.parametrize("token", [DEFAULT_BOOTSTRAP_TOKEN, ""])
+def test_the_default_or_an_empty_token_refuses_bootstrap(
+    adapters: Adapters, caplog: pytest.LogCaptureFixture, token: str
 ) -> None:
-    with client_for(adapters):
-        pass
-    assert "FI_BOOTSTRAP_TOKEN is the default" in caplog.text
-    with client_for(adapters, bootstrap_token="") as client:
-        assert bootstrap(client, "").status_code == 401
-    assert "FI_BOOTSTRAP_TOKEN is empty; POST /admin/tenants is disabled" in caplog.text
+    with client_for(adapters, bootstrap_token=token) as client:
+        assert bootstrap(client, token).status_code == 401
+    assert "POST /admin/tenants is refused: set FI_BOOTSTRAP_TOKEN" in caplog.text

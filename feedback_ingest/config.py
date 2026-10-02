@@ -1,5 +1,7 @@
-from pydantic import PositiveFloat, PositiveInt
+from pydantic import PositiveFloat, PositiveInt, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+DEFAULT_BOOTSTRAP_TOKEN = "change-me"  # noqa: S105  refused: POST /admin/tenants needs a real one
 
 
 class Settings(BaseSettings):
@@ -13,5 +15,11 @@ class Settings(BaseSettings):
     max_attempts: PositiveInt = 5
     backoff_cap_seconds: PositiveInt = 300
     pull_interval_seconds: PositiveFloat = 300
+    pull_deadline_seconds: PositiveFloat = 60
+    http_max_bytes: PositiveInt = 2_000_000
     scheduler_enabled: bool = True
-    bootstrap_token: str = "change-me"  # noqa: S105  documented default; startup warns while unchanged
+    bootstrap_token: SecretStr = SecretStr(DEFAULT_BOOTSTRAP_TOKEN)
+
+    @property
+    def bootstrap_open(self) -> bool:
+        return self.bootstrap_token.get_secret_value() not in {"", DEFAULT_BOOTSTRAP_TOKEN}

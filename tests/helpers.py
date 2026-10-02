@@ -2,8 +2,8 @@ import json
 import time
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
-import httpx
 import httpx2
 import pytest
 from fastapi import FastAPI
@@ -23,7 +23,8 @@ from feedback_ingest.utils.signing import sign
 
 FIXTURES = Path(__file__).parent / "fixtures"
 FORUM = "https://forum.example.test"
-SECRET = "whsec-test"  # noqa: S105  synthetic test secret
+SECRET = "whsec-test-0123456789"  # noqa: S105  synthetic test secret
+TOKEN = "bootstrap-test"  # noqa: S105  synthetic test token
 KEY_A, KEY_B = "key-tenant-a", "key-tenant-b"
 MINE, THEIRS = {"X-API-Key": KEY_A}, {"X-API-Key": KEY_B}
 POLL_SECONDS = 0.05
@@ -31,6 +32,11 @@ POLL_SECONDS = 0.05
 
 def fixture_body(source_type: SourceType, name: str) -> bytes:
     return (FIXTURES / source_type / f"{name}.json").read_bytes()
+
+
+def load(source_type: SourceType, name: str) -> dict[str, Any]:
+    payload: dict[str, Any] = json.loads(fixture_body(source_type, name))
+    return payload
 
 
 def memory_adapters(clock: FixedClock) -> Adapters:
@@ -100,21 +106,3 @@ def wait_until(condition: Callable[[], bool], timeout: float = 5.0) -> None:
         if time.monotonic() > deadline:
             pytest.fail(f"condition not met within {timeout}s")
         time.sleep(POLL_SECONDS)
-
-
-# Two search pages and their posts.json, whatever the date window asked for.
-def discourse_http(fail_page: str | None = None) -> HttpxClient:
-    def handle(request: httpx.Request) -> httpx.Response:
-        params = request.url.params
-        if request.url.path == "/search.json":
-            if params["page"] == fail_page:
-                return httpx.Response(503, text="slow down")
-            page = FIXTURES / f"discourse/pull/search_page{params['page']}.json"
-            return httpx.Response(200, content=page.read_bytes())
-        topic = FIXTURES / f"discourse/pull/posts_topic_{request.url.path.split('/')[2]}.json"
-        wanted = {int(i) for i in params.get_list("post_ids[]")}
-        posts = json.loads(topic.read_text())["post_stream"]["posts"]
-        kept = [p for p in posts if p["id"] in wanted]
-        return httpx.Response(200, json={"post_stream": {"posts": kept}})
-
-    return HttpxClient(transport=httpx.MockTransport(handle))

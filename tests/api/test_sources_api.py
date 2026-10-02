@@ -35,7 +35,7 @@ def test_given_secret_and_config_are_kept(app_client: TestClient, adapters: Adap
         app_client, KEY_A, type="discourse", name="forum", mode="pull", config=FORUM
     ).json()
     assert (body["config"], body["webhook_secret"]) == (FORUM, None)
-    [pulled] = adapters.sources.list_by_mode(SourceMode.PULL)
+    [pulled] = adapters.sources.list_enabled(SourceMode.PULL)
     assert (pulled.id, pulled.config) == (body["id"], FORUM)
     own = create(app_client, KEY_A, type="twitter", name="t", mode="push", webhook_secret=SECRET)
     assert own.json()["webhook_secret"] == SECRET
@@ -90,12 +90,12 @@ def test_other_tenants_sources_are_invisible(app_client: TestClient, source_a: S
 
 
 @pytest.mark.usefixtures("source_a")
-def test_disabled_source_leaves_list_by_mode(app_client: TestClient, adapters: Adapters) -> None:
+def test_disabled_source_leaves_list_enabled(app_client: TestClient, adapters: Adapters) -> None:
     created = create(app_client, KEY_A, type="discourse", name="f", mode="pull", config=FORUM)
     url = f"/v1/sources/{created.json()['id']}"
     patched = app_client.patch(url, json={"enabled": False}, headers=MINE)
     assert patched.json()["enabled"] is False
-    assert adapters.sources.list_by_mode(SourceMode.PULL) == []
+    assert adapters.sources.list_enabled(SourceMode.PULL) == []
     assert app_client.get(url, headers=MINE).json()["enabled"] is False
 
 

@@ -5,6 +5,7 @@ from typing import Any
 from uuid import uuid4
 
 from feedback_ingest.connectors.registry import CONNECTORS
+from feedback_ingest.domain.enums import EventStatus
 from feedback_ingest.domain.models import RawEvent, Source
 from feedback_ingest.ports.clock import Clock
 from feedback_ingest.ports.queue import RawEventQueue
@@ -29,18 +30,20 @@ class IngestionService:
             id=uuid4().hex,
             tenant_id=source.tenant_id,
             source_id=source.id,
-            external_event_id=CONNECTORS[source.type].external_event_id(dict(payload)),
+            external_event_id=CONNECTORS[source.type].external_event_id(payload),
             payload=payload,
             received_at=now,
             next_attempt_at=now,
         )
-        stored_id = self.queue.enqueue(event)
-        result = AcceptResult(raw_event_id=stored_id, duplicate=stored_id != event.id)
+        stored = self.queue.enqueue(event)
+        result = AcceptResult(raw_event_id=stored.id, duplicate=stored.id != event.id)
         extra = {
-            "raw_event_id": stored_id,
+            "raw_event_id": stored.id,
             "tenant_id": source.tenant_id,
             "source_id": source.id,
             "duplicate": result.duplicate,
         }
+        if result.duplicate and stored.status is EventStatus.DEAD:
+            log.warning("duplicate of a dead raw event; not requeued, replay it", extra=extra)
         log.info("accepted (duplicate=%s)", result.duplicate, extra=extra)
         return result

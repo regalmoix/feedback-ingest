@@ -1,10 +1,12 @@
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, nullcontext
+from typing import override
 
 from fastapi import FastAPI
 
 from feedback_ingest.api import admin, health, ingest, records, sources, sync, tenants
+from feedback_ingest.api.body_limit import BodyLimit
 from feedback_ingest.api.deps import Adapters, AppState
 from feedback_ingest.api.errors import add_error_handlers
 from feedback_ingest.config import Settings
@@ -19,26 +21,28 @@ _LOG = logging.getLogger("feedback_ingest")
 _LOG_KEYS = ("raw_event_id", "tenant_id", "source_id", "attempts")
 
 
+class OneLineFormatter(logging.Formatter):
+    @override
+    def formatMessage(self, record: logging.LogRecord) -> str:  # tracebacks keep their lines
+        return super().formatMessage(record).replace("\r", "\\r").replace("\n", "\\n")
+
+
 def create_app(settings: Settings | None = None, adapters: Adapters | None = None) -> FastAPI:
     s = settings or Settings()
     if not _LOG.handlers:
         handler = logging.StreamHandler()
         keys = " ".join(f"{key}=%({key})s" for key in _LOG_KEYS)
         fmt = f"%(asctime)s %(levelname)s %(name)s %(message)s {keys}"
-        handler.setFormatter(logging.Formatter(fmt, defaults=dict.fromkeys(_LOG_KEYS, "-")))
+        handler.setFormatter(OneLineFormatter(fmt, defaults=dict.fromkeys(_LOG_KEYS, "-")))
         _LOG.addHandler(handler)
         _LOG.setLevel(logging.INFO)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        built = nullcontext(adapters) if adapters is not None else sql_adapters(s.database_url)
+        built = nullcontext(adapters) if adapters is not None else sql_adapters(s)
         with built as a:
-            if not s.bootstrap_token:
-                _LOG.warning("FI_BOOTSTRAP_TOKEN is empty; POST /admin/tenants is disabled")
-            elif s.bootstrap_token == Settings.model_fields["bootstrap_token"].default:
-                _LOG.warning(
-                    "FI_BOOTSTRAP_TOKEN is the default; set it before exposing /admin/tenants"
-                )
+            if not s.bootstrap_open:
+                _LOG.warning("POST /admin/tenants is refused: set FI_BOOTSTRAP_TOKEN")
             pipeline = PipelineService(
                 a.sources, a.feedback, a.queue, a.clock, s.max_attempts, s.backoff_cap_seconds
             )
@@ -46,20 +50,21 @@ def create_app(settings: Settings | None = None, adapters: Adapters | None = Non
                 a.queue, pipeline, a.clock, s.worker_poll_seconds, s.lease_seconds, s.claim_batch
             )
             ingestion = IngestionService(a.queue, a.clock)
-            pull = PullService(a.sources, ingestion, a.http, a.clock)
+            pull = PullService(a.sources, ingestion, a.http, a.clock, s.pull_deadline_seconds)
             scheduler = SchedulerService(pull, s.pull_interval_seconds)
             app.state.ctx = AppState(s, a, ingestion, worker, pull, scheduler)
-            if s.worker_enabled:
-                worker.start()
-            if s.scheduler_enabled:
-                scheduler.start()
             try:
+                if s.worker_enabled:
+                    worker.start()
+                if s.scheduler_enabled:
+                    scheduler.start()
                 yield
             finally:
                 scheduler.stop()
                 worker.stop()
 
     app = FastAPI(title="Feedback ingest", lifespan=lifespan)
+    app.add_middleware(BodyLimit)
     add_error_handlers(app)
     for module in (ingest, admin, health, sources, records, tenants, sync):
         app.include_router(module.router)

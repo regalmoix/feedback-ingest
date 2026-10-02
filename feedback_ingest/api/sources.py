@@ -29,11 +29,7 @@ def create_source(body: SourceCreate, tenant: CurrentTenant, ctx: Ctx) -> Source
         webhook_secret=secret,
         cursor=None,
     )
-    try:
-        check_source(source)
-    except ValueError as exc:
-        raise HTTPException(HTTPStatus.UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
-    ctx.adapters.sources.add(source)
+    ctx.adapters.sources.add(_checked(source))
     return SourceCreated.model_validate(
         body.model_dump() | {"id": source.id, "webhook_secret": secret}
     )
@@ -53,8 +49,22 @@ def get_source(source: Annotated[Source, Depends(tenant_source)]) -> SourceView:
 def update_source(
     body: SourceUpdate, source: Annotated[Source, Depends(tenant_source)], ctx: Ctx
 ) -> SourceView:
-    ctx.adapters.sources.set_enabled(source.id, source.tenant_id, body.enabled)
-    return _view(source.model_copy(update={"enabled": body.enabled}))
+    stored = ctx.adapters.sources
+    if body.config is not None:
+        source = _checked(source.model_copy(update={"config": {**source.config, **body.config}}))
+        stored.set_config(source.id, source.tenant_id, source.config)
+    if body.enabled is not None:
+        stored.set_enabled(source.id, source.tenant_id, body.enabled)
+        source = source.model_copy(update={"enabled": body.enabled})
+    return _view(source)
+
+
+def _checked(source: Source) -> Source:
+    try:
+        check_source(source)
+    except ValueError as exc:
+        raise HTTPException(HTTPStatus.UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+    return source
 
 
 def _view(source: Source) -> SourceView:

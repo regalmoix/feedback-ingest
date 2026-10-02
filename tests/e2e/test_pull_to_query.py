@@ -1,7 +1,8 @@
 from dataclasses import replace
 
+from discourse_mock import discourse_http
 from fastapi.testclient import TestClient
-from helpers import KEY_A, add_pull_source, discourse_http, seed_source, wait_until
+from helpers import KEY_A, add_pull_source, seed_source, wait_until
 
 from feedback_ingest.config import Settings
 from feedback_ingest.domain.enums import EventStatus, FeedbackKind
@@ -12,7 +13,7 @@ from feedback_ingest.wiring import sql_adapters
 
 def test_sync_pulls_posts_and_a_second_sync_only_finds_duplicates(settings: Settings) -> None:
     headers = {"X-API-Key": KEY_A}
-    with sql_adapters(settings.database_url) as built:
+    with sql_adapters(settings) as built:
         adapters = replace(built, http=discourse_http())
         seed_source(adapters, "tenant-a", KEY_A)
         forum = add_pull_source(adapters, "src-forum")

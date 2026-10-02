@@ -1,9 +1,10 @@
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 
 import pytest
-from contract import SOURCE_A1, TENANT_A, TENANT_B, Adapters, Case, event, record, seed
+from contract import SOURCE_A1, TENANT_A, TENANT_B, Case, event, record, seed
 from contract_queue import QUEUE_CASES
 from contract_queue_fencing import FENCING_CASES
 from contract_stores import STORE_CASES
@@ -11,28 +12,29 @@ from contract_upsert import UPSERT_CASES
 from sqlalchemy import Engine, text
 from sqlalchemy.exc import IntegrityError
 
-from feedback_ingest.adapters.memory.clock import FixedClock
 from feedback_ingest.adapters.sqlalchemy.db import make_engine
 from feedback_ingest.adapters.sqlalchemy.feedback_store import SqlFeedbackStore
 from feedback_ingest.adapters.sqlalchemy.raw_event_queue import SqlRawEventQueue
 from feedback_ingest.adapters.sqlalchemy.stores import SqlSourceStore, SqlTenantStore
+from feedback_ingest.api.deps import Adapters
 
 CASES = STORE_CASES + UPSERT_CASES + QUEUE_CASES + FENCING_CASES
 
 
-def _adapters(engine: Engine, clock: FixedClock) -> Adapters:
-    return Adapters(
-        SqlTenantStore(engine),
-        SqlSourceStore(engine),
-        SqlFeedbackStore(engine),
-        SqlRawEventQueue(engine),
-        clock,
+@pytest.fixture
+def sql(engine: Engine, adapters: Adapters) -> Adapters:
+    return replace(
+        adapters,
+        tenants=SqlTenantStore(engine),
+        sources=SqlSourceStore(engine),
+        feedback=SqlFeedbackStore(engine),
+        queue=SqlRawEventQueue(engine),
     )
 
 
 @pytest.mark.parametrize("case", CASES, ids=lambda case: case.__name__)
-def test_contract(case: Case, engine: Engine, clock: FixedClock) -> None:
-    case(_adapters(engine, clock))
+def test_contract(case: Case, sql: Adapters) -> None:
+    case(sql)
 
 
 def test_wal_is_on(engine: Engine) -> None:
@@ -40,19 +42,19 @@ def test_wal_is_on(engine: Engine) -> None:
         assert conn.execute(text("PRAGMA journal_mode")).scalar() == "wal"
 
 
-def test_rows_must_belong_to_their_sources_tenant(engine: Engine, clock: FixedClock) -> None:
-    a = _adapters(engine, clock)
+def test_rows_must_belong_to_their_sources_tenant(sql: Adapters) -> None:
+    a = sql
     seed(a)
     with pytest.raises(IntegrityError):
-        a.feedback.upsert(record(SOURCE_A1, "r1", clock.now(), tenant_id=TENANT_B.id))
+        a.feedback.upsert(record(SOURCE_A1, "r1", a.clock.now(), tenant_id=TENANT_B.id))
     with pytest.raises(IntegrityError):
         a.queue.enqueue(
-            event(SOURCE_A1, "e1", clock.now()).model_copy(update={"tenant_id": TENANT_B.id})
+            event(SOURCE_A1, "e1", a.clock.now()).model_copy(update={"tenant_id": TENANT_B.id})
         )
 
 
-def test_reads_do_not_wait_for_the_write_lock(engine: Engine, clock: FixedClock) -> None:
-    a = _adapters(engine, clock)
+def test_reads_do_not_wait_for_the_write_lock(engine: Engine, sql: Adapters) -> None:
+    a = sql
     seed(a)
     with engine.begin():  # holds BEGIN IMMEDIATE
         start = time.monotonic()
@@ -61,10 +63,10 @@ def test_reads_do_not_wait_for_the_write_lock(engine: Engine, clock: FixedClock)
         assert time.monotonic() - start < 1
 
 
-def test_concurrent_claims_are_disjoint(engine: Engine, clock: FixedClock) -> None:
-    a = _adapters(engine, clock)
+def test_concurrent_claims_are_disjoint(engine: Engine, sql: Adapters) -> None:
+    a = sql
     seed(a)
-    now = clock.now()
+    now = a.clock.now()
     for n in range(40):
         a.queue.enqueue(event(SOURCE_A1, f"e{n}", now))
     workers = 4

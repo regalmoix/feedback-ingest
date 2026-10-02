@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy import exc as sa_exc
 
-from feedback_ingest.domain.errors import NotFoundError, UnauthorizedError
+from feedback_ingest.domain.errors import ConflictError, NotFoundError, UnauthorizedError
 
 log = logging.getLogger(__name__)
 _Handler = Callable[[Request, Exception], Awaitable[JSONResponse]]
@@ -20,7 +20,8 @@ def _respond(status: HTTPStatus) -> _Handler:
 
 
 async def _storage_unavailable(request: Request, exc: Exception) -> JSONResponse:
-    extra = {"source_id": request.path_params.get("source_id", "-")}
+    params = request.path_params
+    extra = {"source_id": params.get("source_id", "-"), "raw_event_id": params.get("event_id", "-")}
     log.error(
         "storage unavailable: %s %s", request.method, request.url.path, exc_info=exc, extra=extra
     )
@@ -32,5 +33,6 @@ async def _storage_unavailable(request: Request, exc: Exception) -> JSONResponse
 def add_error_handlers(app: FastAPI) -> None:
     app.add_exception_handler(NotFoundError, _respond(HTTPStatus.NOT_FOUND))
     app.add_exception_handler(UnauthorizedError, _respond(HTTPStatus.UNAUTHORIZED))
+    app.add_exception_handler(ConflictError, _respond(HTTPStatus.CONFLICT))
     for exc in (sa_exc.OperationalError, sa_exc.InterfaceError, sa_exc.TimeoutError):
         app.add_exception_handler(exc, _storage_unavailable)

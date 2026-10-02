@@ -1,3 +1,4 @@
+from collections.abc import Sequence
 from datetime import datetime, timedelta
 from itertools import batched
 from typing import Any
@@ -5,11 +6,15 @@ from urllib.parse import urlencode
 
 from connector_fixtures import source
 
+from feedback_ingest.adapters.memory.clock import FixedClock
+from feedback_ingest.connectors.discourse import DiscourseConnector
 from feedback_ingest.domain.enums import SourceMode, SourceType
 from feedback_ingest.domain.models import Source
 
+PULLER = DiscourseConnector()
 BASE = "https://forum.example.test"
 NOW = datetime(2026, 3, 1, 12, 0)
+CLOCK, DEADLINE = FixedClock(NOW), NOW + timedelta(minutes=1)
 START = datetime(2026, 2, 1)
 HEADLINES = {10: '<span class="search-highlight">Dark</span> mode', 20: "Login loop"}
 TOPICS = [{"id": 10, "title": "Dark mode"}, {"id": 20, "title": "Login loop"}]
@@ -21,9 +26,15 @@ class StubHttp:
         self.routes = routes
         self.calls: list[str] = []
 
-    def get_json(self, url: str, params: dict[str, str]) -> dict[str, Any]:
-        self.calls.append(f"{url} {params.get('q', '')}".strip())
-        found = self.routes[url, params.get("page", "")]
+    def get_json(self, url: str, params: Sequence[tuple[str, str]] = ()) -> dict[str, Any]:
+        query = dict(params)
+        if "page" in query:
+            self.calls.append(f"{url} {query['q']}")
+            found = self.routes[url, query["page"]]
+        else:
+            url = f"{url}?{urlencode(params)}"
+            self.calls.append(url)
+            found = self.routes[url, ""]
         if isinstance(found, Exception):
             raise found
         return found

@@ -1,6 +1,7 @@
 from datetime import datetime
 
-from connector_fixtures import load, source
+from connector_fixtures import source
+from helpers import load
 
 from feedback_ingest.connectors.discourse import DiscourseConnector
 from feedback_ingest.domain.enums import FeedbackKind, SourceType

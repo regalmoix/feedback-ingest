@@ -38,6 +38,7 @@ def test_push_does_not_need_pull_only_keys() -> None:
         ("window_days", "0"),
         ("window_days", "-3"),
         ("window_days", "a week"),
+        ("window_days", "32"),
         ("base_url", "forum.example.test"),
         ("base_url", "ftp://forum.example.test"),
         ("base_url", "https://user:pw@forum.example.test"),
@@ -49,6 +50,7 @@ def test_push_does_not_need_pull_only_keys() -> None:
         ("base_url", "https://localhost"),
         ("base_url", "https://metadata.google.internal"),
         ("start_after", "soon"),
+        ("start_after", "9999-12-31"),
     ],
 )
 def test_bad_config_values_are_rejected(key: str, value: str) -> None:

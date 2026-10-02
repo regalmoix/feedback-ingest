@@ -1,8 +1,8 @@
 from datetime import datetime
 
 from sqlalchemy import Engine, select
-from sqlalchemy.orm import sessionmaker
 
+from feedback_ingest.adapters.sqlalchemy.db import sessions
 from feedback_ingest.adapters.sqlalchemy.tables import FeedbackRecordRow
 from feedback_ingest.domain.enums import FeedbackKind, UpsertOutcome
 from feedback_ingest.domain.errors import check_limit
@@ -11,8 +11,7 @@ from feedback_ingest.domain.models import FeedbackRecord
 
 class SqlFeedbackStore:
     def __init__(self, engine: Engine) -> None:
-        self._write = sessionmaker(engine, expire_on_commit=False)
-        self._read = sessionmaker(engine.execution_options(read_only=True), expire_on_commit=False)
+        self._write, self._read = sessions(engine)
 
     # ponytail: read-then-write under BEGIN IMMEDIATE serialises all writers;
     # switch to INSERT…ON CONFLICT when Postgres needs concurrent writers

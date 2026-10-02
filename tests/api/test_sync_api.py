@@ -1,6 +1,3 @@
-from dataclasses import replace
-from datetime import datetime
-
 import pytest
 from fastapi.testclient import TestClient
 from helpers import (
@@ -8,23 +5,14 @@ from helpers import (
     KEY_B,
     add_pull_source,
     app_state,
-    discourse_http,
-    memory_adapters,
     seed_source,
 )
 from sqlalchemy import exc as sa_exc
 
-from feedback_ingest.adapters.memory.clock import FixedClock
 from feedback_ingest.api.deps import Adapters
 from feedback_ingest.domain.enums import SourceMode, SourceType
 from feedback_ingest.domain.errors import TransientError
 from feedback_ingest.domain.models import Source
-
-
-@pytest.fixture
-def adapters() -> Adapters:
-    a = memory_adapters(FixedClock(datetime(2026, 3, 1, 12, 0)))
-    return replace(a, http=discourse_http())
 
 
 @pytest.fixture
@@ -83,7 +71,7 @@ def test_409_unless_an_enabled_pull_source(
 def test_502_with_the_pull_result_when_the_source_fails(
     app_client: TestClient, forum: Source, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    def down(url: str, _params: dict[str, str]) -> dict[str, object]:
+    def down(url: str, _params: object = ()) -> dict[str, object]:
         msg = f"503 from {url}"
         raise TransientError(msg)
 

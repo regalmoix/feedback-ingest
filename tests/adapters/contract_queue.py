@@ -1,9 +1,10 @@
 from datetime import timedelta
 
 import pytest
-from contract import SOURCE_A1, SOURCE_B1, TENANT_A, Adapters, Case, event, seed
+from contract import SOURCE_A1, SOURCE_B1, TENANT_A, Case, event, seed
 from sqlalchemy.exc import IntegrityError
 
+from feedback_ingest.api.deps import Adapters
 from feedback_ingest.domain.enums import EventStatus
 
 
@@ -11,9 +12,9 @@ def duplicate_enqueue_returns_the_stored_id(a: Adapters) -> None:
     seed(a)
     now = a.clock.now()
     first, other_source = event(SOURCE_A1, "e1", now), event(SOURCE_B1, "e1", now)
-    assert a.queue.enqueue(first) == first.id
-    assert a.queue.enqueue(event(SOURCE_A1, "e1", now)) == first.id
-    assert a.queue.enqueue(other_source) == other_source.id
+    assert a.queue.enqueue(first) == (first.id, EventStatus.PENDING)
+    assert a.queue.enqueue(event(SOURCE_A1, "e1", now)).id == first.id
+    assert a.queue.enqueue(other_source).id == other_source.id
     with pytest.raises((ValueError, IntegrityError)):
         a.queue.enqueue(first.model_copy(update={"external_event_id": "e2"}))
     assert a.queue.counts(TENANT_A.id)[EventStatus.PENDING] == 1

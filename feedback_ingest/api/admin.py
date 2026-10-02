@@ -1,28 +1,41 @@
 from http import HTTPStatus
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, HTTPException, Query
 
 from feedback_ingest.api.deps import Ctx, CurrentTenant
-from feedback_ingest.api.schemas import RawEventView
+from feedback_ingest.api.schemas import RawEventDetail, RawEventView
 from feedback_ingest.domain.enums import EventStatus
 from feedback_ingest.domain.errors import NotFoundError
 from feedback_ingest.domain.models import RawEvent, Tenant
 
 router = APIRouter(prefix="/admin")
+Limit = Annotated[int, Query(ge=1, le=500)]
 
 
 @router.get("/raw-events", response_model=list[RawEventView])
 def list_raw_events(
-    tenant: CurrentTenant,
-    ctx: Ctx,
-    status: EventStatus = EventStatus.DEAD,
-    limit: Annotated[int, Query(ge=1, le=500)] = 50,
+    tenant: CurrentTenant, ctx: Ctx, status: EventStatus = EventStatus.DEAD, limit: Limit = 50
 ) -> list[RawEvent]:
     return ctx.adapters.queue.list_by_status(status, tenant_id=tenant.id, limit=limit)
 
 
-@router.get("/raw-events/{event_id}")
+@router.post("/raw-events/replay")
+def replay_raw_events(
+    tenant: CurrentTenant,
+    ctx: Ctx,
+    source_id: str | None = None,
+    status: Literal["dead", "failed", "processed"] = "dead",
+    limit: Limit = 500,
+) -> dict[str, int]:
+    queue, now = ctx.adapters.queue, ctx.adapters.clock.now()
+    events = queue.list_by_status(
+        EventStatus(status), tenant_id=tenant.id, source_id=source_id, limit=limit
+    )
+    return {"requeued": sum(queue.requeue(event.id, now) for event in events)}
+
+
+@router.get("/raw-events/{event_id}", response_model=RawEventDetail)
 def get_raw_event(event_id: str, tenant: CurrentTenant, ctx: Ctx) -> RawEvent:
     return _tenant_event(event_id, tenant, ctx)
 

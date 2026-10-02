@@ -10,6 +10,7 @@ from feedback_ingest.connectors.discourse_pull import pull_pages
 from feedback_ingest.domain.enums import SourceType
 from feedback_ingest.domain.metadata import DiscourseMetadata
 from feedback_ingest.domain.models import FeedbackRecord, Source
+from feedback_ingest.ports.clock import Clock
 from feedback_ingest.ports.http import HttpClient
 from feedback_ingest.utils.hashing import payload_hash
 from feedback_ingest.utils.html import strip_tags
@@ -56,5 +57,7 @@ class DiscourseConnector:
     def verify_signature(self, secret: str, body: bytes, headers: Mapping[str, str]) -> bool:
         return default_verify_signature(secret, body, headers)
 
-    def pull(self, source: Source, http: HttpClient, now: datetime) -> Iterator[PullPage]:
-        return pull_pages(source, http, now)
+    def pull(
+        self, source: Source, http: HttpClient, clock: Clock, deadline: datetime
+    ) -> Iterator[PullPage]:
+        return pull_pages(source, http, clock, deadline)

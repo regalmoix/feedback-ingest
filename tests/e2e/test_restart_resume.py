@@ -1,7 +1,7 @@
 import json
 
 from fastapi.testclient import TestClient
-from helpers import KEY_A, app_state, fixture_body, push, seed_source, wait_until
+from helpers import KEY_A, app_state, load, push, seed_source, wait_until
 
 from feedback_ingest.config import Settings
 from feedback_ingest.domain.enums import EventStatus, SourceType
@@ -9,7 +9,7 @@ from feedback_ingest.main import create_app
 
 
 def test_events_accepted_before_a_restart_are_processed_after_it(settings: Settings) -> None:
-    review = json.loads(fixture_body(SourceType.PLAYSTORE, "review"))
+    review = load(SourceType.PLAYSTORE, "review")
     bodies = [json.dumps(review | {"reviewId": f"review-{n}"}).encode() for n in range(3)]
     accept_only = settings.model_copy(update={"worker_enabled": False})
     with TestClient(create_app(accept_only)) as client:

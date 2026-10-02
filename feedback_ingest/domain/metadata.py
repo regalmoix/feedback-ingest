@@ -1,6 +1,6 @@
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, NonNegativeInt, PositiveInt
 
 from feedback_ingest.domain.enums import SourceType
 
@@ -11,9 +11,9 @@ class FrozenModel(BaseModel):
 
 class DiscourseMetadata(FrozenModel):
     source_type: Literal[SourceType.DISCOURSE] = SourceType.DISCOURSE
-    topic_id: int
-    post_number: int
-    like_count: int
+    topic_id: PositiveInt
+    post_number: PositiveInt
+    like_count: NonNegativeInt
     url: str
 
 
@@ -27,13 +27,13 @@ class PlaystoreMetadata(FrozenModel):
 class TwitterMetadata(FrozenModel):
     source_type: Literal[SourceType.TWITTER] = SourceType.TWITTER
     country: str | None
-    retweets: int
-    likes: int = 0
+    retweets: NonNegativeInt
+    likes: NonNegativeInt = 0
 
 
 class IntercomMetadata(FrozenModel):
     source_type: Literal[SourceType.INTERCOM] = SourceType.INTERCOM
-    part_count: int
+    part_count: NonNegativeInt
     tags: tuple[str, ...]
     state: str | None = None
 

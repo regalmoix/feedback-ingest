@@ -1,8 +1,7 @@
-import json
 from datetime import timedelta
 
 import pytest
-from helpers import KEY_A, fixture_body, seed_source
+from helpers import KEY_A, load, seed_source
 
 from feedback_ingest.adapters.memory.clock import FixedClock
 from feedback_ingest.api.deps import Adapters
@@ -24,7 +23,7 @@ def make_pipeline(a: Adapters, backoff_cap_seconds: int = 300) -> PipelineServic
 
 def claimed(adapters: Adapters, fixture: str = "review", source: Source | None = None) -> RawEvent:
     source = source or seed_source(adapters, "tenant-a", KEY_A)
-    body = json.loads(fixture_body(source.type, fixture))
+    body = load(source.type, fixture)
     IngestionService(adapters.queue, adapters.clock).accept(source, body)
     [event] = adapters.queue.claim(adapters.clock.now(), LEASE, 1)
     return event
@@ -69,10 +68,21 @@ def test_malformed_payload_is_dead_on_the_first_attempt_without_customer_text(
     assert text not in caplog.text
 
 
-@pytest.mark.parametrize("error", [TransientError, RuntimeError])
+@pytest.mark.parametrize(
+    "case",
+    [
+        (TransientError, "TransientError: upstream timeout"),
+        (RuntimeError, "RuntimeError (see logs)"),  # unknown text may hold customer data
+    ],
+)
 def test_failures_back_off_exponentially_then_go_dead(
-    adapters: Adapters, clock: FixedClock, monkeypatch: pytest.MonkeyPatch, error: type[Exception]
+    adapters: Adapters,
+    clock: FixedClock,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    case: tuple[type[Exception], str],
 ) -> None:
+    error, stored_error = case
     fail_with(monkeypatch, error("upstream timeout"))
     event, pipeline = claimed(adapters), make_pipeline(adapters)
     for attempt in range(1, MAX_ATTEMPTS):
@@ -84,7 +94,8 @@ def test_failures_back_off_exponentially_then_go_dead(
         clock.advance(2**attempt)
         [event] = adapters.queue.claim(clock.now(), LEASE, 1)
     assert pipeline.process(event) == EventStatus.DEAD
-    assert stored(adapters, event).error == f"{error.__name__}: upstream timeout"
+    assert stored(adapters, event).error == stored_error
+    assert f"dead: {stored_error}" in caplog.text
 
 
 def test_unknown_source_is_dead(adapters: Adapters) -> None:

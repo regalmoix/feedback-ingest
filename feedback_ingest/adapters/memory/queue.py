@@ -2,7 +2,7 @@ from datetime import datetime, timedelta
 
 from feedback_ingest.domain.enums import EventStatus
 from feedback_ingest.domain.errors import check_limit
-from feedback_ingest.domain.models import RawEvent
+from feedback_ingest.domain.models import Enqueued, RawEvent
 
 _RETRYABLE = (EventStatus.PENDING, EventStatus.FAILED)
 
@@ -11,16 +11,16 @@ class MemoryRawEventQueue:
     def __init__(self) -> None:
         self._events: dict[str, RawEvent] = {}
 
-    def enqueue(self, event: RawEvent) -> str:
+    def enqueue(self, event: RawEvent) -> Enqueued:
         key = (event.source_id, event.external_event_id)
         for stored in self._events.values():
             if (stored.source_id, stored.external_event_id) == key:
-                return stored.id
+                return Enqueued(stored.id, stored.status)
         if event.id in self._events:
             msg = f"duplicate raw event id {event.id}"
             raise ValueError(msg)
         self._events[event.id] = event
-        return event.id
+        return Enqueued(event.id, event.status)
 
     def claim(self, now: datetime, lease_seconds: int, limit: int) -> list[RawEvent]:
         if limit < 1 or lease_seconds < 1:
@@ -74,12 +74,19 @@ class MemoryRawEventQueue:
         return self._events.get(event_id)
 
     def list_by_status(
-        self, status: EventStatus, *, tenant_id: str | None = None, limit: int = 100
+        self,
+        status: EventStatus,
+        *,
+        tenant_id: str | None = None,
+        source_id: str | None = None,
+        limit: int = 100,
     ) -> list[RawEvent]:
         matches = [
             e
             for e in self._events.values()
-            if e.status == status and (tenant_id is None or e.tenant_id == tenant_id)
+            if e.status == status
+            and (tenant_id is None or e.tenant_id == tenant_id)
+            and (source_id is None or e.source_id == source_id)
         ]
         matches.sort(key=lambda e: e.id)
         matches.sort(key=lambda e: e.received_at, reverse=True)  # stable: newest first, then id

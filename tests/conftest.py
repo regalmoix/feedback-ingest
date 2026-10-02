@@ -1,11 +1,13 @@
 import os
 from collections.abc import Iterator
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 
 import pytest
+from discourse_mock import discourse_http
 from fastapi.testclient import TestClient
-from helpers import KEY_A, KEY_B, POLL_SECONDS, client_for, memory_adapters, seed_source
+from helpers import KEY_A, KEY_B, POLL_SECONDS, TOKEN, client_for, memory_adapters, seed_source
 from sqlalchemy import Engine
 
 from feedback_ingest.adapters.memory.clock import FixedClock
@@ -33,12 +35,12 @@ def engine(tmp_path: Path) -> Iterator[Engine]:
 
 @pytest.fixture
 def clock() -> FixedClock:
-    return FixedClock(datetime(2026, 1, 1, 12, 0))
+    return FixedClock(datetime(2026, 3, 1, 12, 0))
 
 
 @pytest.fixture
 def adapters(clock: FixedClock) -> Adapters:
-    return memory_adapters(clock)
+    return replace(memory_adapters(clock), http=discourse_http())
 
 
 @pytest.fixture
@@ -64,4 +66,5 @@ def settings(tmp_path: Path) -> Settings:
         database_url=f"sqlite:///{tmp_path / 'e2e.db'}",
         worker_poll_seconds=POLL_SECONDS,
         scheduler_enabled=False,
+        bootstrap_token=TOKEN,
     )

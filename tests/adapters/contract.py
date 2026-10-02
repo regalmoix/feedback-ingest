@@ -1,24 +1,11 @@
 from collections.abc import Callable
-from dataclasses import dataclass
 from datetime import datetime
 from uuid import uuid4
 
-from feedback_ingest.adapters.memory.clock import FixedClock
+from feedback_ingest.api.deps import Adapters
 from feedback_ingest.domain.enums import SourceMode, SourceType
 from feedback_ingest.domain.metadata import PlaystoreMetadata
 from feedback_ingest.domain.models import FeedbackRecord, RawEvent, Source, Tenant
-from feedback_ingest.ports.queue import RawEventQueue
-from feedback_ingest.ports.stores import FeedbackStore, SourceStore, TenantStore
-
-
-@dataclass
-class Adapters:
-    tenants: TenantStore
-    sources: SourceStore
-    feedback: FeedbackStore
-    queue: RawEventQueue
-    clock: FixedClock
-
 
 TENANT_A = Tenant(id="tenant-a", name="Acme", api_key_hash="hash-a")
 TENANT_B = Tenant(id="tenant-b", name="Globex", api_key_hash="hash-b")

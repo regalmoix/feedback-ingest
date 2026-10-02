@@ -7,13 +7,13 @@ from contract import (
     SOURCE_B1,
     TENANT_A,
     TENANT_B,
-    Adapters,
     Case,
     record,
     seed,
 )
 from sqlalchemy.exc import IntegrityError
 
+from feedback_ingest.api.deps import Adapters
 from feedback_ingest.domain.enums import EventStatus, FeedbackKind, SourceMode, SourceType
 from feedback_ingest.domain.errors import NotFoundError
 from feedback_ingest.domain.metadata import TwitterMetadata
@@ -56,8 +56,8 @@ def filters_and_lookups_match(a: Adapters) -> None:
     assert a.tenants.get_by_api_key_hash("hash-b") == TENANT_B
     assert a.tenants.get_by_api_key_hash("nope") is None
     assert a.sources.list_for_tenant(TENANT_A.id) == [SOURCE_A1, SOURCE_A2]
-    a.sources.update_cursor(SOURCE_A2.id, "2026-01-01T00:00:00")
-    assert [s.cursor for s in a.sources.list_by_mode(SourceMode.PULL)] == ["2026-01-01T00:00:00"]
+    a.sources.update_cursor(SOURCE_A2.id, TENANT_A.id, "2026-01-01T00:00:00")
+    assert [s.cursor for s in a.sources.list_enabled(SourceMode.PULL)] == ["2026-01-01T00:00:00"]
 
 
 def duplicates_and_unknown_ids_raise(a: Adapters) -> None:
@@ -68,8 +68,15 @@ def duplicates_and_unknown_ids_raise(a: Adapters) -> None:
             a.tenants.add(duplicate)
     with pytest.raises((ValueError, IntegrityError)):
         a.sources.add(SOURCE_A1)
-    with pytest.raises(NotFoundError):
-        a.sources.update_cursor("missing", "cursor")
+    for source_id, tenant_id in (("missing", TENANT_A.id), (SOURCE_A2.id, TENANT_B.id)):
+        with pytest.raises(NotFoundError):
+            a.sources.update_cursor(source_id, tenant_id, "cursor")
+        with pytest.raises(NotFoundError):
+            a.sources.set_config(source_id, tenant_id, {})
+    a.sources.set_config(SOURCE_A2.id, TENANT_A.id, {"window_days": "2"})
+    assert a.sources.get_by_id(SOURCE_A2.id) == SOURCE_A2.model_copy(
+        update={"config": {"window_days": "2"}}
+    )
 
 
 def list_limits_below_one_raise(a: Adapters) -> None:
@@ -81,15 +88,15 @@ def list_limits_below_one_raise(a: Adapters) -> None:
             a.queue.list_by_status(EventStatus.PENDING, limit=limit)
 
 
-def disabled_sources_leave_list_by_mode(a: Adapters) -> None:
+def disabled_sources_leave_list_enabled(a: Adapters) -> None:
     seed(a)
     a.sources.set_enabled(SOURCE_A2.id, TENANT_A.id, False)
-    assert a.sources.list_by_mode(SourceMode.PULL) == []
+    assert a.sources.list_enabled(SourceMode.PULL) == []
     assert [s.enabled for s in a.sources.list_for_tenant(TENANT_A.id)] == [True, False]
     with pytest.raises(NotFoundError):
         a.sources.set_enabled(SOURCE_A2.id, TENANT_B.id, True)
     a.sources.set_enabled(SOURCE_A2.id, TENANT_A.id, True)
-    assert a.sources.list_by_mode(SourceMode.PULL) == [SOURCE_A2]
+    assert a.sources.list_enabled(SourceMode.PULL) == [SOURCE_A2]
 
 
 def get_record_is_tenant_scoped(a: Adapters) -> None:
@@ -107,6 +114,6 @@ STORE_CASES: list[Case] = [
     filters_and_lookups_match,
     duplicates_and_unknown_ids_raise,
     list_limits_below_one_raise,
-    disabled_sources_leave_list_by_mode,
+    disabled_sources_leave_list_enabled,
     get_record_is_tenant_scoped,
 ]
