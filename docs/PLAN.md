@@ -1,6 +1,15 @@
 # Plan: Feedback Ingestion Service (take-home round 3)
 
 > Progress: Complete 2026-10-03: Phases 0–6 committed; `docs/00_architecture.md` is the current reference; this plan is kept as the original design record and some names below predate review changes (dedupe_key, puller.py, asyncio worker, FeedbackKind.tweet).
+>
+> Update after Fleet 2 (commit cbb788c) and the tailoring pass (b8f6e2b). Where this plan disagrees with the code, the code wins. The changes that touch names in this plan:
+> - Every setting has the `FI_` prefix: `FI_DATABASE_URL`, `FI_WORKER_POLL_SECONDS`, `FI_PULL_INTERVAL_SECONDS`, `FI_MAX_ATTEMPTS`, and so on. Fleet 2 added `FI_PULL_DEADLINE_SECONDS` (60) and `FI_HTTP_MAX_BYTES` (2,000,000).
+> - Ports: `SourceStore.list_enabled(mode)` (was `list_pull`, then `list_by_mode`); `SourceStore.update_cursor(source_id, tenant_id, cursor)`; `RawEventQueue.enqueue(event)` returns `Enqueued(id, status)`, the stored row's id and status.
+> - Puller: `pull(source, http, clock, deadline) -> Iterator[PullPage]`. Discourse moves its cursor only on the final page of a search window, and stops after 10 search pages (about 500 posts per day).
+> - Webhook: no API key; the source id in the URL picks the source and its HMAC proves the sender. Only push sources accept webhooks (409 for a pull source). Bodies over 1 MiB get 413.
+> - New routes and behaviour: `PATCH /v1/sources/{id}` accepts `config` as well as `enabled`; bulk replay `POST /admin/raw-events/replay?source_id=&status=&limit=`; a second sync of a source already syncing in the same process gets 409; the default bootstrap token is refused (401) with a startup warning.
+> - Postgres swap: set `FI_DATABASE_URL`, add a driver, change three queries (claim, upsert, enqueue), add migrations.
+> - A fifth connector, `custom` (Enterpret's public webhook shape), and a fifth kind, `survey`.
 
 ## Context
 
@@ -23,7 +32,7 @@ Repo state: empty except the PDF. Not a git repo yet. Toolchain present: uv 0.8,
 
 | Decision | Choice | Why | Why not the alternatives |
 |---|---|---|---|
-| Storage | SQLite file via SQLAlchemy 2.0, `DATABASE_URL` env | Zero infra for demo; swap to Postgres is a URL change; unique index = idempotency in the DB, not app code | Postgres+docker: demo friction. stdlib sqlite3: hand row-mapping, harder DB swap |
+| Storage | SQLite file via SQLAlchemy 2.0, `FI_DATABASE_URL` env | Zero infra for demo; swap to Postgres: set `FI_DATABASE_URL`, add a driver, change three queries (claim, upsert, enqueue), add migrations; unique index = idempotency in the DB, not app code | Postgres+docker: demo friction. stdlib sqlite3: hand row-mapping, harder DB swap |
 | Async processing | DB-backed inbox (`raw_events` table is both the durable log and the queue) + in-process worker thread | Durable across restarts, no broker, replayable, one process to run | Redis/arq or Kafka: extra runtime; same repository interface lets us swap later. Sync inline: weak failure story |
 | Connectors | All four: Discourse (pull, live), Playstore / Twitter / Intercom (push, fixtures) | Maximises "requirements addressed"; each ~40 lines | Fewer connectors proves less |
 | Idempotency | `UNIQUE(source_id, external_id)` on records (tenant comes from the source row) and `UNIQUE(source_id, external_event_id)` on raw events; upsert applies only when the incoming version (`COALESCE(source_updated_at, source_created_at)`) is not older; tombstones always apply (ADR-002) | DB constraint beats app-level checks under concurrency; a readable composite key beats a hash nobody can explain | sha256 dedupe key: same guarantee, unreadable. In-memory set / Redis set: lost on restart, second component |
@@ -31,11 +40,11 @@ Repo state: empty except the PDF. Not a git repo yet. Toolchain present: uv 0.8,
 | Raw retention | Every inbound payload stored verbatim in `raw_events` before any transform | Enables replay after a transformer bug, DLQ, audit | Transform-then-store loses the ability to recover |
 | Uniform record | One `feedback_records` table, typed common columns + `metadata` JSON validated by per-source Pydantic model | Uniform querying across sources, typed at the edge | Table-per-source: joins for cross-source queries, schema sprawl |
 | Extensibility | `SourceConnector` protocol + `CONNECTORS` registry dict; new source = one file + one registry line | Clear, demonstrable on whiteboard | Plugin entry points / dynamic import: speculative |
-| Infra swappability | Ports & adapters: every external interface (DB, queue, outbound HTTP, clock) is a `Protocol` in `ports/`, with one real adapter and one in-memory fake. Services depend only on ports | Swapping SQLite→Postgres or the table-queue→Kafka/SQS touches one adapter file (plus an honest change of retry model, see ADR-001); fakes make unit tests fast and prove the port has two implementations (satisfies ponytail's "no interface with one implementation") | Services calling SQLAlchemy/httpx directly: cheap now, rewrite later |
+| Infra swappability | Ports & adapters: every external interface (DB, queue, outbound HTTP, clock) is a `Protocol` in `ports/`, with one real adapter and one in-memory fake. Services depend only on ports | Swapping SQLite→Postgres or the table-queue→Kafka/SQS stays inside the adapters (Postgres: three queries plus migrations; a broker also changes the retry model, see ADR-001); fakes make unit tests fast and prove the port has two implementations (satisfies ponytail's "no interface with one implementation") | Services calling SQLAlchemy/httpx directly: cheap now, rewrite later |
 | Web/HTTP | FastAPI + httpx (MockTransport in tests, no respx) | Standard, Pydantic-native, typed | Flask/Django: heavier or less typed |
 | Migrations | `metadata.create_all` at startup | Demo scope | Alembic: mentioned as prod path, not built |
 | Language detection | Field exists; filled from source if provided else `None` | Requirement is a common attribute, not a detector | langdetect/fastText: enrichment stage, discussed not built |
-| Frontend | None | Backend assignment | — |
+| Frontend | None | Backend assignment | none |
 
 Operating model (from user):
 - **Zero intervention for v0 MVP.** Execution runs autonomously end to end (`builder-skills:plow-ahead` posture): ambiguities become stated assumptions in the phase LLD, no `AskUserQuestion` until the MVP is demo-ready. The user reviews the finished repo and docs.
@@ -100,12 +109,12 @@ Discourse pull: `search.json?q=after:{cursor} before:{now}` → ids/topic_ids �
 pyproject.toml  README.md  .python-version  .gitignore
 feedback_ingest/
   main.py               app factory, lifespan wires adapters → services, starts worker + scheduler
-  config.py             Settings (pydantic-settings; DATABASE_URL, WORKER_POLL_S, PULL_INTERVAL_S, MAX_ATTEMPTS)
+  config.py             Settings (pydantic-settings, prefix FI_; FI_DATABASE_URL, FI_WORKER_POLL_SECONDS, FI_PULL_INTERVAL_SECONDS, FI_MAX_ATTEMPTS)
   api/{deps,ingest,sources,records,admin,health}.py      thin routers, Pydantic request/response models
   domain/{enums,models,metadata,errors}.py
   connectors/{base,discourse,playstore,twitter,intercom}.py
   ports/{stores,queue,http,clock}.py                     Protocols only: TenantStore, SourceStore, FeedbackStore, RawEventQueue, HttpClient, Clock
-  adapters/sqlalchemy/{db,tables,stores,raw_event_queue}.py SQLite/Postgres via DATABASE_URL; durable-log queue on the raw_events table
+  adapters/sqlalchemy/{db,tables,stores,raw_event_queue}.py SQLite/Postgres via FI_DATABASE_URL; durable-log queue on the raw_events table
   adapters/memory/{stores,queue,clock}.py                in-memory fakes (tests, and proof the ports swap)
   adapters/http/httpx_client.py
   services/{ingestion,pipeline,pull,worker,scheduler}.py service classes depending on ports only
@@ -140,45 +149,45 @@ Tooling (`pyproject.toml`): uv project; deps `fastapi, uvicorn, sqlalchemy>=2, h
 
 Each phase = (a) Fable writes a 1-page LLD in `docs/phases/NN_*.md` in plain language (what, why, data flow, files, tests, how to explain it in the interview); (b) one Opus 5.5 medium Agent implements from the LLD with karpathy + ponytail rules; (c) reviewer fleet; (d) Opus fix agent; (e) `pytest + mypy + ruff` green; (f) git commit.
 
-### Phase 0 — Scaffold + ADRs (no business code)
+### Phase 0: Scaffold + ADRs (no business code)
 - `git init` (private, never pushed publicly), `uv init`, pyproject with strict tool config, empty package, `tests/conftest.py`, README skeleton, `docs/00_architecture.md` v1, `.gitignore`.
 - Copy this plan to `docs/PLAN.md`; every later phase updates its status line there.
 - 🏛️ Council #1: storage+queue shape (confirm SQLite inbox-table queue vs alternatives) → `ADR-001`.
 - 🏛️ Council #2: uniform record schema + dedupe key + metadata-as-JSON → `ADR-002`.
 - Verify: `uv run pytest` (0 tests, exit 0), `mypy`, `ruff` all pass on empty package.
 
-### Phase 1 — Domain, ports, adapters
+### Phase 1: Domain, ports, adapters
 - Enums, Pydantic models, per-source metadata models, `domain/errors.py`.
-- `ports/`: `TenantStore.by_api_key`, `SourceStore.get/list_pull/create/update_cursor`, `FeedbackStore.upsert/list`, `RawEventQueue.enqueue/claim(lease)/mark_processed(event)/mark_failed(event, error, next_attempt_at)/mark_dead(event, error)/requeue/list_by_status`, `HttpClient.get_json`, `Clock.now`.
-- `adapters/sqlalchemy/`: tables (UNIQUE `dedupe_key`, index `(tenant_id, source_id, status, next_attempt_at)` on raw_events), engine from `DATABASE_URL`, one class per port. `adapters/memory/`: dict-backed fakes with identical behaviour.
+- `ports/`: `TenantStore.by_api_key`, `SourceStore.get/list_pull/create/update_cursor` (built names: see the Fleet 2 note at the top), `FeedbackStore.upsert/list`, `RawEventQueue.enqueue/claim(lease)/mark_processed(event)/mark_failed(event, error, next_attempt_at)/mark_dead(event, error)/requeue/list_by_status`, `HttpClient.get_json`, `Clock.now`.
+- `adapters/sqlalchemy/`: tables (UNIQUE `dedupe_key`, index `(tenant_id, source_id, status, next_attempt_at)` on raw_events), engine from `FI_DATABASE_URL`, one class per port. `adapters/memory/`: dict-backed fakes with identical behaviour.
 - `utils/hashing.dedupe_key`, `utils/time` (`SystemClock`), `utils/signing` (HMAC).
 - Tests: a shared contract test module runs the same cases against both the SQLite and memory adapters (upsert twice → one row; older `source_updated_at` doesn't overwrite; claim leases and skips leased; lease expiry re-claims; tenant A cannot read B).
 - Reviewer fleet includes `type-design-analyzer`.
 
-### Phase 2 — Connectors + transform
+### Phase 2: Connectors + transform
 - `base.py` protocol + registry; four connectors; `tests/fixtures/{discourse_post,playstore_review,twitter_tweet,intercom_conversation}.json` (synthetic, no real user data).
 - 🏛️ Council #3: connector abstraction shape (protocol+registry vs class hierarchy vs config-driven mapping) → `ADR-003`.
 - Tests: each fixture → expected `FeedbackRecord` (kind, text, external_id, metadata validated by its model); malformed payload raises `TransformError`; `CONNECTORS` covers every `SourceType`.
 
-### Phase 3 — Push API + worker pipeline
-- `POST /v1/sources/{source_id}/events`: `X-API-Key` → tenant; source must belong to tenant; HMAC-SHA256 `X-Signature` check with source secret (stdlib `hmac`); insert raw → `202 {raw_event_id}`. Returns `503` if DB write fails (never ack what isn't durable).
+### Phase 3: Push API + worker pipeline
+- `POST /v1/sources/{source_id}/events` (superseded in Phase 6 and Fleet 2: no API key, push sources only; see ADR-003 ruling 8): `X-API-Key` → tenant; source must belong to tenant; HMAC-SHA256 `X-Signature` check with source secret (stdlib `hmac`); insert raw → `202 {raw_event_id}`. Returns `503` if DB write fails (never ack what isn't durable).
 - `services/pipeline.py`: raw → connector.transform → upsert → mark processed; on exception mark failed with backoff `2**attempts` s; after `MAX_ATTEMPTS` → `dead`.
 - `services/worker.py`: asyncio loop, `claim_batch` with lease, processes, started in lifespan; `GET /health` reports worker alive + pending/dead counts.
 - `POST /admin/raw-events/{id}/replay`, `GET /admin/raw-events?status=dead`.
 - Tests (FastAPI TestClient): bad signature → 401; wrong tenant → 404; duplicate webhook → one record; transform failure → failed→dead after N; replay of dead → processed; worker crash simulation (lease expiry re-claim).
 
-### Phase 4 — Pull integration (Discourse)
+### Phase 4: Pull integration (Discourse)
 - `connectors/discourse.py` `pull()`; `services/puller.py` runs pull for one source, feeds payloads through `IngestionService.accept` (same path as push, so same idempotency/retry), updates cursor only after raw rows are durably inserted.
 - `POST /v1/sources/{id}/sync` (manual trigger) + `services/scheduler.py` loop every `PULL_INTERVAL_S` over pull-mode sources. 429/5xx → retry with backoff, cursor untouched.
 - Tests: httpx `MockTransport` for both Discourse endpoints; cursor advances; overlap window produces duplicates that dedupe; 500 → cursor unchanged; `test_discourse_live.py` hits meta.discourse.org under `-m live`.
 
-### Phase 5 — Tenancy, query API, seed, demo
+### Phase 5: Tenancy, query API, seed, demo
 - `GET /v1/records?source_id=&kind=&since=&limit=` tenant-scoped; `GET/POST /v1/sources` (create a second Playstore source for same tenant → proves multi-source-same-type).
-- `scripts/seed.py`: two tenants, each with Discourse (pull) + two Playstore (push) + Twitter + Intercom sources; prints API keys and webhook secrets.
+- `scripts/seed.py`: two tenants, each with Discourse (pull) + two Playstore (push) + Twitter + Intercom sources; prints API keys and webhook secrets. (Built differently: `scripts/seed_lib.py` seeds `lumenote` and `brightwave`, and `seed.py` writes the keys and secrets to `.seed.json`, mode 600, printing only the path.)
 - `scripts/demo.sh`: start server, seed, push a signed Playstore review twice (show one record), trigger Discourse sync, list records, kill-and-restart server mid-queue (show pending rows resume), replay a dead event.
 - Tests: tenancy isolation end-to-end; two same-type sources yield distinct records for same external_id.
 
-### Phase 6 — Hardening + interview pack
+### Phase 6: Hardening + interview pack
 - stdlib `logging` with `tenant_id/source_id/raw_event_id` in every pipeline log line; counters exposed on `/health`.
 - `docs/interview/*` written by Fable (short, plain), expanded by an Opus agent where bulk is needed; `docs/00_architecture.md` final with mermaid: component, push sequence, pull sequence, retry/DLQ/replay state machine.
 - Slide deck via `anthropic-skills:pptx` (Opus agent) from the docs. Stays a local file; nothing published.
@@ -190,7 +199,7 @@ Each phase = (a) Fable writes a 1-page LLD in `docs/phases/NN_*.md` in plain lan
 Failure scenarios (each: symptom → what this code does → what prod adds):
 source API down / 429 · DB down on push (503, source retries) · DB down on pull (skip tick) · worker crash mid-event (lease expiry, idempotent reprocess) · duplicate webhooks · out-of-order updates (`source_updated_at` guard) · transformer bug after deploy (fix + replay from raw) · poison payload (DLQ) · noisy tenant (per-tenant rate limit / queue partitioning) · secret leak (rotate per source) · schema change at source (metadata JSON + connector version) · backfill request (sync with explicit range) · clock skew in cursors (overlap window) · service restart with 10k pending (batch size + lease).
 
-Scale/extension questions: Kafka/SQS swap (repository boundary), Postgres swap (`DATABASE_URL`), horizontal workers (lease + `SKIP LOCKED` on Postgres), partitioning by tenant, analytics store (ClickHouse), language detection + PII scrubbing as enrichment stages, deletes/tombstones, exactly-once vs at-least-once + idempotent (why we chose the latter), observability (metrics, tracing by `raw_event_id`), multi-region.
+Scale/extension questions: Kafka/SQS swap (repository boundary), Postgres swap (set `FI_DATABASE_URL`, add a driver, change three queries, add migrations), horizontal workers (lease + `SKIP LOCKED` on Postgres), partitioning by tenant, analytics store (ClickHouse), language detection + PII scrubbing as enrichment stages, deletes/tombstones, exactly-once vs at-least-once + idempotent (why we chose the latter), observability (metrics, tracing by `raw_event_id`), multi-region.
 
 Firefight runbook: "client says Playstore reviews missing since yesterday" → check source cursor/last sync → `/admin/raw-events?status=dead` → logs by `source_id` → replay / manual sync with range → comms template.
 

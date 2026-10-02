@@ -17,8 +17,9 @@ The four sources, and what the real services do:
 | Playstore | push, fed from fixture files | **Google Play has no review webhook.** Reviews are read by polling the Reply to Reviews API. Fixtures stand in for that poller. |
 | Twitter | push, fed from fixture files | **Twitter webhooks need a CRC handshake first**: a GET we must answer with an HMAC of a token. Fixtures stand in for a poller. |
 | Intercom | push, fed from fixture files | Real webhooks, signed with HMAC-SHA1 in `X-Hub-Signature: sha1=<hex>`. |
+| Custom (added later) | push | Enterpret's public custom webhook shape: a batch `{"records": [...]}`. Their docs describe an `api-key` header; ours uses the per-source URL and HMAC instead. |
 
-Our replay script posts the fixtures to our own webhook URL and signs them with our default scheme. The transform is the same code whichever way a payload arrives.
+Our demo script posts the fixtures to our own webhook URL. `scripts/sign.py` signs each body with our default scheme (it only signs; it does not send). The transform is the same code whichever way a payload arrives.
 
 Already fixed before this review:
 - Python 3.12, Pydantic v2, `mypy --strict`, no speculative abstractions.
@@ -42,53 +43,22 @@ Jargon used below:
 
 ### The contract (`feedback_ingest/connectors/base.py`)
 
+Built version (updated after Fleet 2; imports trimmed):
+
 ```python
-from collections.abc import Iterator, Mapping
-from datetime import datetime
-from typing import Any, ClassVar, Protocol
-from uuid import NAMESPACE_URL, uuid5
-
-from pydantic import BaseModel, ConfigDict
-
-from feedback_ingest.domain.enums import SourceType
-from feedback_ingest.domain.models import FeedbackRecord, Source
-from feedback_ingest.ports.http import HttpClient
-from feedback_ingest.utils import signing
-
-
-class PullPage(BaseModel):
-    model_config = ConfigDict(frozen=True)
+class PullPage(FrozenModel):
     payloads: list[dict[str, Any]]
     cursor: str  # saved only after this page's raw rows are committed
 
 
 def default_verify_signature(secret: str, body: bytes, headers: Mapping[str, str]) -> bool:
-    """HMAC-SHA256, hex, over the raw body, in header X-Signature. Written once, here."""
     return signing.verify(secret, body, headers.get("X-Signature", ""))
-
-
-def new_record(
-    source: Source, connector: SourceConnector, external_id: str, **content: object
-) -> FeedbackRecord:
-    # kind comes from source_type; the pipeline replaces ingested_at with its clock
-    return FeedbackRecord.model_validate(
-        {
-            "id": uuid5(NAMESPACE_URL, f"{source.id}:{external_id}").hex,
-            "tenant_id": source.tenant_id,
-            "source_id": source.id,
-            "source_type": connector.source_type,
-            "external_id": external_id,
-            "connector_version": connector.version,
-            "ingested_at": content["source_created_at"],
-            **content,
-        }
-    )
 
 
 class SourceConnector(Protocol):
     source_type: ClassVar[SourceType]
-    version: ClassVar[int]  # bump when transform output changes; stamped on every record
-    required_config: ClassVar[tuple[str, ...]]  # config keys every Source of this type must have
+    version: ClassVar[int]
+    required_config: ClassVar[tuple[str, ...]]
 
     def external_event_id(self, payload: Mapping[str, Any]) -> str: ...
     def transform(self, source: Source, payload: Mapping[str, Any]) -> list[FeedbackRecord]: ...
@@ -98,8 +68,30 @@ class SourceConnector(Protocol):
 class PullConnector(SourceConnector, Protocol):
     pull_config: ClassVar[tuple[str, ...]]  # extra config keys a pull-mode Source must have
 
-    def pull(self, source: Source, http: HttpClient, now: datetime) -> Iterator[PullPage]: ...
+    def pull(
+        self, source: Source, http: HttpClient, clock: Clock, deadline: datetime
+    ) -> Iterator[PullPage]: ...
+
+
+def new_record(
+    source: Source, connector: SourceConnector, external_id: str, **content: Unpack[RecordContent]
+) -> FeedbackRecord:
+    # identity keys go last so content cannot override them; the pipeline stamps ingested_at
+    return FeedbackRecord.model_validate(
+        {
+            **content,
+            "id": uuid5(NAMESPACE_URL, f"{source.id}:{external_id}").hex,
+            "tenant_id": source.tenant_id,
+            "source_id": source.id,
+            "source_type": connector.source_type,
+            "external_id": external_id,
+            "connector_version": connector.version,
+            "ingested_at": content["source_created_at"],
+        }
+    )
 ```
+
+`RecordContent` is a `TypedDict` of the content fields (title, text, author, language, rating, the three timestamps, metadata). `version` is bumped when transform output changes and is stamped on every record. `required_config` lists the config keys every Source of this type must have. `deadline` is the wall-clock budget for one sync (`FI_PULL_DEADLINE_SECONDS`, default 60).
 
 A connector that uses the default signature delegates to it in two lines:
 
@@ -114,7 +106,13 @@ A connector that uses the default signature delegates to it in two lines:
 _DISCOURSE: PullConnector = DiscourseConnector()
 CONNECTORS: dict[SourceType, SourceConnector] = {
     c.source_type: c
-    for c in (_DISCOURSE, PlaystoreConnector(), TwitterConnector(), IntercomConnector())
+    for c in (
+        _DISCOURSE,
+        PlaystoreConnector(),
+        TwitterConnector(),
+        IntercomConnector(),
+        CustomConnector(),
+    )
 }
 PULLERS: dict[SourceType, PullConnector] = {SourceType.DISCOURSE: _DISCOURSE}
 ```
@@ -133,37 +131,40 @@ def check_source(source: Source) -> None:
     for key in required:
         if key not in source.config:
             raise ValueError(f"{source.type} {source.mode} source needs config[{key!r}]")
-    ...  # base_url is http(s) without credentials, window_days > 0, start_after parses as NaiveUtc
+    ...  # base_url is http(s), no credentials, not an internal host; window_days 1 to 31; start_after parses
 ```
 
-A push source without a `webhook_secret` is rejected by the `Source` model itself, so `check_source` does not repeat that check.
+A push source without a `webhook_secret` is rejected by the `Source` model itself, so `check_source` does not repeat that check. `POST /v1/sources` rejects a pull source that is given a `webhook_secret` (422), because webhooks are push-only.
 
 ### The nine rulings
 
-1. **Transform cardinality: `transform(source, payload) -> list[FeedbackRecord]`.** It returns 0 to N records. A ping, bot message or non-feedback event is an empty list, and the worker marks it processed. A deletion is a full record with `deleted_at` set, and the store never clears `deleted_at` (ADR-002). One payload holding several items returns several records. We do not add a result type, because a list already covers skip, one, many and delete.
+1. **Transform cardinality: `transform(source, payload) -> list[FeedbackRecord]`.** It returns 0 to N records. A ping, bot message or non-feedback event is an empty list, and the worker marks it processed. A payload that should hold feedback but does not (a Play Store review with no user comment) is not an empty list: it raises and goes dead. A deletion is a full record with `deleted_at` set, and the store never clears `deleted_at` (ADR-002). One payload holding several items returns several records. We do not add a result type, because a list already covers skip, one, many and delete.
 
 2. **Raw-event identity: `external_event_id = f"{item id}:{updated_at or created_at}"` when the payload has them, else `payload_hash(payload)`.**
    - Why: `raw_events` drops any second insert with the same key. If the key were the bare post id, an edited Discourse post pulled again would collide with the first pull's row. It would be dropped silently, the worker would never see the edit, and the record would never update.
    - With the timestamp in the key, an edit is a new raw event. An unchanged post re-pulled in the overlap window has the same key and is dropped, which is what we want.
    - `external_event_id` runs at ingress on a payload nobody has validated yet. It must never raise. If either field is missing it returns the payload hash. A malformed payload is still stored, then goes dead in the worker with a clear error.
    - `external_id` (record identity) stays the bare item id. Twitter's stays the original tweet id (ADR-002).
+   - Built variations: Intercom adds the first 12 hex characters of the item's hash, so two snapshots with the same `updated_at` stay apart. The custom connector always uses the hash of the whole batch, because one push is one raw event.
 
-3. **Signature verification: an optional per-connector `verify_signature(secret, body, headers) -> bool`.** The default is HMAC-SHA256, hex, over the raw body, in header `X-Signature`. It is written once, as `default_verify_signature`, and each connector delegates to it unless its source signs differently. None of the four connectors override it in this project, because the replay script signs fixtures with the default. The hook is where real schemes go:
+3. **Signature verification: an optional per-connector `verify_signature(secret, body, headers) -> bool`.** The default is HMAC-SHA256, hex, over the raw body, in header `X-Signature`. It is written once, as `default_verify_signature`, and each connector delegates to it unless its source signs differently. None of the connectors override it in this project, because `scripts/sign.py` signs fixtures with the default. The hook is where real schemes go:
    - **Intercom**: compute HMAC-SHA1 over the body, read `X-Hub-Signature`, strip `sha1=`, compare with `hmac.compare_digest`.
    - **Discourse webhooks**: read `X-Discourse-Event-Signature`, strip `sha256=`, then compare as the default does.
    - **Zendesk**: HMAC-SHA256 over the timestamp header plus the body, base64, in `X-Zendesk-Webhook-Signature`.
    - **Twitter's CRC handshake** is a GET challenge, not a signature check. It is an extension (a `handshake` method), added only if Twitter becomes a real webhook.
    - The algorithm belongs to the source type, so it lives on the connector. The secret belongs to the tenant's instance, so it lives on the Source row.
 
-4. **Pull shape: `pull(source, http, now) -> Iterator[PullPage]`, where `PullPage(payloads, cursor)`.**
+4. **Pull shape: `pull(source, http, clock, deadline) -> Iterator[PullPage]`, where `PullPage(payloads, cursor)`.** (Fleet 2 replaced `now` with `clock` and `deadline`.)
    - The poll service enqueues one page's payloads and commits them. Only then does it save `page.cursor`.
-   - If the HTTP port raises `TransientError` on page 7 of 40, pages 1 to 6 and their cursor are already saved. The next poll resumes from there.
+   - Built: Discourse holds the cursor back until the final page of its search window (see the last point below). So if a call fails mid-window, the stored cursor has not moved, and the next tick restarts the whole window. The payloads already accepted stay in `raw_events`, and rule 2 drops them when they come again.
+   - Pull treats permanent and transient upstream errors the same today: stop, keep the cursor, put the message in `PullResult.error`, retry on the next tick.
+   - Limits: at most 10 search pages per window (Discourse answers 400 for page 11), about 500 posts per day. A busier window raises "lower window_days via PATCH" and the cursor does not move. The deadline is checked before every search page and every `posts.json` call.
    - If the process crashes between the commit and the cursor save, the page is fetched again. Rule 2 drops the repeats.
    - A page's cursor must be safe to resume from: everything older than it is in this page or an earlier one. With oldest-first pages, that is the page's newest timestamp minus a small overlap. If a source only sorts newest-first, the connector holds the cursor back and yields it on the final page.
 
-5. **Registries: `CONNECTORS` and `PULLERS`, built from tuples of instances, as above.** A test asserts `set(SourceType) == CONNECTORS.keys()`, that no two connectors claim one type, that `PULLERS.keys() <= CONNECTORS.keys()`, and that every type has at least one fixture. `check_source` rejects a pull-mode Source whose type has no puller, any Source that lacks a key in its connector's `required_config` (plus the puller's `pull_config` in pull mode), and config values that do not parse (`start_after`, `window_days`, `base_url`). There is no `isinstance` discovery.
+5. **Registries: `CONNECTORS` and `PULLERS`, built from a tuple of instances, as above.** The dict is keyed by type, so one type maps to exactly one connector. `tests/unit/connectors/test_registry.py` asserts `set(SourceType) == CONNECTORS.keys()`, that every type except `custom` has a `KIND_BY_SOURCE` entry, that `PULLERS.keys() <= CONNECTORS.keys()`, and that every type has a `malformed` fixture. `check_source` rejects a pull-mode Source whose type has no puller, any Source that lacks a key in its connector's `required_config` (plus the puller's `pull_config` in pull mode), and config values that do not pass (`start_after`, `window_days` 1 to 31, a `base_url` that is not http(s), has credentials, or names an internal host). There is no `isinstance` discovery.
 
-6. **Input models: every connector validates first.** `transform` starts with `PlaystoreReviewIn.model_validate(payload)` (or `DiscoursePostIn`, `TweetIn`, `IntercomEventIn`), then maps plain typed fields. Input models use `extra="ignore"`. Why: under `mypy --strict`, `payload["review"]["text"]` is `Any`, so it passes the type check without checking anything. A `ValidationError` is a permanent failure. The worker catches `ValidationError` next to `TransformError` and marks the event dead. That is one `except` clause in the worker, not one per connector, and it also catches a bad `FeedbackRecord` or metadata model.
+6. **Input models: every connector validates first.** `transform` starts with `PlaystoreReviewIn.model_validate(payload)` (or `DiscoursePostIn`, `TweetIn`, `IntercomEventIn`, `CustomBatchIn`), then maps plain typed fields. Input models use `extra="ignore"`. Why: under `mypy --strict`, `payload["review"]["text"]` is `Any`, so it passes the type check without checking anything. A `ValidationError` is a permanent failure. The worker catches `ValidationError` next to `TransformError` and marks the event dead. That is one `except` clause in the worker, not one per connector, and it also catches a bad `FeedbackRecord` or metadata model.
 
 7. **What `transform` receives: the whole `Source`, with `webhook_secret: SecretStr | None`.** The risk is a log line or exception message that prints a Source and leaks the secret. A slimmer `SourceRef` model would protect only the transform. `SecretStr` prints `**********` everywhere: logs, `repr`, the API. It is a one-word type change and adds no model. The router calls `get_secret_value()` once, to verify. The SQL store must write `get_secret_value()` too, because `model_dump(mode="json")` would store the asterisks. A round-trip test covers that. A transform reads only `tenant_id`, `id` and `config`. It never reads `cursor`.
 
@@ -172,16 +173,16 @@ A push source without a `webhook_secret` is rejected by the `Source` model itsel
    2. `SourceStore.get_by_id(source_id)`. An unknown id gives 404. The id is an unguessable uuid, so it picks the source but proves nothing by itself.
    3. Webhooks are push-only (amended in Fleet 2): a pull-mode source gives 409 "source does not accept webhooks", before any signature check, and `POST /v1/sources` rejects a `webhook_secret` on a pull source with 422. A push source always has a secret (the `Source` model requires one).
    4. `CONNECTORS[source.type].verify_signature(secret, raw_body_bytes, headers)` runs on the raw bytes, before JSON parsing. A failure gives 401. This is what proves the caller. Only then does a disabled source give 409, so source state is told only to a caller who proved itself.
-   5. We parse the JSON, compute `external_event_id`, and call `RawEventQueue.enqueue`, which returns the stored row's id (the existing one on a duplicate). New or duplicate, the reply is 202 with that id.
+   5. We parse the JSON (400 if it is not an object or is nested too deep), compute `external_event_id`, and call `RawEventQueue.enqueue`. It returns `Enqueued(id, status)`, the stored row's id and status (the existing row on a duplicate). New or duplicate, the reply is 202 with that id. The signature check, the parse and the insert run in the threadpool. A body over 1 MiB is refused with 413 before any of this.
    6. Later, the worker claims the row, loads the Source, calls `transform`, upserts each record, and marks the event processed. A `ValidationError` or `TransformError` marks it dead. A `TransientError` marks it failed and schedules a retry.
    - Tenant isolation: the raw event's `tenant_id` comes from the source row, and only a caller holding that source's secret can write to it. Every other route still resolves the tenant from `X-API-Key`.
 
-9. **Known limit: `FeedbackKind` is where the design strains.** An NPS survey with a 0–10 score does not fit `review | conversation | post`. The answer: "a new kind is an enum value plus optional fields in metadata; the record is the extension point that costs most". Adding the enum value needs no migration, because `kind` is stored as text. The real cost comes when the new kind needs a field everyone queries, like an NPS score. That field becomes a new common column, which means a migration plus a replay. That cost is in the record, not in the connector.
+9. **Known limit: `FeedbackKind` is where the design strains.** An NPS survey with a 0 to 10 score does not fit `review | conversation | post`. (Built later: the custom connector added the `survey` kind as one enum value, with the score in `CustomMetadata.score`. No migration was needed.) The answer: "a new kind is an enum value plus optional fields in metadata; the record is the extension point that costs most". Adding the enum value needs no migration, because `kind` is stored as text. The real cost comes when the new kind needs a field everyone queries, like an NPS score. That field becomes a new common column, which means a migration plus a replay. That cost is in the record, not in the connector.
 
 ### Small consequences for the Phase 1 models
 
 - `Source.webhook_secret` becomes `SecretStr | None` (ruling 7).
-- `transform` stays free of clocks and random ids, so the same input always gives the same output. The connector builds each record with `new_record(source, connector, external_id, **content)`, which sets `id` to a `uuid5` of the source id and external id, so it is deterministic. The worker stamps only `ingested_at`, with `model_copy(update=...)`. The contract test compares whole records.
+- `transform` stays free of clocks and random ids, so the same input always gives the same output. The connector builds each record with `new_record(source, connector, external_id, **content)`, which sets `id` to a `uuid5` of the source id and external id, so it is deterministic. The pipeline stamps only `ingested_at` (built as `model_validate(record.model_dump() | {"ingested_at": now})`, so the stamped record is validated again). The contract test compares whole records.
 
 ## Where the council agrees
 
@@ -245,20 +246,24 @@ Chairman additions, found while checking the rulings:
 
 ## How to add a new source
 
-Adding Zendesk is one file plus one metadata model plus one registry entry plus one fixture; the contract test fails until all are done.
+Updated after Fleet 2. Adding a source is five small steps. Two tests fail until all of them exist. Zendesk is the example below.
 
-1. Add `SourceType.ZENDESK`. The completeness test fails right away.
-2. Add `ZendeskMetadata` (with `source_type: Literal["zendesk"]`) to `domain/metadata.py` and to the `SourceMetadata` union.
-3. Write `connectors/zendesk.py` with a `ZendeskTicketIn` input model, `required_config` (empty unless it pulls), `external_event_id` (`f"{ticket id}:{updated_at}"`), `transform`, and a `verify_signature` override for Zendesk's timestamp-plus-body scheme. Add `pull` only if Zendesk will be polled.
-4. Add `ZendeskConnector()` to the `CONNECTORS` tuple, and to `PULLERS` (via a typed local) if it pulls.
-5. Put a recorded, synthetic payload in `tests/fixtures/zendesk/`, plus a malformed one. Run the contract test, and add one golden test for Zendesk's odd cases.
+1. Add `SourceType.ZENDESK` in `domain/enums.py`, and its entry in `KIND_BY_SOURCE` in `domain/models.py`. Reuse an existing kind. (`custom` is the one type with no entry: its kind comes per record from `KIND_BY_RECORD_TYPE`.)
+2. Add `ZendeskMetadata` (with `source_type: Literal[SourceType.ZENDESK]`) to `domain/metadata.py` and to the `SourceMetadata` union.
+3. Write `connectors/zendesk.py` with a `ZendeskTicketIn` input model, `source_type`, `version`, `required_config` (empty unless it needs config), `external_event_id` (`f"{ticket id}:{updated_at}"`), `transform` built on `new_record`, and a `verify_signature` override for Zendesk's timestamp-plus-body scheme. Add `pull_config` and `pull` only if Zendesk will be polled.
+4. Add `ZendeskConnector()` to the tuple inside `CONNECTORS`, and to `PULLERS` (via a typed local) if it pulls.
+5. Put recorded, synthetic payloads in `tests/fixtures/zendesk/`, including `malformed.json`.
+
+`tests/unit/connectors/test_registry.py` and `tests/unit/test_models.py::test_every_source_type_has_a_metadata_model` fail until all five steps are done. The contract tests in `tests/unit/connectors/test_contract.py` then run every fixture. Add one golden test for the source's odd cases.
+
+Worked example: the custom connector (commit b8f6e2b) was added exactly this way: `SourceType.CUSTOM`, `CustomMetadata`, `connectors/custom.py`, one entry in the `CONNECTORS` tuple, and `tests/fixtures/custom/`.
 
 No service, route, worker or table changes.
 
 ## How to say it in the interview
 
 **One-minute pitch.**
-"A Source is a tenant's configured instance. A connector is the code that translates for one source type. Every payload, webhook or poll, is stored raw first. A worker then asks the connector to turn it into zero or more feedback records. The connector checks the payload with a Pydantic model first, so a bad payload fails at one line and goes to the dead list, and nothing is lost. A dict maps each source type to its connector, so no other code knows which sources exist. Discourse's connector can also pull, page by page, and each page carries its own cursor. Signatures default to HMAC-SHA256, and a connector overrides that only when its source signs differently. Adding Zendesk is one file, one metadata model, one dict entry and one fixture. The contract test fails until all four exist."
+"A Source is a tenant's configured instance. A connector is the code that translates for one source type. Every payload, webhook or poll, is stored raw first. A worker then asks the connector to turn it into zero or more feedback records. The connector checks the payload with a Pydantic model first, so a bad payload fails at one line and goes to the dead list, and nothing is lost. A dict maps each source type to its connector, so no other code knows which sources exist. Discourse's connector can also pull, page by page. Its cursor moves only once the whole search window is in. Signatures default to HMAC-SHA256, and a connector overrides that only when its source signs differently. Adding Zendesk is an enum value, a metadata model, one connector file, one registry entry and fixtures. The registry and metadata tests fail until all exist. The custom connector was added exactly this way."
 
 **"Isn't this just a big if/else on source_type?"**
 Yes, a dict is a dispatch table. The difference is where it lives. An if/else would be copied into the webhook, the worker and the poller. The dict is in one file, its keys are type-checked, and a test fails if a type is missing. Adding a source never edits the core.
@@ -267,16 +272,16 @@ Yes, a dict is a dispatch table. The difference is where it lives. An if/else wo
 On the connector, as `verify_signature(secret, body, headers)`. The default, HMAC-SHA256 hex in `X-Signature`, is written once. Intercom would override it with SHA-1 in `X-Hub-Signature`. Discourse would strip `sha256=` from its own header. The algorithm belongs to the source type. The secret belongs to the tenant's Source row.
 
 **"What if a source needs both push and pull?"**
-Push or pull is an ingress choice, stored as `Source.mode`. Both paths write the same `raw_events` table, and the same transform reads it. A pull connector is also a normal connector, so its webhooks work unchanged. Creating a pull Source for a type that cannot pull is rejected. A contract test checks that a webhook and a poll give the same `external_id` for the same item.
+Push or pull is an ingress choice, stored as `Source.mode`. Both paths write the same `raw_events` table, and the same transform reads it. Webhooks are push-only: a pull source answers 409 on the webhook route, and it cannot be created with a `webhook_secret` (422). Creating a pull Source for a type that cannot pull is rejected too. Letting one source take both is an extension, not built.
 
 **"How do you version a transform?"**
-Every record carries `connector_version`. Fix the transform, bump `version`, and replay the stored raw events for that source type. Replay skips the timestamp guard on purpose (ADR-002). Raw payloads are kept as-is, so nothing is lost. The stronger version: run v2 over raw events next to v1, diff the results, then switch.
+Every record carries `connector_version`. Fix the transform, bump `version`, and replay the stored raw events for each affected source, with bulk replay (`POST /admin/raw-events/replay?source_id=...&status=processed`). Replay goes through the same `>=` version guard (ADR-002), so an equal version is accepted and the fixed output overwrites the record. Raw payloads are kept as-is, so nothing is lost. The stronger version: run v2 over raw events next to v1, diff the results, then switch.
 
 **"How do you test a connector?"**
-Fixture in, expected record out, no mocks. One contract test runs every connector over every fixture. It checks that output is deterministic, types match, the version is stamped, the event id is stable and changes on an edit, a malformed payload goes dead, and the signature accepts a signed body and rejects a tampered one. Pull uses a stub HTTP client. A failure on page 2 must leave page 1's cursor saved.
+Fixture in, expected record out, no mocks. One contract test runs every connector over every fixture. It checks that output is deterministic, identity and the version are stamped, the event id never raises and changes on an edit, a malformed payload raises `ValidationError` (which sends it dead in the worker), and the signature accepts a signed body and rejects a tampered one. Pull uses a stub HTTP client. A failure on page 2 must leave the stored cursor where it started.
 
 **"How does a webhook find its tenant?"**
-The URL is `/v1/sources/{source_id}/events`, with no API key, because a real sender cannot add ours. We look the source up by its unguessable id (404 if unknown), check the signature with that source's secret on the raw bytes before we write anything (401 if wrong), and take the tenant from the source row.
+The URL is `/v1/sources/{source_id}/events`, with no API key, because a real sender cannot add ours. We look the source up by its unguessable id (404 if unknown), refuse a pull source (409), check the signature with that source's secret on the raw bytes before we write anything (401 if wrong), and take the tenant from the source row.
 
 **"What if a source edits a post?"**
 The edit has a new update time, so it gets a new raw-event id and is stored. The worker transforms it, and the upsert sees a newer timestamp and overwrites the record. The same post re-pulled without changes has the same id and is dropped. An older copy arriving late loses the timestamp check. A Twitter edit gets a new tweet id, so we key the record on the original tweet id.
@@ -287,10 +292,10 @@ A new kind is an enum value plus optional fields in metadata. That needs no migr
 ## The one thing to do first
 
 Write `tests/unit/connectors/test_contract.py` before any connector, and make it fail. It checks:
-1. `set(SourceType) == CONNECTORS.keys()`, no duplicate types, `PULLERS` is a subset of `CONNECTORS`, and every type has a fixture;
+1. `set(SourceType) == CONNECTORS.keys()`, `PULLERS` is a subset of `CONNECTORS`, and every type has a fixture (built: in `test_registry.py`, with a `malformed` fixture per type);
 2. for each connector and fixture: the transform is deterministic, `metadata.source_type` and `connector_version` match the connector, and `external_event_id` never raises;
 3. **the edit case**: the same item with two update times gives two different event ids, both enqueue, and the record ends with the newer text;
-4. a malformed fixture ends dead with a `ValidationError` message;
+4. a malformed fixture raises `ValidationError` (the worker then marks it dead);
 5. `verify_signature` accepts a correctly signed body and rejects a tampered one.
 
 Then build Playstore, the simplest connector, until the test goes green.

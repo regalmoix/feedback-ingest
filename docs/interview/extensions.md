@@ -14,8 +14,8 @@ Paths are from the repo root. Terms are in [glossary.md](glossary.md). "Why not 
 | 2 | Postgres swap | 1 setting, 1 dependency, 3 queries, migrations | Adapters only |
 | 3 | Kafka or SQS swap | 1 new adapter, a new retry model | Adapter, plus the retry story |
 | 4 | Horizontal workers | Deployment, plus one small entry point | No |
-| 5 | Per-tenant fairness | 1 query, or 1 check at the door | Adapter or route |
-| 6 | Enrichment (language, sentiment) | 1 table, 1 worker, 1 column | New stage beside the pipeline |
+| 5 | Per-tenant fairness (noisy neighbour) | 1 query, or 1 check at the door; later, a partition per tenant | Adapter or route |
+| 6 | Enrichment (PII redaction first, then language, sentiment) | 1 step in accept; 1 table, 1 worker, 1 column | Ingestion, plus a new stage beside the pipeline |
 | 7 | GDPR erasure and raw-event retention | 1 job, 1 endpoint, maybe 1 column | Adapter and admin API |
 | 8 | Backfill | 1 endpoint, 1 small service change | Pull service |
 | 9 | Shadow-run a new connector version | 1 script | No |
@@ -26,7 +26,10 @@ Paths are from the repo root. Terms are in [glossary.md](glossary.md). "Why not 
 
 ## 1. Add a source (Zendesk), in 5 steps
 
-The contract tests fail until all five steps are done. That is the point: you cannot half-add a source.
+The tests fail until all five steps are done. `tests/unit/connectors/test_registry.py` and
+`tests/unit/test_models.py::test_every_source_type_has_a_metadata_model` check that every type has a connector,
+a kind, a metadata model and a `malformed` fixture. The contract tests in `tests/unit/connectors/test_contract.py`
+then run every fixture. That is the point: you cannot half-add a source.
 
 1. **Name it.** In `feedback_ingest/domain/enums.py` add `ZENDESK = "zendesk"` to `SourceType`. In
    `feedback_ingest/domain/models.py` add it to `KIND_BY_SOURCE`, reusing a kind (a ticket is a `conversation`).
@@ -160,8 +163,10 @@ safe; a test runs four threads on 40 events (`tests/adapters/test_sqlalchemy.py`
 1. Do recipe 2 first. More workers on one SQLite file mostly wait for the write lock.
 2. Run the API without the background threads: `FI_WORKER_ENABLED=false FI_SCHEDULER_ENABLED=false`.
 3. Run worker processes. The laziest way works today: the same app on another port with the worker on and no
-   traffic routed to it. The clean way is a small `feedback_ingest/worker_main.py` that builds `sql_adapters`
-   and `app_state` from `feedback_ingest/wiring.py`, calls `worker.start()`, and waits for a signal.
+   traffic routed to it. The clean way is a small `feedback_ingest/worker_main.py`. It opens `sql_adapters`
+   from `feedback_ingest/wiring.py` (which builds the adapters), builds `PipelineService` and `WorkerService`
+   the way the `main.py` lifespan does (that is where the services are built today), calls `worker.start()`,
+   and waits for a signal.
 4. Turn the scheduler on in exactly one process. N schedulers are safe (repeats are dropped) but call Discourse
    N times per interval.
 5. Tune `FI_CLAIM_BATCH` and `FI_LEASE_SECONDS`. The lease must be longer than the slowest transform, or a second
@@ -189,13 +194,27 @@ Two fixes, cheapest first:
    `feedback_ingest/adapters/memory/queue.py`, and one contract case: tenant A has 100 due rows, tenant B has 1,
    and `claim(limit=10)` must include B's row.
 
-Bigger step: weights per plan tier, or a separate queue for the largest tenants.
+Bigger step: partition the queue per tenant (or per plan tier), so one tenant's backlog can never sit in
+front of another's. Enterpret's engineering blog says they partition events by tenant and object type, and
+names noisy neighbours and queue clogging as incidents. We have not built this; it is our named upgrade.
+On this design it means a `tenant_id` filter in the claim, one claim loop per partition, and weights per tier.
 
 ---
 
-## 6. Enrichment stage (language, sentiment)
+## 6. Enrichment stage (PII redaction, language, sentiment)
 
-What is true today: `language` is filled only when the source sends it. There is no enrichment.
+What is true today: `language` is filled only when the source sends it. There is no enrichment. We keep PII
+out of logs and error text, and nothing more.
+
+**The first stage we did not build: PII redaction before storage.** Enterpret's public pages say they detect
+and obfuscate PII (card numbers, SSNs) before ingestion. Here it cannot be a later stage, because `raw_events`
+keeps every payload verbatim. It goes in `IngestionService.accept` (`feedback_ingest/services/ingestion.py`):
+compute `external_event_id` from the original payload first (so duplicates still match), then replace emails,
+phone numbers and card numbers with placeholders like `[EMAIL]`, then enqueue. The HMAC check already ran on
+the raw bytes, so it is not affected. The catch to say out loud: once raw is redacted, replay can never get the
+original text back. That is the point, and the trade-off.
+
+The later stages (language, sentiment) run after the record exists:
 
 Use the same pattern as `raw_events`: a durable job table, a worker that claims with a lease, and idempotent
 writes.
@@ -205,7 +224,7 @@ writes.
    `feedback_ingest/adapters/sqlalchemy/feedback_store.py` rewrites every field on each update, so an edit would
    wipe a detected value.
 2. **Jobs.** An `enrichment_jobs` table with the same bookkeeping columns as `raw_events` (`status`, `attempts`,
-   `next_attempt_at`, `lease_until`, `error`), unique on `(record_id, enricher_version)`. Copy the claim and
+   `next_attempt_at`, `lease_until`, `error`), unique on `(feedback_record_id, enricher_version)`. Copy the claim and
    fence logic from `raw_event_queue.py`; generalise it only when a third queue appears.
 3. **Producing jobs.** In `feedback_ingest/services/pipeline.py`, after each upsert that returns `inserted` or
    `updated`, enqueue a job for that record. A re-edit re-enqueues, so the result follows the latest text.
@@ -250,8 +269,10 @@ partition `raw_events` by month and drop old partitions instead.
 What is true today:
 - Push: the client re-sends its history. Repeats are dropped and edits update. Nothing to build.
 - Pull: `POST /v1/sources/{id}/sync` takes no date range (`feedback_ingest/api/sync.py`). `start_after` is used only
-  while the cursor is empty, and `PATCH` changes only `enabled`. So today you move `sources.cursor` back by hand
-  in SQL and sync repeatedly; each run reads at most `window_days`. Moving the cursor back is safe.
+  while the cursor is empty, and `PATCH /v1/sources/{id}` changes `enabled` and `config` (for example
+  `window_days`), never the cursor. So today you move `sources.cursor` back by hand in SQL and sync repeatedly;
+  each run reads at most `window_days`, and at most 10 search pages (about 500 posts per day is the limit of
+  Discourse search). Moving the cursor back is safe.
 
 The real feature:
 
@@ -273,8 +294,9 @@ Because raw payloads are kept, "try v2 before switching" is a script, not a feat
 1. Write `scripts/shadow_diff.py`. It opens the database with `make_engine`, reads `processed` raw events for one
    source type, and loads each event's source.
 2. Run the new transform, `ZendeskConnectorV2().transform(source, payload)`, on each payload. It writes nothing.
-3. Load the stored record with `FeedbackStore.get(record_id(source.id, external_id), tenant_id)` and compare
-   field by field, ignoring `ingested_at` and `connector_version`.
+3. Each v2 record is built by `new_record(source, self, external_id, ...)`, so its `id` is the same id the stored
+   record has. Load the stored one with `FeedbackStore.get(record.id, source.tenant_id)` and compare field by
+   field, ignoring `ingested_at` and `connector_version`.
 4. Print counts: same, changed (by field name), new, missing, and v2 errors. Print field names, not customer text.
 5. When the diff is what you expect: bump `version`, deploy, replay the events. Replay in any order is safe: an
    older event is `skipped_older`, and the newest one is rewritten because equal versions are accepted.
@@ -308,11 +330,13 @@ behind the same Protocol, not a new core.
 
 What is true today:
 - Every log line has `raw_event_id`, `tenant_id`, `source_id` and `attempts`, defaulting to `-`
-  (`feedback_ingest/main.py`). One grep traces an event: `grep "raw_event_id=<id>" server.log`.
-- Two holes in that trace: a duplicate's `accepted` line has `raw_event_id=-`, and pull lines carry only
-  `tenant_id` and `source_id`.
-- `/health` has worker and scheduler liveness and queue counts. The in-process counters planned in Phase 6
-  (`processed_total`, `dead_total`, uptime) are not built.
+  (`feedback_ingest/main.py`). Every worker and pipeline line carries `raw_event_id`, and the `accepted` line
+  carries it too, with the stored row's id even on a duplicate. One grep traces an event:
+  `grep "raw_event_id=<id>" server.log`.
+- The one hole: pull lines carry `tenant_id` and `source_id` but no `raw_event_id`. Startup lines show `-`.
+- `/health` has worker and scheduler liveness, `failing_sources` (a count of pull sources whose last scheduled
+  sync failed, no ids) and queue counts. In-process counters (`processed_total`, `dead_total`, uptime) are not
+  built.
 
 Recipe:
 

@@ -1,6 +1,14 @@
-# Phase 2 — Connectors and transform
+# Phase 2: Connectors and transform
 
 Status: implemented and review-fixed 2026-10-03 (commits 6264b45, d8648f1). Depends on Phase 1 and ADR-003 (ADR-003 is authoritative where they differ). Still no HTTP endpoints.
+
+**Update after Fleet 2 (commit cbb788c) and the tailoring pass (b8f6e2b).** The code wins over this LLD. What changed here:
+- The puller signature is `pull(source, http, clock, deadline) -> Iterator[PullPage]`. The deadline (`FI_PULL_DEADLINE_SECONDS`, default 60) is checked before each search page and each `posts.json` call; past it, `TransientError("pull deadline exceeded")`.
+- There is no `record_id` helper. `new_record(source, connector, external_id, **content)` in `base.py` builds every record and sets the identity keys after the content, so content cannot override them.
+- The registry has no `_ALL` or `_PULL`. `CONNECTORS` is built from a tuple of instances inside its own definition, and `PULLERS = {SourceType.DISCOURSE: _DISCOURSE}`.
+- Discourse stops after 10 search pages (Discourse answers 400 for page 11), about 500 posts per day. `window_days` is 1 to 31 and can be lowered with `PATCH /v1/sources/{id}`.
+- A Play Store review with no user comment now goes dead (F7, see the last deviations below).
+- A fifth connector, `custom`, was added in the tailoring pass (section near the end).
 
 ## What this phase builds, in one paragraph
 
@@ -10,7 +18,8 @@ payload with a small Pydantic "input model" so a malformed payload fails loudly 
 into the record and the source-specific metadata model. A registry dict maps each `SourceType` to its
 connector, so no other code ever branches on source type. Discourse also knows how to pull: it returns pages
 of payloads with a cursor per page. A shared contract test runs every connector over every fixture file, so a
-new source is "one file, one metadata model, one registry entry, one fixture, and the contract test passes".
+new source is "an enum value, a metadata model, one connector file, one registry entry, fixtures, and the tests pass"
+(see ADR-003 "How to add a new source").
 
 ## Glossary for this phase
 
@@ -31,19 +40,21 @@ class PullPage(BaseModel):
 class SourceConnector(Protocol):
     source_type: ClassVar[SourceType]
     version: ClassVar[int]          # bump when transform output changes; stamped on every record
-    required_config: ClassVar[tuple[str, ...]]  # config keys check_source demands of a pull source
+    required_config: ClassVar[tuple[str, ...]]  # config keys check_source demands (built: of every source)
     def external_event_id(self, payload: Mapping[str, Any]) -> str: ...
     def transform(self, source: Source, payload: Mapping[str, Any]) -> list[FeedbackRecord]: ...
     def verify_signature(self, secret: str, body: bytes, headers: Mapping[str, str]) -> bool: ...
 
 class PullConnector(SourceConnector, Protocol):
     def pull(self, source: Source, http: HttpClient, now: datetime) -> Iterator[PullPage]: ...
+    # built (Fleet 2): pull(self, source, http, clock: Clock, deadline: datetime)
 
 def default_verify_signature(secret: str, body: bytes, headers: Mapping[str, str]) -> bool:
     # HMAC-SHA256 hex of the raw body, header "X-Signature"; uses utils.signing.verify
 
-def record_id(source_id: str, external_id: str) -> str:
-    # uuid5(NAMESPACE_URL, f"{source_id}:{external_id}").hex: the same item always gets the same id
+def new_record(source: Source, connector: SourceConnector, external_id: str, **content) -> FeedbackRecord:
+    # id = uuid5(NAMESPACE_URL, f"{source.id}:{external_id}").hex: the same item always gets the same id
+    # (an earlier draft had a separate record_id helper; it is gone)
 ```
 Rules every connector obeys (these are the contract test):
 - `external_event_id` is `f"{item id}:{updated-or-created timestamp}"` when the payload has them, else
@@ -57,7 +68,7 @@ Rules every connector obeys (these are the contract test):
   never raises anything else on bad data.
 - `transform` is deterministic: same input, same output. Connectors are clock-free: `ingested_at` is a required
   field, so connectors set it from `source_created_at` as a placeholder and the pipeline (Phase 3) overwrites it
-  with the real clock before upsert. `id` is `record_id(source.id, external_id)`, a `uuid5`, so it is deterministic
+  with the real clock before upsert. `id` is set by `new_record` to a `uuid5` of the source id and external id, so it is deterministic
   too and the determinism check compares whole records.
 - Each record has `source_type == connector.source_type`, `metadata.source_type == connector.source_type`,
   `tenant_id/source_id` copied from the `Source`, `connector_version == connector.version`.
@@ -67,10 +78,12 @@ Rules every connector obeys (these are the contract test):
 
 ## Registry (`feedback_ingest/connectors/registry.py`)
 ```python
-_ALL: tuple[SourceConnector, ...] = (DiscourseConnector(), PlaystoreConnector(), TwitterConnector(), IntercomConnector())
-CONNECTORS: dict[SourceType, SourceConnector] = {c.source_type: c for c in _ALL}
-_PULL: tuple[PullConnector, ...] = (DiscourseConnector(),)
-PULLERS: dict[SourceType, PullConnector] = {c.source_type: c for c in _PULL}
+_DISCOURSE: PullConnector = DiscourseConnector()
+CONNECTORS: dict[SourceType, SourceConnector] = {
+    c.source_type: c
+    for c in (_DISCOURSE, PlaystoreConnector(), TwitterConnector(), IntercomConnector(), CustomConnector())
+}
+PULLERS: dict[SourceType, PullConnector] = {SourceType.DISCOURSE: _DISCOURSE}
 def check_source(source: Source) -> None  # ValueError: pull mode without a puller, or bad pull config
 ```
 Callers index the dicts directly: `CONNECTORS[source.type]`, `PULLERS[source.type]`. `check_source` is meant to run at
@@ -84,7 +97,7 @@ Tests assert `set(SourceType) == set(CONNECTORS)` and `set(PULLERS) <= set(CONNE
 Payloads are synthetic but shaped like the real APIs. Every fixture under `tests/fixtures/<source_type>/*.json`
 is invented data (no real names, handles, emails, or ids).
 
-### Discourse (`connectors/discourse.py`) — pull + push, `kind=post`
+### Discourse (`connectors/discourse.py`): pull + push, `kind=post`
 - Input model `DiscoursePostIn`: `id: int, topic_id: int, post_number: int, username: str, name: str | None,
   created_at: datetime, updated_at: datetime | None, cooked: str, topic_slug: str, topic_title: str | None,
   deleted_at: datetime | None`, `like_count: int = 0`. `cooked` is HTML; `text` is the stripped text via
@@ -95,12 +108,13 @@ is invented data (no real names, handles, emails, or ids).
   `url = f"{source.config['base_url']}/t/{topic_slug}/{topic_id}/{post_number}"`.
 - `title = topic_title`, `author = name or username`, `language = None`, `rating = None`.
 - `deleted_at` present → record with `deleted_at` set (tombstone fixture: `discourse/post_deleted.json`).
-- `pull(source, http, now)` lives in `connectors/discourse_pull.py` (`pull_pages`); the connector delegates to it.
+- `pull(source, http, clock, deadline)` lives in `connectors/discourse_pull.py` (`pull_pages`); the connector delegates to it.
   - `since = source.cursor or config["start_after"]`, parsed as `NaiveUtc` (unparseable → `TransformError`).
     The window is bounded: `until = min(now + 1 day, since + window_days)`, `window_days` from config,
     default 7. Query: `search.json?q=after:{since_date} before:{until_date}&page=N`.
   - A page is the last one when `grouped_search_result.more_full_page_results` is not true. A
-    `grouped_search_result.error` raises `TransformError`.
+    `grouped_search_result.error` raises `TransformError("discourse search reported an error")`; the upstream
+    text goes only to a WARNING log line with `tenant_id` and `source_id`.
   - Post ids are grouped by `topic_id` and fetched from `{base_url}/t/{topic_id}/posts.json?post_ids[]=…` in
     chunks of 20. If `posts.json` leaves out any requested post, that is a `TransientError` (retry later). An
     unexpected response shape from either endpoint is also a `TransientError`.
@@ -110,12 +124,13 @@ is invented data (no real names, handles, emails, or ids).
     seen minus 60 s (or to the window end, if the window closed before `now` and that is later). Discourse
     search order is not guaranteed oldest-first, so a per-page cursor could skip posts after a crash
     (ADR-003 rule 4). The 60-second overlap re-fetches boundary posts; idempotency absorbs them.
-  - At most 20 search pages per poll. A window that hits the cap never reaches its final page, so the cursor
-    stays unchanged; lower `window_days` if that happens. Both limits are marked `# ponytail:`.
+  - At most 10 search pages per poll (Discourse answers 400 for page 11), so about 500 posts per day is the
+    hard limit. A window that hits the cap raises `TransformError` and the cursor stays unchanged; lower
+    `window_days` with `PATCH /v1/sources/{id}` if that happens. Both limits are marked `# ponytail:`.
   - 429/5xx from the port surface as `TransientError` and stop the iterator; the cursor of already-yielded
     pages is kept by the caller.
 
-### Playstore (`connectors/playstore.py`) — push (fixtures), `kind=review`
+### Playstore (`connectors/playstore.py`): push (fixtures), `kind=review`
 - Shape mirrors the Play Developer API review object: `reviewId: str, authorName: str | None, comments:
   list[{userComment: {text: str, lastModified: {seconds: NaiveUtc}, starRating: int, reviewerLanguage: str | None,
   device: str | None, androidOsVersion: str | None, appVersionName: str | None}}]`. Uses the first comment.
@@ -126,7 +141,7 @@ is invented data (no real names, handles, emails, or ids).
   (ADR note: real Play has no review webhook; reviews are polled via the Reply-to-Reviews API. Fixtures stand in
   for that poller; the transform is identical either way. Say this before the interviewer does.)
 
-### Twitter (`connectors/twitter.py`) — push (fixtures), `kind=post`
+### Twitter (`connectors/twitter.py`): push (fixtures), `kind=post`
 - Input `TweetIn`: `id: str, text: str, created_at: datetime, lang: str | None, author: {id: str, username: str},
   edit_history_tweet_ids: list[str] = [], public_metrics: {retweet_count: int = 0, like_count: int = 0},
   country: str | None`.
@@ -136,7 +151,7 @@ is invented data (no real names, handles, emails, or ids).
 - `author = @username`, `language = lang`, `metadata = TwitterMetadata(country, retweets, likes)`.
   (ADR note: real Twitter webhooks need a CRC challenge handshake; fixtures stand in.)
 
-### Intercom (`connectors/intercom.py`) — push (fixtures), `kind=conversation`
+### Intercom (`connectors/intercom.py`): push (fixtures), `kind=conversation`
 - Input `IntercomEventIn`: `topic: str, data: {item: {id: str, created_at: NaiveUtc, updated_at: NaiveUtc, state: str,
   source: {subject: str | None, body: str, author: {name: str | None}}, conversation_parts:
   {conversation_parts: list[{id: str, body: str | None, created_at: NaiveUtc, author: {name: str | None}}]},
@@ -202,9 +217,9 @@ no puller. One bad record dead-letters the whole batch (marked `ponytail:`). The
 "A connector turns a raw dict into feedback records. It validates the payload with a Pydantic model first, so a
 bad payload fails at one obvious line and goes to the dead-letter list instead of being retried forever. A dict
 maps each source type to its connector, so nothing else in the system knows which sources exist. Discourse's
-connector can also pull, page by page, and each page carries the cursor to store once that page is safely
-written. Adding Zendesk is one file, one metadata model, one registry entry and one fixture; the contract test
-fails until all four are there."
+connector can also pull, page by page, and its cursor moves only once the whole search window is safely
+written. Adding Zendesk is an enum value, a metadata model, one connector file, one registry entry and fixtures;
+the registry and metadata tests fail until all are there. The custom connector was added exactly this way."
 
 ## Deviations recorded at implementation (code wins over the text above)
 - Pull cursor moves only on the final page, and the search window is bounded (see the Discourse section).
@@ -212,7 +227,7 @@ fails until all four are there."
   the Phase 4 live test.
 - The topic title lives only in `record.title` (from `search["topics"]`, else the headline, so it may be null);
   `PlaystoreMetadata.android_os_version` is an int (API level); developer replies in Playstore `comments` are dropped, the first `userComment` is used.
-- `check_source` raises `ValueError` (there is no `ConfigError`). The push-secret check is not in
+- `check_source` raises `ValueError` (there is no separate config error class). The push-secret check is not in
   `check_source` because the `Source` model already rejects a push source without a secret.
 - There is no `connector_for`/`puller_for`; the registry completeness test guarantees `CONNECTORS[t]` exists.
 - `external_event_id` validates with the input model and falls back to `payload_hash` on `ValidationError`, so

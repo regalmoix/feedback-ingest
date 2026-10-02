@@ -1,6 +1,13 @@
-# Phase 4 — Pull integration (Discourse)
+# Phase 4: Pull integration (Discourse)
 
 Status: implemented 2026-10-03 (commits 301a023 / a5f708f, merged), review fixes applied. Depends on Phases 2–3 and ADR-003.
+
+**Update after Fleet 2 (commit cbb788c).** The code wins over this LLD. What changed here:
+- `PullService(sources, ingestion, http, clock, deadline_seconds)`. `sync` sets a deadline (`now + FI_PULL_DEADLINE_SECONDS`, default 60) and calls `pull(source, http, clock, deadline)`. It saves each page cursor with `update_cursor(source.id, source.tenant_id, cursor)`, keeping the later of the stored and the new cursor.
+- A per-source lock (per process): a second sync of a source that is already syncing gets 409 from `POST /sync`, and the scheduler skips that source for the tick.
+- Pull treats permanent and transient upstream errors the same today: stop, keep the cursor, put the message in `PullResult.error`, retry on the next tick. Any other exception propagates: 503 from the endpoint if storage is down, otherwise 500.
+- The scheduler lists sources with `list_enabled(SourceMode.PULL)` (was `list_by_mode`). `/health` no longer goes degraded because a source failed; it reports `failing_sources` as a count and returns 503 only for an unhealthy worker or scheduler thread.
+- Discourse stops after 10 search pages (about 500 posts per day) and moves its cursor only on the final page of a window. `HttpxClient` follows no redirects and caps a response at `FI_HTTP_MAX_BYTES`.
 
 ## What this phase builds, in one paragraph
 
@@ -20,21 +27,21 @@ the endpoint, and a live test.
 - Tick: one scheduler pass over all pull sources.
 
 ## Services
-`services/pull.py` — `PullService(sources: SourceStore, ingestion: IngestionService, http: HttpClient, clock: Clock)`
+`services/pull.py`: `PullService(sources: SourceStore, ingestion: IngestionService, http: HttpClient, clock: Clock)`
 - `sync(source: Source) -> PullResult(pages: int, accepted: int, duplicates: int, cursor: str | None, error: str | None)`:
   ```
-  puller = PULLERS[source.type]            # KeyError → ConfigError (checked at source creation too)
-  for page in puller.pull(source, http, clock.now()):
+  puller = PULLERS[source.type]            # check_source guarantees a pull source has a puller
+  for page in puller.pull(source, http, clock, deadline):               # built signature (Fleet 2)
       for payload in page.payloads: ingestion.accept(source, payload)   # each is its own commit
-      sources.update_cursor(source.id, page.cursor)                      # only after the page's rows exist
+      sources.update_cursor(source.id, source.tenant_id, page.cursor)   # only after the page's rows exist
   ```
   `TransientError` (429/5xx/network) stops the loop; pages already committed keep their cursor; the error is
   returned in `PullResult.error` and logged at WARNING with `source_id`, `tenant_id`. Any other exception is
   logged at ERROR and returned the same way; the scheduler must never die because one source is broken.
   `# ponytail: whole-page accept loop; batch enqueue if a page ever holds thousands of items`.
 
-`services/scheduler.py` — `SchedulerService(pull: PullService, interval_seconds: float)`
-- Same thread/Event shape as `WorkerService`: `start()`, `stop()`, `alive`, each tick calls `pull.sync` for every `sources.list_by_mode(SourceMode.pull)` source (enabled only, see Phase 5).
+`services/scheduler.py`: `SchedulerService(pull: PullService, interval_seconds: float)`
+- Same thread/Event shape as `WorkerService`: `start()`, `stop()`, `alive`, each tick calls `pull.sync` for every `sources.list_enabled(SourceMode.PULL)` source (named `list_by_mode` before Fleet 2).
 - Started in the app lifespan when `settings.scheduler_enabled` (new setting, default True); `/health` reports
   `scheduler_alive` too.
 
@@ -45,6 +52,10 @@ the endpoint, and a live test.
   fine for a demo-sized page; `# ponytail: inline sync; enqueue a "sync job" if a backfill takes minutes`.
 
 ## Discourse specifics already in the connector (Phase 2), restated so the service is testable
+
+As first designed. The built rules are in Phase 2 and the note at the top: no `page_size`, a bounded window
+(`window_days`), at most 10 search pages, and the cursor moves only on the final page.
+
 - `source.config` keys: `base_url` (e.g. `https://meta.discourse.org`), `start_after` (ISO date used when
   `cursor` is None, e.g. `2021-01-01`), optional `page_size` (default 50). `config` is validated by
   `check_source` from ADR-003 at creation time: a pull source must have a puller and these keys.
@@ -59,7 +70,7 @@ the endpoint, and a live test.
   two pages → cursor equals page 2's cursor, `accepted` counts rows, duplicates counted when a payload is
   repeated; `TransientError` on page 2 → page 1's cursor persisted, `error` populated, page 2 not accepted;
   cursor never moves backwards;
-  push-only source → `ConfigError`.
+  push-only source → refused (built: the endpoint answers 409, and `check_source` stops a pull source without a puller).
 - `tests/unit/services/test_scheduler.py`: thread start/stop; an exception in one
   source does not stop the next source, and one in a tick does not stop the next tick.
 - `tests/api/test_sync_api.py`: 401/404 paths; 200 with the result body; push-only source → 404.
@@ -83,7 +94,7 @@ tests/fixtures/discourse/{search_page1,search_page2,posts_topic_*.json}
 ```
 
 ## Deviations recorded
-- `ConfigError` is gone (Phase 6). The sync endpoint answers 409 for a source that is not an enabled pull
+- The separate config error class is gone (Phase 6). The sync endpoint answers 409 for a source that is not an enabled pull
   source, and `check_source` guarantees every pull source has a puller, so `PullService.sync` simply indexes
   `PULLERS[source.type]`.
 - `PullResult` carries `source_id`, so results can be told apart.
@@ -99,10 +110,11 @@ tests/fixtures/discourse/{search_page1,search_page2,posts_topic_*.json}
 - Phase 6 error handling: `sync` catches only `TransientError` and `TransformError` and puts `str(exc)` in
   `PullResult.error`; any other exception propagates (503 from the endpoint, `scheduler tick failed` in the
   log). `POST /sync` answers 502 with the `PullResult` when `error` is set. The scheduler keeps the latest
-  tick's errors per source and `/health` is degraded with `failing_sources`. A search response without
+  tick's errors per source. (Superseded by Fleet 2: `/health` shows `failing_sources` as a count and
+  stays "ok"; only an unhealthy thread makes it 503.) A search response without
   `grouped_search_result` is a `TransientError`, never read as the last page. `run_once` on the scheduler
   is gone; the loop calls `sync` per source.
-- Phase 6 closing: `sync_all` is gone. The scheduler loop syncs each source in its own `try`; an
+- Phase 6 closing: the one-call "sync every source" method is gone. The scheduler loop syncs each source in its own `try`; an
   unexpected exception is logged (`scheduled sync failed`, with `tenant_id` and `source_id`) and recorded as
   `internal error (see logs)`, and the next source still runs. If listing sources fails, the tick records
   `{"<tick>": "<ExceptionName>"}`. `last_errors` is replaced once per tick, so `/health` shows the latest tick.
@@ -110,6 +122,7 @@ tests/fixtures/discourse/{search_page1,search_page2,posts_topic_*.json}
 ## How to explain this phase in the interview
 "Polling is just another producer. The connector returns pages; each page's payloads go through the exact same
 accept call a webhook uses, and only then do we save that page's cursor. If Discourse rate-limits us halfway, we
-keep the pages we already have and resume from their cursor next tick. The 60-second overlap means we'd rather
+stop and keep the cursor where it was; the next tick fetches the window again and the unique key drops what we
+already have. The 60-second overlap means we'd rather
 fetch a post twice than miss one, and the unique key makes the duplicate free. One scheduler thread ticks all
 pull sources; one endpoint triggers a sync by hand, which is what I'll press in the demo."

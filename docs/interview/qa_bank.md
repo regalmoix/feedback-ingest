@@ -1,6 +1,7 @@
 # Q&A bank
 
-About 40 questions an interviewer is likely to ask, grouped by topic. Each one has:
+About 55 questions an interviewer is likely to ask, grouped by topic. Sections 1 to 7 are about the design;
+section 8, "How this maps to Enterpret", compares it with Enterpret's public pages. Each one has:
 
 - **Say:** two sentences you can say out loud.
 - **Go deeper:** what to add if they push.
@@ -25,14 +26,14 @@ Three sentences answer half of these questions. Learn them first:
 ### Q1. Why SQLite?
 
 **Say:** It needs zero infrastructure, so the demo is one process and one file, and the grading is on code and
-extensibility, not on running a database. The connection string is a setting, so moving to Postgres is a URL
-change plus a few named queries, not a rewrite.
+extensibility, not on running a database. The connection string is a setting, so moving to Postgres is not a
+rewrite: set `FI_DATABASE_URL`, add a driver, change three queries (claim, upsert, enqueue), add migrations.
 
 **Go deeper:** SQLite allows one writer at a time. We make that safe with three settings on every connection:
 WAL (readers keep reading while one writer writes), `busy_timeout=5000` (a writer waits up to 5 seconds instead
 of failing), and `foreign_keys=ON` (so the database refuses a record whose tenant differs from its source's
-tenant). The ceiling is write throughput. Past that, we point `FI_DATABASE_URL` at Postgres. The exact changes
-are recipe 2 in [extensions.md](extensions.md).
+tenant). The ceiling is write throughput. Past that, we move to Postgres. The exact changes are recipe 2 in
+[extensions.md](extensions.md).
 
 **Point at:** `feedback_ingest/adapters/sqlalchemy/db.py` (`make_engine`), `feedback_ingest/config.py`
 (`database_url`), `docs/decisions/ADR-001-storage-and-queue.md`.
@@ -69,14 +70,17 @@ is recipe 3 in [extensions.md](extensions.md).
 
 **Say:** A port is a small interface the services call, and each one has a real adapter and an in-memory fake.
 The same contract tests run against both, so I know the fake behaves like SQLite, and a database or queue swap
-stays inside one adapter file.
+stays inside the adapters, not the services.
 
 **Go deeper:** The ports are tenant, source and feedback stores, the raw event queue, an HTTP client and a
 clock. Services import only ports, never SQLAlchemy or httpx. The rule from the council was: a port no test
 uses through its fake is a port we cannot defend. The clock port exists so lease and backoff tests do not
-really sleep; say exactly that. The connector Protocol is the one that matters for extensibility.
+really sleep; say exactly that. The connector Protocol is the one that matters for extensibility. How the
+adapters get in: the app builds the real ones in `wiring.py` (`sql_adapters`); tests pass fakes with
+`create_app(adapters=...)`; either way, the `main.py` lifespan builds the services from what it was given.
 
-**Point at:** `feedback_ingest/ports/`, `feedback_ingest/adapters/memory/`, `tests/adapters/test_memory.py` and
+**Point at:** `feedback_ingest/ports/`, `feedback_ingest/adapters/memory/`, `feedback_ingest/wiring.py`,
+`feedback_ingest/main.py` (`create_app`, `lifespan`), `tests/adapters/test_memory.py` and
 `tests/adapters/test_sqlalchemy.py` (both run the same `*_CASES` lists).
 
 ### Q5. Why one record table plus a JSON metadata column?
@@ -104,7 +108,8 @@ hash, so an edited review would become a second record. We do use one hash, on p
 has no usable id gets `payload_hash` as its `external_event_id`, so an identical resend is still caught.
 
 **Point at:** `feedback_ingest/adapters/sqlalchemy/tables.py` (both `UniqueConstraint`s),
-`feedback_ingest/utils/hashing.py`, ADR-002 "Uniqueness rule".
+`feedback_ingest/utils/hashing.py`, ADR-002 "Uniqueness rule", `tests/adapters/test_sqlalchemy.py`
+(`test_the_database_itself_rejects_a_duplicate_key`).
 
 ### Q7. Why does the webhook return 202 and not 200?
 
@@ -113,10 +118,10 @@ it into a record later. If we cannot save it we return 503, so the sender retrie
 lost.
 
 **Go deeper:** A duplicate delivery also gets 202, with `"duplicate": true` and the `raw_event_id` of the row
-already stored, so the sender stops retrying. Everything that fails at the door is never stored: an unknown
-source is 404, a disabled source or one without a webhook secret is 409, a bad signature is 401, a body that
-is not a JSON object is 400. Processing
-inside the request would make the sender wait on our transform and lose the event if we crash.
+already stored, so the sender stops retrying. Everything that fails at the door is never stored: a body over
+1 MiB is 413, an unknown source is 404, a pull source is 409 (webhooks are push only), a bad signature is 401, a
+disabled source is 409, and a body that is not a JSON object is 400. Processing inside the request would make
+the sender wait on our transform and lose the event if we crash.
 
 **Point at:** `feedback_ingest/api/ingest.py`, `feedback_ingest/services/ingestion.py` (`AcceptResult`),
 `feedback_ingest/api/errors.py` (the 503 mapping).
@@ -167,10 +172,7 @@ change. "Effectively once" is the honest name for this.
 
 ## 2. Failure modes
 
-Detailed symptoms for each are in [failure_scenarios.md](failure_scenarios.md). Note: the code is newer than a
-few rows there. Today a disabled source refuses pushes (409), a dead scheduler does turn `/health` to 503, the
-dead list is newest first, and a payload that crashes the process is dead after `max_attempts` claims. The
-answers below match the code.
+Detailed symptoms for each are in [failure_scenarios.md](failure_scenarios.md).
 
 ### Q11. What if the database is down?
 
@@ -208,10 +210,13 @@ stopped by the fence: its finish call only applies if the row still has the same
 
 **Go deeper:** The event id is the item id plus its last-changed time, like `reviewId:lastModified`, or a hash
 of the payload when it has no usable id. Including the time matters: a real edit has a new time, so it is a new
-event and is not dropped. Demo step 3 shows this live.
+event and is not dropped. Demo step 3 shows this live. One case warns: if the stored copy is already dead, the
+duplicate does not requeue it. We log a WARNING, `duplicate of a dead raw event; not requeued, replay it`, and
+the operator replays it.
 
 **Point at:** `feedback_ingest/services/ingestion.py`, `feedback_ingest/connectors/playstore.py`
-(`external_event_id`), `tests/e2e/test_push_to_query.py`.
+(`external_event_id`), `tests/e2e/test_push_to_query.py`, `tests/unit/services/test_ingestion.py`
+(`test_a_duplicate_of_a_dead_event_is_not_requeued_but_warns`).
 
 ### Q14. What if an older edit arrives after a newer one?
 
@@ -233,8 +238,9 @@ attempt with a short reason. It is never retried and never thrown away, so after
 
 **Go deeper:** The error is written as `field: message` pairs without the input values, capped at 500
 characters, so customer text does not reach logs or the `error` column. The raw row is still stored, because
-`external_event_id` never raises: it falls back to a payload hash. Demo step 6 replays a bad payload and shows
-it go dead again, which proves replay really re-runs it.
+`external_event_id` never raises: it falls back to a payload hash. A Play Store review with no user comment is
+also dead, with `review has no user comment`, so a bad payload never looks like "no data". Demo step 7 replays a
+bad payload and shows it go dead again, which proves replay really re-runs it.
 
 **Point at:** `feedback_ingest/services/pipeline.py` (`_describe`), `tests/unit/services/test_pipeline.py`
 (`test_malformed_payload_is_dead_on_the_first_attempt_without_customer_text`).
@@ -261,11 +267,13 @@ on 40 events, and every event is claimed exactly once.
 
 **Go deeper:** This happens by accident with `uvicorn --workers N`, which starts N copies of the in-process
 worker. The fence stops a late finish from overwriting a newer one. N copies also start N schedulers, which
-fetch the same pages; that wastes calls but the unique key drops the repeats. On Postgres, this one query adds
-`FOR UPDATE SKIP LOCKED`. Never say that runs today.
+fetch the same pages; that wastes calls but the unique key drops the repeats. Inside one process, a source
+syncs once at a time: a second manual sync of it gets 409, and the scheduler skips it while a manual sync runs.
+On Postgres, the claim adds `FOR UPDATE SKIP LOCKED`. Never say that runs today.
 
 **Point at:** `feedback_ingest/adapters/sqlalchemy/raw_event_queue.py` (`claim` and its `ponytail:` note),
-`tests/adapters/test_sqlalchemy.py` (`test_concurrent_claims_are_disjoint`).
+`tests/adapters/test_sqlalchemy.py` (`test_concurrent_claims_are_disjoint`), `feedback_ingest/services/pull.py`
+(the per-source lock), `tests/unit/services/test_pull_concurrency.py`.
 
 ### Q18. What if Discourse rate-limits us while we pull?
 
@@ -273,13 +281,17 @@ fetch the same pages; that wastes calls but the unique key drops the repeats. On
 saved. The cursor does not move, so the next tick starts from the same bookmark and the repeats are dropped.
 
 **Go deeper:** 408, 429, 5xx, network errors and the 10-second timeout are all transient; other 4xx are
-permanent. The manual sync answers 502 with `"error": "429 from …/search.json"` in the result, and `/health` counts the
-source in `failing_sources` after a failed scheduled tick (a count only: health has no auth). The Discourse cursor only moves on
-the final page of a run, because search results are not guaranteed oldest first. Gaps to admit: we do not read
-`Retry-After`, and the scheduler does not back off per source; it just tries again every 300 seconds.
+permanent. Two caps stop a runaway pull: one sync has 60 seconds in total (`FI_PULL_DEADLINE_SECONDS`), and one
+reply may be at most 2,000,000 bytes (`FI_HTTP_MAX_BYTES`); both are transient. The adapter follows no
+redirects. The manual sync answers 502 with `"error": "429 from …/search.json"` in the result. `/health` counts
+the source in `failing_sources` after a failed scheduled tick; it is a count only, because health has no auth,
+and it does not change the status code. The Discourse cursor only moves on the final page of a run, because
+search results are not guaranteed oldest first. Gaps to admit: we do not read `Retry-After`, and the scheduler
+does not back off per source; it just tries again every 300 seconds.
 
 **Point at:** `feedback_ingest/adapters/http/httpx_client.py`, `feedback_ingest/services/pull.py` (`sync`),
-`feedback_ingest/connectors/discourse_pull.py`, `tests/unit/services/test_pull_failures.py`.
+`feedback_ingest/connectors/discourse_pull.py`, `tests/unit/services/test_pull_failures.py`,
+`tests/unit/connectors/test_discourse_pull_limits.py`, `tests/adapters/test_httpx_client.py`.
 
 ### Q19. The pull cursor is stuck. Why?
 
@@ -289,13 +301,17 @@ bad config, or the scheduler is not running or the source is disabled. `/health`
 the error in the result.
 
 **Go deeper:** A window that needs more than 10 search pages (Discourse refuses page 11) stops after page 10
-with the cursor unchanged, so the result shows `pages: 10` and an `error` that says `window exceeds 10 pages`;
-the fix is a smaller `window_days`. A dead scheduler shows `scheduler_alive: false` and health 503.
+with the cursor unchanged, so the result shows `pages: 10` and an `error` that says `window exceeds 10 pages`.
+Ten pages is about 500 posts, so about 500 posts per day is the hard limit of Discourse search. The fix is a
+smaller `window_days` (1 to 31): `PATCH /v1/sources/{id}` with `{"config": {"window_days": "1"}}`. The PATCH
+merges that key into the stored config and checks the result, so a bad value is 422. A dead scheduler shows
+`scheduler_alive: false` and health 503.
 Moving the cursor back by hand is always safe because repeats are dropped; moving it forward skips posts. The
 step-by-step is Runbook 2 in [firefight_runbook.md](firefight_runbook.md).
 
 **Point at:** `feedback_ingest/connectors/discourse_pull.py` (`_MAX_PAGES`), `feedback_ingest/api/sync.py`,
-`feedback_ingest/api/health.py`.
+`feedback_ingest/api/sources.py` (the PATCH route), `feedback_ingest/api/health.py`,
+`tests/api/test_source_updates.py` (`test_patch_merges_config_and_checks_the_result`).
 
 ---
 
@@ -315,9 +331,9 @@ transform, or add a lease heartbeat. Tune `claim_batch`. Recipe 4 in [extensions
 
 ### Q21. What exactly changes for Postgres, and where is the SKIP LOCKED line?
 
-**Say:** Set `FI_DATABASE_URL` to a Postgres URL and add a driver; the SQLite pragmas only run for SQLite. Then
-the claim subquery gets `.with_for_update(skip_locked=True)`, and the upsert and enqueue move to
-`INSERT ... ON CONFLICT`.
+**Say:** Set `FI_DATABASE_URL`, add a driver, change three queries (claim, upsert, enqueue), add migrations. The
+claim subquery gets `.with_for_update(skip_locked=True)`, the upsert and enqueue move to
+`INSERT ... ON CONFLICT`, and the SQLite pragmas only run for SQLite.
 
 **Go deeper:** The claim's `ponytail:` comment marks the spot. `SKIP LOCKED` means "skip rows another
 transaction has locked", so workers do not wait on each other. The upsert and enqueue are "read, then write",
@@ -378,14 +394,18 @@ header. We check it on the raw bytes, with a constant-time compare, before we pa
 signature is 401 and is never written.
 
 **Go deeper:** HMAC is a short code made from the body and a shared secret; only someone with the secret can
-make it. There is no API key on this route, because a real sender cannot add ours. Order of checks: the
-source by its unguessable id (404), the source must be enabled and have a webhook secret (409), then the
-signature (401), then "is it a JSON object" (400). The tenant comes from the source row. An empty secret never
-verifies. Gap: the default scheme has no timestamp, so a captured request could be sent again; the duplicate
-key makes that harmless, and real schemes like Zendesk's sign a timestamp too.
+make it. There is no API key on this route, because a real sender cannot add ours: the source id picks the
+source, and its HMAC proves the sender. Order of checks: the source by its unguessable id (404); only push
+sources take webhooks, so a pull source is 409; then the signature (401); then "is the source enabled" (409),
+asked after the signature so only a caller who proved itself learns the state; then "is it a JSON object" (400).
+A body over 1 MiB is 413 before any of this. The tenant comes from the source row. Gap: the default scheme has
+no timestamp, so a captured request could be sent again; the duplicate key makes that harmless, and real schemes
+like Zendesk's sign a timestamp too.
 
 **Point at:** `feedback_ingest/api/ingest.py`, `feedback_ingest/utils/signing.py`,
-`feedback_ingest/connectors/base.py` (`default_verify_signature`).
+`tests/unit/test_utils.py` (`test_hmac_matches_rfc_4231_case_2`, a published HMAC test vector),
+`feedback_ingest/connectors/base.py` (`default_verify_signature`), `tests/api/test_push_api.py`
+(`test_only_push_sources_take_webhooks_and_the_signature_is_checked_before_state`).
 
 ### Q26. How are API keys stored?
 
@@ -417,26 +437,32 @@ in `sources.webhook_secret`, because we need it to compute the HMAC; production 
 **Say:** We log ids, statuses and short error reasons, not review text. Validation errors are logged without
 the input values.
 
-**Go deeper:** Every log line carries `raw_event_id`, `tenant_id`, `source_id` and `attempts`. Two gaps to name:
-an HTTP error message includes up to 200 characters of the remote reply, which reaches pull logs; and raw
-payloads, which do contain names and text, are kept forever. The fix for the second is a retention purge
-(recipe 7 in [extensions.md](extensions.md)).
+**Go deeper:** Every line ends with the same four keys: `raw_event_id`, `tenant_id`, `source_id`, `attempts`.
+Every worker and pipeline line about an event fills in `raw_event_id`; pull lines fill in `source_id` and
+`tenant_id`; lines with no event, like startup, show `-`. A newline in a message is written as `\n`, so a payload
+cannot fake a second log line. HTTP errors carry only the status and the URL, never the reply body; Discourse's
+own search error text goes only to a WARNING line, not to the sync result. The gap to name: raw payloads, which
+do contain names and text, are kept forever. The fix is a retention purge (recipe 7 in
+[extensions.md](extensions.md)).
 
-**Point at:** `feedback_ingest/services/pipeline.py` (`_describe`), `feedback_ingest/main.py` (log format),
-`feedback_ingest/adapters/http/httpx_client.py`.
+**Point at:** `feedback_ingest/services/pipeline.py` (`_describe`, `event_extra`), `feedback_ingest/main.py`
+(`OneLineFormatter`), `feedback_ingest/adapters/http/httpx_client.py`, `tests/api/test_webhook_limits.py`
+(`test_log_lines_cannot_be_split_by_injected_newlines`).
 
 ### Q29. What is the bootstrap token?
 
 **Say:** Creating a tenant needs an `X-Bootstrap-Token` header that matches a setting, compared in constant time.
 It is a deliberate shortcut for the demo; production puts tenant creation behind a real operator login.
 
-**Go deeper:** The default is `change-me`, and startup logs a warning while it is unchanged. An empty token
-turns tenant creation off. Someone with the token can create tenants, but cannot read another tenant's data,
-because every read is scoped by that tenant's own API key. Production would also refuse to start with the
-default.
+**Go deeper:** The default is `change-me`. While the token is the default or empty, the route refuses every
+call with 401, and startup logs the WARNING `POST /admin/tenants is refused: set FI_BOOTSTRAP_TOKEN`.
+`scripts/demo.sh` exports a random `FI_BOOTSTRAP_TOKEN` before it starts the server, and `seed.py` exits unless
+it is set. Someone with the token can create tenants, but cannot read another tenant's data, because every read
+is scoped by that tenant's own API key.
 
-**Point at:** `feedback_ingest/api/tenants.py`, `feedback_ingest/main.py` (`_warn_about_bootstrap_token`),
-`feedback_ingest/config.py`.
+**Point at:** `feedback_ingest/api/tenants.py`, `feedback_ingest/main.py` (the warning in `lifespan`),
+`feedback_ingest/config.py` (`bootstrap_open`), `tests/api/test_tenants_api.py`
+(`test_the_default_or_an_empty_token_refuses_bootstrap`).
 
 ---
 
@@ -444,16 +470,17 @@ default.
 
 ### Q30. What is one record, for each source?
 
-**Say:** One piece of feedback as the source sees it: a Playstore review, a tweet, a Discourse post, or a whole
-Intercom conversation with its messages joined into the text. `kind` is the shape (`review`, `conversation`,
-`post`), not the source.
+**Say:** One piece of feedback as the source sees it: a Playstore review, a tweet, a Discourse post, a whole
+Intercom conversation with its messages joined into the text, or one entry of a custom webhook batch. `kind` is
+the shape (`review`, `conversation`, `post`, `survey`), not the source.
 
 **Go deeper:** Twitter and Discourse are both `post`; "tweet" is a source, not a kind. A tweet is keyed on its
 original id (the first id in `edit_history_tweet_ids`), because each edit gets a new tweet id. Intercom parts are
-sorted by time and joined with blank lines; `part_count`, `tags` and `state` go to metadata. The record id is a
-`uuid5` of source and external id, so it never changes.
+sorted by time and joined with blank lines; `part_count`, `tags` and `state` go to metadata. A custom record's
+kind comes from its own `type` (`KIND_BY_RECORD_TYPE`), because one custom source can send all four kinds. The
+record id is a `uuid5` of source and external id, so it never changes.
 
-**Point at:** `feedback_ingest/domain/models.py` (`KIND_BY_SOURCE`), `feedback_ingest/connectors/twitter.py`,
+**Point at:** `feedback_ingest/domain/models.py` (`KIND_BY_SOURCE`, `KIND_BY_RECORD_TYPE`), `feedback_ingest/connectors/twitter.py`,
 `feedback_ingest/connectors/intercom.py`, ADR-002 "What one record is".
 
 ### Q31. How do edits work?
@@ -523,7 +550,7 @@ means bumping `connector_version`, fixing the transform and replaying.
 **Say:** Every connector has a `version` number, and every record it builds is stamped with it. After a transform
 bug, it tells you which rows the buggy version made, so you replay just those.
 
-**Go deeper:** All four connectors are at version 1 today, and the record refuses a version below 1. The contract
+**Go deeper:** All five connectors are at version 1 today, and the record refuses a version below 1. The contract
 test checks the stamp matches the connector. The fix loop is: fix the transform, bump `version`, restart, replay.
 The stronger form is a shadow run of the new version over stored raw events, with a diff, before switching
 (recipe 9 in [extensions.md](extensions.md)).
@@ -536,42 +563,54 @@ The stronger form is a shadow run of the new version over stored raw events, wit
 
 ### Q37. Walk me through adding Zendesk.
 
-**Say:** One enum value, one metadata model, one connector file, one line in the registry, and fixtures. No route,
-worker, service or table changes, and the contract tests fail until every piece exists.
+**Say:** Five steps: an enum value, a metadata model, a connector file, a registry entry, and fixtures. No route,
+worker, service or table changes, and the tests fail until every piece exists. The `custom` connector was added
+exactly this way, so it is the worked example.
 
-**Go deeper:** The steps are: add `SourceType.ZENDESK` and its kind in `KIND_BY_SOURCE`; add `ZendeskMetadata` to
-the union; write `connectors/zendesk.py` with an input model, `external_event_id`, `transform` and
-`verify_signature`; add it to `_ALL`; add a normal, an edited and a malformed fixture. Exact file names are recipe
-1 in [extensions.md](extensions.md). Whiteboard line for "isn't the registry just an if/else": "Yes, a dict is a
-dispatch table, but it lives in one file, its keys are type-checked, and a test fails if a type is missing."
+**Go deeper:** The steps are: (1) add `SourceType.ZENDESK` in `domain/enums.py` and its kind in `KIND_BY_SOURCE`
+in `domain/models.py`, reusing an existing kind; (2) add `ZendeskMetadata` to the `SourceMetadata` union in
+`domain/metadata.py`; (3) write `connectors/zendesk.py` with its input model, `source_type`, `version`,
+`required_config`, `external_event_id`, `transform` (built with `new_record`) and `verify_signature`; (4) add it
+to the tuple inside `CONNECTORS` in `connectors/registry.py` (and to `PULLERS` if it pulls); (5) add fixtures
+under `tests/fixtures/zendesk/`, at least `malformed.json`. `test_registry.py` and
+`test_every_source_type_has_a_metadata_model` fail until all of it exists; then the contract tests run every
+fixture. Exact file names are recipe 1 in [extensions.md](extensions.md). Whiteboard line for "isn't the
+registry just an if/else": "Yes, a dict is a dispatch table, but it lives in one file, its keys are
+type-checked, and a test fails if a type is missing."
 
-**Point at:** `feedback_ingest/connectors/registry.py`, `tests/unit/connectors/test_registry.py`,
-`tests/unit/connectors/test_contract.py`.
+**Point at:** `feedback_ingest/connectors/registry.py`, `feedback_ingest/connectors/custom.py` (the worked
+example), `tests/unit/connectors/test_registry.py`, `tests/unit/test_models.py`
+(`test_every_source_type_has_a_metadata_model`), `tests/unit/connectors/test_contract.py`.
 
 ### Q38. How do you add a new kind of feedback, like an NPS survey?
 
-**Say:** A new kind is one enum value plus fields in metadata, and because `kind` is stored as text it needs no
-migration. If everyone needs to query the score, it becomes a common column, which is a migration plus a replay.
+**Say:** We did it: `survey` is a real kind now. It was one enum value, `FeedbackKind.SURVEY`, plus a place for
+the score in metadata, and because `kind` is stored as text it needed no migration. If everyone needs to query
+the score, it becomes a common column, which is a migration plus a replay.
 
 **Go deeper:** That is where the design strains: the record is the costly extension point, the connector is the
-cheap one. Also update `KIND_BY_SOURCE`, because the record checks that each source maps to its kind. The
-`rating` column is 1 to 5 only, so an NPS 0 to 10 score cannot reuse it.
+cheap one. `kind` is computed from the source type through `KIND_BY_SOURCE`; only `custom` records take it from
+their own `type` through `KIND_BY_RECORD_TYPE`, where `SURVEY` maps to `survey`. The score lives in
+`CustomMetadata.score`, because the `rating` column is 1 to 5 only, so an NPS 0 to 10 score cannot reuse it.
 
-**Point at:** `feedback_ingest/domain/enums.py` (`FeedbackKind`), `feedback_ingest/domain/models.py`, ADR-003 ruling 9.
+**Point at:** `feedback_ingest/domain/enums.py` (`FeedbackKind`), `feedback_ingest/domain/models.py`
+(`KIND_BY_RECORD_TYPE`), `feedback_ingest/domain/metadata.py` (`CustomMetadata`), ADR-003 ruling 9.
 
 ### Q39. What if a source needs both push and pull?
 
 **Say:** Push or pull is a choice on the source row (`mode`), not on the connector. Both paths write the same
-`raw_events` table and the same transform reads it, so Discourse already does both.
+`raw_events` table and the same transform reads it, so a Discourse source can be either. For both at once, you
+create two sources: one push, one pull.
 
-**Go deeper:** A pull connector also implements `transform`, so the webhook route accepts pull sources too, as
-long as the source has a secret. The API only generates a secret for push sources, so pass `webhook_secret` when
-creating a pull source that should also take webhooks. Config is split: `required_config` (Discourse needs
-`base_url` in both modes) and `pull_config` (`start_after`, pull only). Creating a pull source for a type with no
-puller is a 422.
+**Go deeper:** Webhooks are push only. A pull source never takes a webhook (409), and creating a pull source with
+a `webhook_secret` is a 422. A push source always has a secret: the API generates one if you give none. Config
+is split: `required_config` (Discourse needs `base_url` in both modes) and `pull_config` (`start_after`, pull
+only). Creating a pull source for a type with no puller is a 422. Two sources means two `source_id`s, so the same
+post arriving both ways becomes two records; that is the cost of keeping one mode per source.
 
 **Point at:** `feedback_ingest/connectors/discourse.py`, `feedback_ingest/connectors/registry.py` (`check_source`),
-`tests/api/test_push_api.py` (`test_pull_source_without_a_secret_rejects_unsigned_pushes`).
+`feedback_ingest/api/schemas.py` (`SourceCreate`), `tests/api/test_push_api.py`
+(`test_only_push_sources_take_webhooks_and_the_signature_is_checked_before_state`).
 
 ### Q40. A source signs webhooks differently. Where does that go?
 
@@ -580,8 +619,8 @@ HMAC-SHA256 check. A source that signs differently overrides that one method; th
 source type, the secret belongs to the tenant's source row.
 
 **Go deeper:** Intercom would compute HMAC-SHA1 and read `X-Hub-Signature`, stripping `sha1=`. Discourse webhooks
-would strip `sha256=` from `X-Discourse-Event-Signature`. None of our four override it, because our replay script
-signs fixtures with the default. One honest catch: the signature contract test signs with the default header, so
+would strip `sha256=` from `X-Discourse-Event-Signature`. None of our five changes the scheme: each one calls
+the default, because our sign script (`scripts/sign.py`, secret from `FI_SIGN_SECRET`) signs fixtures with it. One honest catch: the signature contract test signs with the default header, so
 an overriding connector needs that test taught its scheme.
 
 **Point at:** `feedback_ingest/connectors/base.py`, `feedback_ingest/connectors/playstore.py` (`verify_signature`),
@@ -608,12 +647,12 @@ live, like adding a field to a metadata model and watching the contract tests re
 ### Q42. What would you change with another week?
 
 **Say:** First, Postgres with Alembic migrations and `ON CONFLICT` writes, plus the worker as its own process.
-Then the operator features a real incident needs: bulk replay by source and time window, metrics and alerts,
-and a retention rule for raw payloads.
+Then the operator features a real incident needs: a time window on bulk replay, metrics and alerts, and a
+retention rule for raw payloads.
 
 **Go deeper:** In order: (1) Postgres, `SKIP LOCKED`, `ON CONFLICT`, Alembic; (2) separate worker and one
-scheduler; (3) bulk replay with `source_id` and `since` filters on `/admin/raw-events` (today you loop with
-`jq`); (4) counters and queue age on `/health` or `/metrics`; (5) fair claiming and a per-tenant rate limit;
+scheduler; (3) a `since` filter on bulk replay (bulk replay by `source_id` and `status` is built:
+`POST /admin/raw-events/replay`); (4) counters and queue age on `/health` or `/metrics`; (5) fair claiming and a per-tenant rate limit;
 (6) raw-event retention and an erasure flow; (7) webhook secret rotation with an overlap window; (8) honour
 `Retry-After` and back off per source; (9) the Twitter delete branch.
 
@@ -631,3 +670,168 @@ need a CRC handshake we did not build. Also not built from the Phase 6 plan: pro
 source and time filters on the dead list, and a Dockerfile.
 
 **Point at:** `docs/PLAN.md` ("Out of scope"), `docs/phases/06_hardening_interview_pack.md`, ADR-003 context table.
+
+---
+
+## 8. How this maps to Enterpret
+
+Everything here about Enterpret comes from their public pages, collected in
+[docs/research/](../research/00_tailoring_decisions.md). Say "their public docs describe" or "their engineering
+blog says". Never say "they do X internally": we do not know their internals.
+
+### Q44. Where does this sit in Enterpret's Unify, Understand, Act flow?
+
+**Say:** Their home page describes the product as three steps: Unify, then Understand, then Act. This service is
+the Unify step: it takes feedback in from many sources and turns each item into one normalised Feedback Record.
+
+**Go deeper:** Understand is their taxonomy (Keywords, Themes and Categories; "Reasons" is the older name) and
+Wisdom, their question answering; it would read our records downstream. Act (Slack, Jira and similar) is further
+downstream again. We built neither, and I would say so.
+
+**Point at:** `feedback_ingest/domain/models.py` (`FeedbackRecord`), `docs/research/01_product_and_integrations.md`
+(section 1).
+
+### Q45. How does your custom connector compare with their public webhook?
+
+**Say:** Their help center describes `POST /webhook/custom/all`: a batch `{"records": [...]}` where each record
+has `id`, `type`, `createdAt` in epoch seconds, and metadata. Our `custom` connector takes that envelope on our
+normal route, `POST /v1/sources/{id}/events`, and makes one Feedback Record per entry.
+
+**Go deeper:** One push is one raw event, keyed by the hash of the whole batch; each record then upserts on
+(source id, record id) with the version guard. We take a simpler shape than theirs: a flat `text` and flat
+metadata values, where their docs describe content blocks per type and typed metadata arrays. One unsupported
+`type` sends the whole batch dead; the `ponytail:` note says to split a batch into one raw event per record if
+senders need partial acceptance.
+
+**Point at:** `feedback_ingest/connectors/custom.py`, `tests/fixtures/custom/batch.json`,
+`tests/api/test_custom_webhook.py` (`test_a_custom_batch_is_one_delivery_and_three_records_of_three_kinds`), demo
+step 6.
+
+### Q46. Why HMAC per source instead of their `api-key` header?
+
+**Say:** Their docs describe an `api-key` header, one key per webhook integration. Our webhook takes no API key:
+the source id in the URL picks the source, and an HMAC-SHA256 signature of the raw body, made with that source's
+secret, proves the sender.
+
+**Go deeper:** A signature also proves the body was not changed on the way, which a key in a header does not.
+Senders like Intercom already sign their webhooks with an HMAC, though with their own header and hash; each connector's `verify_signature` hook is where that exact check goes (every connector uses our SHA-256 `X-Signature` default today). The cost: the sender must
+compute a hash, which is harder for a quick script than pasting a key.
+
+**Point at:** `feedback_ingest/api/ingest.py`, `feedback_ingest/utils/signing.py`, `tests/api/test_push_api.py`
+(`test_no_api_key_is_needed_but_a_signature_is`).
+
+### Q47. What does 202 mean here, compared with their "accepted does not mean processed"?
+
+**Say:** The same idea. Their webhook docs say a 200 means accepted, not processed; our 202 means the raw payload
+is committed to `raw_events`, and the worker builds the records later.
+
+**Go deeper:** We picked 202 because that code means "accepted for processing". If we cannot save, we answer 503
+so the sender retries; we never say yes to something that is not on disk. The gap: the sender cannot ask about
+one delivery's outcome; only the tenant can, with `GET /admin/raw-events/{id}`.
+
+**Point at:** `feedback_ingest/api/ingest.py`, `feedback_ingest/services/ingestion.py`, `tests/api/test_push_api.py`
+(`test_storage_down_is_503_never_202_and_logged`).
+
+### Q48. How do you handle a repeated id, compared with their skip by default and opt-in replace?
+
+**Say:** Their docs describe two modes: by default a repeated `id` is skipped, and "mutability", which their
+support turns on, makes a repeated `id` replace the record. We have both, at two layers: an identical delivery is
+skipped at `raw_events`, and an equal or newer version of a record replaces it in `feedback_records`; an older one
+never does.
+
+**Go deeper:** For the custom connector, the same batch sent twice has the same hash, so it is a duplicate. A
+batch that changes one record is a new raw event, and each record in it goes through the version guard. We did
+not copy their toggle: newer always wins and older always loses.
+
+**Point at:** `feedback_ingest/adapters/sqlalchemy/feedback_store.py` (`upsert`), `feedback_ingest/connectors/custom.py`
+(`external_event_id`), `tests/fixtures/custom/batch_edited.json`.
+
+### Q49. How does your version guard compare with what their engineering blog describes?
+
+**Say:** Their engineering blog (the KOSH post) says stale or out-of-order updates are rejected by version, so
+they never overwrite newer data. Ours is the same rule in one place: the upsert compares `source_updated_at` (or
+`source_created_at`), keeps the newer, and reports `skipped_older` for the loser.
+
+**Go deeper:** An equal version is accepted, so a replay writes the same row again. Deletes are sticky, so replay
+order does not matter. The limit: our version is the source's own timestamp, so two edits with the same
+timestamp are ordered by whichever we process last.
+
+**Point at:** `feedback_ingest/adapters/sqlalchemy/feedback_store.py` (`upsert`), `feedback_ingest/domain/models.py`
+(`version_at`), `tests/unit/connectors/test_contract.py` (`test_an_edit_is_a_new_raw_event_and_the_newer_text_wins`).
+
+### Q50. How would you handle noisy neighbours and queue clogging here?
+
+**Say:** A noisy neighbour is one tenant whose load slows everyone else; queue clogging is bad or huge items
+blocking the queue. Their engineering blog names both as incidents and says they partition events by tenant and
+object type.
+
+**Go deeper:** Clogging by bad items is handled here: a bad payload goes dead on the first try and leaves the
+queue, a payload that crashes the process is dead once its attempts pass 5, and a body over 1 MiB is refused with 413.
+Noisy neighbours are not: the claim is first come, first served across tenants, and only the per-tenant counts on
+`GET /admin/queue` show it. The fixes, in order: a per-tenant limit at the door, a fair claim, then a queue per
+tenant (recipe 5 in [extensions.md](extensions.md)).
+
+**Point at:** `feedback_ingest/adapters/sqlalchemy/raw_event_queue.py` (`claim`), `feedback_ingest/services/pipeline.py`,
+`feedback_ingest/api/body_limit.py`.
+
+### Q51. Where would ClickHouse fit?
+
+**Say:** Their engineering blog describes ClickHouse as an analytics projection, meaning a copy of the data shaped
+for big aggregate reads, fed by change data capture. Here it would sit after `feedback_records`: this database
+keeps ingest and simple tenant-scoped reads, and cross-source counts and trends move to the column store.
+
+**Go deeper:** We built none of it. The first thing to add is a "last written by us" column on records, so an
+incremental copy can ask what changed since last time. The rest is Q24.
+
+**Point at:** `feedback_ingest/adapters/sqlalchemy/tables.py` (`FeedbackRecordRow`), Q24.
+
+### Q52. Why no PII redaction, when their docs say they scrub before ingestion?
+
+**Say:** Their platform page says PII such as card numbers and SSNs is detected and obfuscated before ingestion.
+We did not build that; we only keep customer text out of logs and error messages.
+
+**Go deeper:** It would go in `IngestionService.accept`: compute the duplicate key from the original payload,
+replace emails, phones and card numbers with placeholders like `[EMAIL]`, then enqueue. It must run before
+storage, because `raw_events` keeps every payload as received. The trade-off: once raw is redacted, replay can
+never get the original text back.
+
+**Point at:** `feedback_ingest/services/ingestion.py`, `feedback_ingest/services/pipeline.py` (`_describe`), recipe 6
+in [extensions.md](extensions.md).
+
+### Q53. Why a 5-minute poll, when their help center says every 4 hours?
+
+**Say:** Their help center pages for Intercom, Front and the two app stores describe a pull every 4 hours. Our
+interval is a setting, `FI_PULL_INTERVAL_SECONDS`, with a default of 300 seconds so the demo shows results fast.
+
+**Go deeper:** A tick re-reads its whole window and the unique key drops repeats, so a short interval costs
+upstream calls, not correctness. It is one global value today; production would set it per source. Their pages
+also say support tools ingest resolved conversations only; we take every `conversation.*` snapshot, so a
+conversation updates each time it changes.
+
+**Point at:** `feedback_ingest/config.py` (`pull_interval_seconds`), `feedback_ingest/services/scheduler.py`,
+`feedback_ingest/connectors/intercom.py`.
+
+### Q54. Why no rate limit, and why not their 200 KB and 100-record limits?
+
+**Say:** Their webhook page lists a 200 KB request cap, about 100 records per batch, and a request-rate limit. We
+have one size limit, 1 MiB on every route (413), no record count cap and no rate limit.
+
+**Go deeper:** A rate limit is the first noisy-neighbour fix: a per-tenant check at the door that answers 429
+(recipe 5 in [extensions.md](extensions.md)). A record cap would be one `max_length` on the batch model, but then
+an oversized batch goes dead after its 202 instead of being refused at the door.
+
+**Point at:** `feedback_ingest/api/body_limit.py`, `tests/api/test_webhook_limits.py`
+(`test_a_body_over_the_limit_is_413_declared_or_streamed`), `feedback_ingest/connectors/custom.py` (`CustomBatchIn`).
+
+### Q55. Why is SURVEY a kind, and AUDIO_RECORDING rejected?
+
+**Say:** Their webhook docs list five record types: REVIEW, CONVERSATION, FORUM_CONVERSATION_THREAD, SURVEY and
+AUDIO_RECORDING. We map the first four to kinds (`review`, `conversation`, `post`, `survey`), and added `survey`
+because no existing kind fit.
+
+**Go deeper:** AUDIO_RECORDING is not text: it needs an audio download and a transcript, which is enrichment, not
+ingestion. Today it is a `TransformError`, and since one push is one raw event, the whole batch goes dead and can
+be replayed after a fix.
+
+**Point at:** `feedback_ingest/domain/models.py` (`KIND_BY_RECORD_TYPE`), `tests/unit/connectors/test_custom.py`
+(`test_an_unsupported_type_or_an_empty_batch_goes_dead`), `tests/fixtures/custom/unsupported_type.json`.

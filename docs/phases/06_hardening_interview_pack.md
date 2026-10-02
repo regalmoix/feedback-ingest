@@ -1,6 +1,12 @@
-# Phase 6 — Hardening and interview pack
+# Phase 6: Hardening and interview pack
 
 Status: designed 2026-10-03. Depends on Phases 3–5 being committed.
+
+**Update after Fleet 2 (commit cbb788c).** This is the design as written; the code wins. Built differently:
+- The log format adds `attempts` to the keys, and `\r` and `\n` in messages are escaped. Worker and pipeline lines carry `raw_event_id`; pull lines carry `tenant_id` and `source_id`; startup lines show "-".
+- `/health` has no `uptime_seconds`, `processed_total` or `dead_total` counters. It shows global queue counts, worker and scheduler flags, and `failing_sources` (a count).
+- `GET /admin/raw-events` filters by `status` and `limit` only. Replay by source is bulk replay, `POST /admin/raw-events/replay?source_id=&status=&limit=`; there is no time-window filter.
+- No `Dockerfile` was added.
 
 ## What this phase builds, in one paragraph
 
@@ -35,7 +41,7 @@ slide deck. Then one last review pass over the whole repository.
   verification query → comms template with timestamps).
 - `alternatives.md`: every rejected option from ADR-001..003 and PLAN.md in one table: option, why not now,
   when it becomes right.
-- `extensions.md`: add a source (5 steps, file names), Postgres swap (env var + SKIP LOCKED line), Kafka/SQS
+- `extensions.md`: add a source (5 steps, file names), Postgres swap (set `FI_DATABASE_URL`, add a driver, change three queries (claim, upsert, enqueue), add migrations), Kafka/SQS
   swap (which adapter, what changes in retry semantics), horizontal workers, per-tenant fairness, enrichment
   stage (language, sentiment), tombstone/GDPR erasure, backfill, shadow-run a new connector version.
 - `glossary.md`: inbox/durable log, lease, fence, tombstone, idempotency vs dedupe, cursor, overlap window,

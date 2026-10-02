@@ -6,11 +6,21 @@ Plain words for every term you may need at the whiteboard. Each term has three l
 - **Where:** where it lives in this repo.
 - **Why:** why it matters here.
 
-Everything below is built: Phases 1 to 5 are merged to `main`. The one piece not built yet, replay by source and time window, says so. Paths are under `feedback_ingest/` unless they start with `tests/` or `docs/`.
+Everything below is built and merged to `main`: Phases 1 to 5, the Fleet 2 hardening (including bulk replay), and the custom connector. Anything not built says so. Paths are under `feedback_ingest/` unless they start with `tests/` or `docs/`.
 
 The terms are in teaching order, so each one only uses words defined above it.
 
 ## 1. The big pieces
+
+### Unify, Understand, Act
+- **What:** The three stages Enterpret's public site uses to describe its product: Unify (bring feedback from every source into one shape), Understand (organise it: a taxonomy of keywords, themes and categories, plus Wisdom, their question-and-answer tool), and Act (send it to Slack, Jira and so on).
+- **Where:** Not in the code. This service is the Unify stage only.
+- **Why:** It tells the interviewer where our work stops: the Understand stage reads our records, it is downstream, and we did not build it. "Reasons" is the older name for their taxonomy units; "Themes" is the current one.
+
+### Feedback Record
+- **What:** One piece of feedback in one common shape, whatever source it came from: a review, a conversation, a post or a survey answer. Enterpret's public docs use this same name.
+- **Where:** The `FeedbackRecord` model in `domain/models.py`, stored in the `feedback_records` table. Its `kind` is `review`, `conversation`, `post` or `survey`.
+- **Why:** It is the output of this whole service, and the input to everything downstream.
 
 ### Source type vs source instance
 - **What:** A source type is a kind of service, like Playstore; a source instance is one tenant's configured connection to it, like one particular Android app.
@@ -24,18 +34,18 @@ The terms are in teaching order, so each one only uses words defined above it.
 
 ### Connector
 - **What:** The code for one source type: it checks a payload, works out its ids, turns it into feedback records, and for Discourse also fetches pages.
-- **Where:** One file per source in `connectors/` (`discourse.py`, `playstore.py`, `twitter.py`, `intercom.py`, plus `discourse_pull.py` for paging), all listed in `connectors/registry.py`: `CONNECTORS` maps every type to its connector, and `PULLERS` holds the ones that can pull.
-- **Why:** It is the extensibility story: adding Zendesk is one file, one metadata model, one registry entry and one fixture, with no route, worker or table changes.
+- **Where:** One file per source in `connectors/` (`discourse.py`, `playstore.py`, `twitter.py`, `intercom.py`, `custom.py`, plus `discourse_pull.py` for paging), all listed in `connectors/registry.py`: `CONNECTORS` is built from a tuple of connectors and maps every type to its connector, and `PULLERS` holds the ones that can pull.
+- **Why:** It is the extensibility story. Adding Zendesk takes five steps: a `SourceType` enum value and its `KIND_BY_SOURCE` entry; a metadata model in the `SourceMetadata` union; a connector file with its input model; a registry entry (the tuple inside `CONNECTORS`, and `PULLERS` if it pulls); and fixtures, including `malformed.json`. The registry and metadata tests fail until all five exist. No route, worker or table changes. The `custom` connector, which takes Enterpret's public webhook shape, was added exactly this way.
 
 ### Connector version
 - **What:** A whole number on each connector, bumped whenever its transform output changes, and stamped on every record it builds.
-- **Where:** The `version` attribute on each connector (1 for all four today), copied into the `connector_version` column on `feedback_records`, which must be at least 1.
+- **Where:** The `version` attribute on each connector (1 for all five today), copied into the `connector_version` column on `feedback_records`, which must be at least 1.
 - **Why:** After a transform bug, you can find and replay only the rows the buggy version made.
 
 ### Port
 - **What:** A small interface that lists the methods the core code may call on the outside world, with no logic inside.
 - **Where:** `ports/`: `TenantStore`, `SourceStore`, `FeedbackStore` in `stores.py`, `RawEventQueue` in `queue.py`, `HttpClient` in `http.py`, `Clock` in `clock.py`.
-- **Why:** The services in `services/` import ports, never adapters, so swapping SQLite for Postgres touches only the adapter files and `wiring.py`, which builds them.
+- **Why:** The services in `services/` import ports, never adapters, so a Postgres swap stays in the adapters: set `FI_DATABASE_URL`, add a driver, change three queries (claim, upsert, enqueue), add migrations. `wiring.py` builds the adapters; the `main.py` lifespan builds the services.
 
 ### Adapter
 - **What:** A class that does the real work behind a port, against a real thing or a fake one.
@@ -67,17 +77,22 @@ The terms are in teaching order, so each one only uses words defined above it.
 ### HMAC signature
 - **What:** A short code made from the request body and a shared secret; only someone who knows the secret can make it, so it proves the sender and that the body was not changed.
 - **Where:** `utils/signing.py` has `sign` and `verify` (HMAC-SHA256, hex), with a constant-time compare, and an empty secret never verifies; `default_verify_signature` in `connectors/base.py` reads the `X-Signature` header, and the webhook route in `api/ingest.py` runs the check.
-- **Why:** It runs on the raw bytes before anything is stored, so a bad signature gets a 401 and never reaches `raw_events`; the secret belongs to the source row and the algorithm belongs to the connector.
+- **Why:** It is the second of the webhook's "two checks": the source id in the URL picks the source, and that source's HMAC proves the sender. It runs on the raw bytes before anything is stored, so a bad signature gets a 401 and never reaches `raw_events`. The secret belongs to the source row and the algorithm belongs to the connector. Only push sources have a secret; a pull source answers 409 to a webhook.
 
 ### API key hash
 - **What:** We never store a tenant's API key, only a hash of it (a one-way fingerprint), and we find the tenant by that hash.
 - **Where:** `Tenant.api_key_hash`, `UNIQUE(tenants.api_key_hash)` in `adapters/sqlalchemy/tables.py`, and `TenantStore.get_by_api_key_hash`; `current_tenant` in `api/deps.py` reads the `X-API-Key` header.
-- **Why:** The key tells us the tenant, and no match means 401; the push webhook does not ask for it, because real third-party senders cannot add our header: there the unguessable `source_id` in the URL plus the signature do that job, and the tenant comes from the source row.
+- **Why:** The key tells us the tenant, and no match means 401. Three routes take no API key: `/health`, the push webhook, and `POST /admin/tenants`, which takes the `X-Bootstrap-Token` header instead (refused with 401 while `FI_BOOTSTRAP_TOKEN` is still the default). The push webhook does not ask for a key because real third-party senders cannot add our header: there the unguessable `source_id` in the URL plus the signature do that job, and the tenant comes from the source row.
 
 ### 202 Accepted
 - **What:** The HTTP reply that means "saved, not finished yet".
 - **Where:** `POST /v1/sources/{source_id}/events` in `api/ingest.py`, which replies with `raw_event_id` and `duplicate` (on a duplicate, `raw_event_id` is the id of the row already stored).
 - **Why:** We send it only after the raw row is committed, and we send it for a duplicate too, so the sender stops retrying.
+
+### Accepted does not mean processed
+- **What:** A 202 promises the payload is saved on disk. It does not promise a record exists yet; the worker makes the record a moment later, or the event goes dead with its reason.
+- **Where:** The 202 from `api/ingest.py`, then the worker in `services/worker.py`. Enterpret's public webhook docs say the same about their 200.
+- **Why:** It is what lets the webhook stay fast and still lose nothing: saving is quick, transforming can retry later.
 
 ### 503 on DB down
 - **What:** "Service unavailable": our reply when we cannot save the payload.
@@ -86,12 +101,12 @@ The terms are in teaching order, so each one only uses words defined above it.
 
 ### Cursor
 - **What:** A bookmark string that says where the next poll should start.
-- **Where:** `Source.cursor` in the `sources` table, changed by `SourceStore.update_cursor`; Discourse stores a timestamp there, and `PullService._advance` in `services/pull.py` moves it, never backwards.
-- **Why:** It moves forward only after that page's raw rows are committed, so a crash makes us fetch a page again instead of skipping it.
+- **Where:** `Source.cursor` in the `sources` table, changed by `SourceStore.update_cursor(source_id, tenant_id, cursor)`; Discourse stores a timestamp there, and `PullService._advance` in `services/pull.py` moves it, never backwards.
+- **Why:** The rule for Discourse: the cursor stays where it is on every page except the final page of a window. On the final page it becomes the newest post time minus 60 seconds, or the window end if the window end is already in the past. It is saved only after that page's raw rows are committed, so a failure part way through restarts the window and repeats are dropped. One window may use at most 10 search pages, so about 500 posts per day is the limit of Discourse search; a busier forum needs a smaller `window_days`, which you can lower with `PATCH /v1/sources/{id}`.
 
 ### Overlap window
 - **What:** We set the cursor a little earlier than the newest item seen, so the next poll re-reads a few items on purpose.
-- **Where:** `_OVERLAP` (60 seconds) in `connectors/discourse_pull.py`: on the final page of a run, the cursor is the newest post time seen minus that overlap.
+- **Where:** `_OVERLAP` (60 seconds) in `connectors/discourse_pull.py`: on the final page of a window, the cursor is the newest post time seen minus that overlap (or the window end, if that is in the past).
 - **Why:** It covers clock skew and late arrivals, and the repeats hit the `raw_events` unique key and are dropped.
 
 ## 3. Processing
@@ -118,20 +133,30 @@ The terms are in teaching order, so each one only uses words defined above it.
 
 ### Replay
 - **What:** Running stored raw payloads through the transform again, usually after fixing a bug.
-- **Where:** `requeue(event_id, now)` puts a row back to pending and resets attempts; `POST /admin/raw-events/{id}/replay` in `api/admin.py` does that for one event, and answers 409 only while a worker holds a live lease (a `processing` row whose lease expired can be replayed). Replay by source and time window is not built yet (planned, Phase 6), so today you loop over the list with `jq`.
-- **Why:** Raw is kept, so a bug never means lost data; replay runs the same upsert, where an equal timestamp counts as newer (ADR-002), so a fixed row is still written, and the upsert never clears `deleted_at`, so deleted items stay deleted.
+- **Where:** `requeue(event_id, now)` puts a row back to pending and resets attempts; `POST /admin/raw-events/{id}/replay` in `api/admin.py` does that for one event, and answers 409 only while a worker holds a live lease (a `processing` row whose lease expired can be replayed). Bulk replay is built too: `POST /admin/raw-events/replay?status=&source_id=&limit=` requeues the calling tenant's matching rows (status `dead`, `failed` or `processed`, default `dead`; at most 500, newest first) and answers `{"requeued": n}`. Replay by time window is not built.
+- **Why:** Raw is kept, so a bug never means lost data. Replay runs the same upsert and the same version guard, where an equal timestamp is accepted (ADR-002), so a fixed row is still written. The upsert never clears `deleted_at`, so deleted items stay deleted. That is why replay order does not matter.
 
 ### uvicorn workers
 - **What:** `uvicorn --workers N` starts N copies of the app, and each copy starts its own in-process worker.
 - **Where:** The app lifespan in `main.py` starts the worker and the scheduler, using the adapters that `sql_adapters` in `wiring.py` builds; the safety comes from the single-statement claim in `adapters/sqlalchemy/raw_event_queue.py`.
 - **Why:** Two workers will happen by accident, and the claim keeps it safe: a test runs four threads on 40 events and each event is claimed exactly once.
 
+### Noisy neighbour
+- **What:** One tenant's burst of work slows every other tenant who shares the same queue.
+- **Where:** Today `claim` in `adapters/sqlalchemy/raw_event_queue.py` takes the rows due soonest across all tenants, so this can happen here. Recipe 5 in `docs/interview/extensions.md` is the fix.
+- **Why:** Enterpret's engineering blog names noisy neighbours as an incident they had, and says they partition events by tenant. Per-tenant partitioning is our named upgrade, not built.
+
 ## 4. Storing records
 
 ### Upsert
 - **What:** Insert a row, or update it if it already exists.
 - **Where:** `upsert` in `adapters/sqlalchemy/feedback_store.py`, which returns `inserted`, `updated` or `skipped_older`.
-- **Why:** An update only wins if the incoming "last changed" time (update time, or create time if missing) is newer or equal; the code today reads then writes inside one `BEGIN IMMEDIATE` transaction, and its `ponytail:` note says to switch to `INSERT ... ON CONFLICT` when Postgres needs many writers.
+- **Why:** An update only wins if the incoming "last changed" time (update time, or create time if missing) is newer or equal (the version guard, below); the code today reads then writes inside one `BEGIN IMMEDIATE` transaction, and its `ponytail:` note says to switch to `INSERT ... ON CONFLICT` when Postgres needs many writers.
+
+### Version guard
+- **What:** The rule that an older version of a record never overwrites a newer one. The version is the source's update time, or its create time if there is no update time.
+- **Where:** `upsert` in `adapters/sqlalchemy/feedback_store.py` (and the memory twin): older is `skipped_older`, equal or newer overwrites. Replay goes through the same guard.
+- **Why:** Webhooks and polls arrive out of order, so order cannot decide the winner. Enterpret's engineering blog describes the same idea: version-based rejection of stale updates.
 
 ### Idempotency vs de-duplication
 - **What:** Idempotency means doing the same thing twice leaves the same result as doing it once; de-duplication is one way to get there, by dropping the second copy.
@@ -150,7 +175,7 @@ The terms are in teaching order, so each one only uses words defined above it.
 
 ### Discriminated union
 - **What:** A type that can be one of several models, where one field, here `source_type`, says which one it is.
-- **Where:** `SourceMetadata` in `domain/metadata.py`, over `DiscourseMetadata`, `PlaystoreMetadata`, `TwitterMetadata` and `IntercomMetadata`.
+- **Where:** `SourceMetadata` in `domain/metadata.py`, over `DiscourseMetadata`, `PlaystoreMetadata`, `TwitterMetadata`, `IntercomMetadata` and `CustomMetadata`.
 - **Why:** Pydantic and mypy always know which model a `metadata` blob is, and `FeedbackRecord` rejects metadata whose `source_type` disagrees with the record.
 
 ### Naive UTC

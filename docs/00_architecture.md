@@ -40,6 +40,7 @@ data, and anything that fails to process is parked in a dead list where it can b
                     │
    GET /v1/records?source_id=&kind=&since=    GET /admin/raw-events?status=dead    GET /health
                                               POST /admin/raw-events/{id}/replay
+                                              POST /admin/raw-events/replay?source_id=&status=
 ```
 
 The three guarantees: **durable before ack** (202 only after the `raw_events` row commits), **idempotent
@@ -49,7 +50,8 @@ so a fixed connector can reprocess it).
 ## Components
 
 Routers are thin. Services depend only on ports (Protocols). Adapters are the only code that touches
-SQLAlchemy or httpx. `wiring.py` builds the graph; `main.py` starts and stops the worker and scheduler.
+SQLAlchemy or httpx. `wiring.py` builds the adapters; the lifespan in `main.py` builds the services from them
+and starts and stops the worker and scheduler.
 
 ```mermaid
 flowchart LR
@@ -137,17 +139,24 @@ sequenceDiagram
 
   S->>R: POST /v1/sources/{id}/events with X-Signature, no API key
   R->>D: SourceStore.get_by_id(source_id)
+  Note over S,R: a body over 1 MiB is refused with 413 before any of this
   alt unknown source
     R-->>S: 404
   end
-  alt disabled source, or a source without a webhook secret
+  alt a pull source (webhooks are push-only)
     R-->>S: 409
   end
   R->>C: verify_signature over the raw body with the source secret
-  alt bad signature, body not a JSON object
-    R-->>S: 401 or 400
+  alt bad or missing signature
+    R-->>S: 401
   end
-  R->>I: accept(source, payload) in a threadpool
+  alt disabled source (told only after the signature passed)
+    R-->>S: 409
+  end
+  alt body not a JSON object, or nested too deep to store
+    R-->>S: 400
+  end
+  R->>I: accept(source, payload); signature, parse and accept run in a threadpool
   I->>C: external_event_id(payload)
   I->>Q: enqueue as pending
   Q-->>I: the stored row id: new, or the existing one on a duplicate
@@ -177,7 +186,7 @@ sequenceDiagram
   participant SS as SourceStore
 
   T->>PS: sync(source), for each pull source every FI_PULL_INTERVAL_SECONDS
-  PS->>PC: pull(source, http, now)
+  PS->>PC: pull(source, http, clock, deadline), deadline = now + FI_PULL_DEADLINE_SECONDS
   loop each search page, at most 10 per window (Discourse rejects page 11)
     PC->>H: get_json search.json with q after and before, page n
     H->>X: GET
@@ -189,10 +198,12 @@ sequenceDiagram
     end
     PS->>SS: update_cursor to the max of stored and page cursor
   end
-  Note over PC,SS: the cursor moves only on the final page, to the newest post minus a 60 s overlap
-  Note over PS,SS: a TransientError or TransformError stops the run, the cursor stays put and the message lands in PullResult.error (POST sync answers 502); any other error propagates (503 from the endpoint; the scheduler logs it, records that source as failing and moves on to the next)
+  Note over PC,SS: the cursor moves only on the final page: to the newest post minus a 60 s overlap, or to the window end if that is already in the past
+  Note over PC,H: the deadline is checked before each search page and each posts.json call; one response is capped at FI_HTTP_MAX_BYTES; redirects are not followed
+  Note over PS,SS: a TransientError or TransformError stops the run, the cursor stays at the last saved page and the message lands in PullResult.error (POST sync answers 502); pull treats both the same and retries next tick. Any other error propagates (503 from the endpoint if storage is down, otherwise 500; the scheduler logs it, counts that source as failing and moves on)
+  Note over T,PS: one sync per source at a time in this process: a second POST sync gets 409, the scheduler skips the source
   PS-->>T: PullResult with pages, accepted, duplicates, cursor, error
-  Note over T: the scheduler keeps the latest tick's errors per source; /health is degraded and counts failing_sources
+  Note over T: the scheduler keeps the latest tick's errors per source; /health shows their count as failing_sources and stays 200
   Note over I: from here the worker path is identical to push
 ```
 
@@ -245,8 +256,10 @@ flowchart LR
   a row cannot claim a tenant its source does not belong to.
 - Keys are per source, not per type, so two Playstore apps for one tenant give two records for the same
   review id.
-- `/health` and the push webhook are the unauthenticated routes. `/health` shows global queue counts and
-  the ids of pull sources whose latest scheduled sync failed, no tenant data.
+- `/health` and the push webhook are the unauthenticated routes (`POST /admin/tenants` takes the bootstrap
+  token instead of an API key). `/health` shows global queue counts and a count of pull sources whose latest
+  scheduled sync failed (`failing_sources`), no ids and no tenant data. Its status code turns 503 only when
+  the worker or scheduler thread is dead or stuck; a failing source never changes it.
 
 ## Domain model
 
@@ -255,7 +268,9 @@ flowchart LR
 - `RawEvent(id, tenant_id, source_id, external_event_id, payload, received_at, status, attempts,
   next_attempt_at, lease_until, error)`
 - `FeedbackRecord(id, tenant_id, source_id, source_type, external_id, kind, title, text, author, language,
-  rating, source_created_at, source_updated_at, ingested_at, deleted_at, connector_version, metadata)`
+  rating, source_created_at, source_updated_at, ingested_at, deleted_at, connector_version, metadata)`.
+  `id` is the uuid5 of source id and external id, as 32 hex characters. `kind` is computed from
+  `KIND_BY_SOURCE`, or from the record type for `custom`, and is still stored and returned.
 - Metadata, one model per source: `DiscourseMetadata(topic_id, post_number, like_count, url)`,
   `PlaystoreMetadata(app_version, device, android_os_version)`, `TwitterMetadata(country, retweets, likes)`,
   `IntercomMetadata(part_count, tags, state)`, `CustomMetadata(record_type, score, fields)`
@@ -269,26 +284,27 @@ Every `__init__.py` under `feedback_ingest/` is an empty package marker.
 
 | File | Responsibility |
 |---|---|
-| `main.py` | App factory: logging, lifespan that wires adapters and starts/stops the worker and scheduler, routers |
-| `wiring.py` | Builds the SQL adapters from `FI_DATABASE_URL` and constructs every service from settings |
+| `main.py` | App factory: one-line log format, a lifespan that builds every service from the adapters and starts/stops the worker and scheduler, the body-size middleware, error handlers, routers |
+| `wiring.py` | Builds the SQL adapters and the HTTP client from settings, runs `create_all` and the schema check at startup, closes them on exit |
 | `config.py` | `Settings`: every `FI_` environment setting with its default |
 | `api/deps.py` | `Adapters` and `AppState` containers; `current_tenant` (API key) and `tenant_source` dependencies |
-| `api/errors.py` | Maps `NotFoundError` to 404, `UnauthorizedError` to 401, storage errors to 503 |
+| `api/errors.py` | Maps `NotFoundError` to 404, `UnauthorizedError` to 401, `ConflictError` to 409, storage errors to 503 |
+| `api/body_limit.py` | Middleware: any request body over 1 MiB gets 413, whether declared or streamed |
 | `api/schemas.py` | Request and response models for the HTTP API |
-| `api/ingest.py` | Push webhook: source by id, disabled and no-secret checks (409), signature check, JSON check, `IngestionService.accept`, 202 |
-| `api/sync.py` | Manual pull trigger for one pull source; 502 with the `PullResult` when the source failed |
-| `api/sources.py` | Create, list, get and enable/disable sources; generates and masks webhook secrets |
+| `api/ingest.py` | Push webhook: source by id (404), push-only (409), signature (401), disabled (409), JSON check (400), `IngestionService.accept`, 202 |
+| `api/sync.py` | Manual pull trigger for one enabled pull source; 502 with the `PullResult` when the source failed, 409 if it is already syncing |
+| `api/sources.py` | Create, list, get and patch (`enabled`, `config` re-checked) sources; generates and masks webhook secrets |
 | `api/records.py` | Tenant-scoped record query and single-record read |
-| `api/admin.py` | Raw-event list (newest first), detail, replay, and queue counts per tenant |
+| `api/admin.py` | Raw-event list (newest first), detail with payload, single and bulk replay, and queue counts per tenant |
 | `api/tenants.py` | Tenant bootstrap behind `X-Bootstrap-Token`; returns the API key once |
 | `api/health.py` | Worker and scheduler liveness, failing pull-source count, queue counts; 503 when degraded |
 | `domain/enums.py` | `SourceType`, `SourceMode`, `FeedbackKind`, `EventStatus`, `UpsertOutcome` |
-| `domain/models.py` | `Tenant`, `Source`, `RawEvent`, `FeedbackRecord`, naive-UTC datetimes, kind per source (`KIND_BY_SOURCE`), and per record type for `custom` (`KIND_BY_RECORD_TYPE`) |
+| `domain/models.py` | `Tenant`, `Source`, `RawEvent`, `Enqueued`, `FeedbackRecord`, kind per source (`KIND_BY_SOURCE`) and per record type for `custom` (`KIND_BY_RECORD_TYPE`), invariants (a push source has a secret, a lease exists only while processing) |
 | `domain/metadata.py` | Per-source metadata models, discriminated by `source_type` |
-| `domain/errors.py` | `TransformError`, `TransientError`, `NotFoundError`, `UnauthorizedError`, `check_limit` |
-| `ports/stores.py` | `TenantStore`, `SourceStore`, `FeedbackStore` Protocols |
-| `ports/queue.py` | `RawEventQueue` Protocol: enqueue (returns the stored id), claim with lease, fenced marks, requeue, list, counts |
-| `ports/http.py` | `HttpClient` Protocol: `get_json` |
+| `domain/errors.py` | `TransformError`, `TransientError`, `NotFoundError`, `UnauthorizedError`, `ConflictError`, `check_limit` |
+| `ports/stores.py` | `TenantStore`, `SourceStore` (including `list_enabled(mode)` and `update_cursor(source_id, tenant_id, cursor)`), `FeedbackStore` Protocols |
+| `ports/queue.py` | `RawEventQueue` Protocol: `enqueue` (returns `Enqueued(id, status)` of the stored row), claim with lease, fenced marks, requeue, list, counts |
+| `ports/http.py` | `HttpClient` Protocol: `get_json(url, params)` |
 | `ports/clock.py` | `Clock` Protocol: `now` |
 | `adapters/sqlalchemy/db.py` | Engine factory (SQLite WAL, busy timeout, foreign keys, `BEGIN IMMEDIATE`) and startup schema check |
 | `adapters/sqlalchemy/tables.py` | Table definitions, unique keys, composite foreign keys, indexes |
@@ -298,20 +314,20 @@ Every `__init__.py` under `feedback_ingest/` is an empty package marker.
 | `adapters/memory/stores.py` | In-memory tenant, source and feedback stores with the same rules |
 | `adapters/memory/queue.py` | In-memory `RawEventQueue` with the same lease and fencing rules |
 | `adapters/memory/clock.py` | `FixedClock` that only moves when told to |
-| `adapters/http/httpx_client.py` | `HttpxClient`: GET JSON, sorts failures into transient (retry) or permanent |
-| `connectors/base.py` | `SourceConnector` and `PullConnector` Protocols, `PullPage`, default HMAC check, `record_id` |
-| `connectors/registry.py` | `CONNECTORS` and `PULLERS` dicts; `check_source` validates a source's config |
+| `adapters/http/httpx_client.py` | `HttpxClient`: GET JSON with no redirects and no env proxies, response size cap, sorts failures into transient (retry) or permanent |
+| `connectors/base.py` | `SourceConnector` and `PullConnector` Protocols, `PullPage`, default HMAC check, `new_record(source, connector, external_id, **content)` |
+| `connectors/registry.py` | `CONNECTORS` and `PULLERS` dicts; `check_source` validates a source's config (required keys, `base_url` not internal, `window_days` 1 to 31, `start_after`) |
 | `connectors/discourse.py` | Discourse post to record; delegates `pull` to `discourse_pull.py` |
 | `connectors/discourse_models.py` | Pydantic models for Discourse post, search and topic-posts payloads |
-| `connectors/discourse_pull.py` | Search window paging, post fetch in batches of 20, cursor with 60 s overlap |
-| `connectors/playstore.py` | Play Store review to record (developer replies dropped) |
+| `connectors/discourse_pull.py` | Search window paging (at most 10 pages), post fetch in batches of 20, deadline checks, cursor with 60 s overlap |
+| `connectors/playstore.py` | Play Store review to record (developer replies dropped; no user comment goes dead) |
 | `connectors/twitter.py` | Tweet to record |
 | `connectors/intercom.py` | Intercom conversation webhook to record; `ping` skipped, other topics rejected |
 | `connectors/custom.py` | Enterpret-shaped webhook batch (`{"records": [...]}`) to one record per entry; kind from each record's `type` |
-| `services/ingestion.py` | `IngestionService.accept`: build the `RawEvent`, enqueue, report duplicate |
+| `services/ingestion.py` | `IngestionService.accept`: build the `RawEvent`, enqueue, report duplicate, warn when a duplicate hits a dead row |
 | `services/pipeline.py` | `PipelineService.process`: transform, upsert, then processed, failed with backoff, or dead |
 | `services/worker.py` | `WorkerService`: background thread that claims batches and calls the pipeline |
-| `services/pull.py` | `PullService.sync`: run a puller, accept each payload, advance the cursor |
+| `services/pull.py` | `PullService.sync`: one sync per source at a time, run the puller with a deadline, accept each payload, advance the cursor |
 | `services/scheduler.py` | `SchedulerService`: background thread that calls `sync` for each pull source every interval, isolating each source, and keeps that tick's errors per source |
 | `utils/hashing.py` | `sha256_text` (API keys) and `payload_hash` (fallback event id) |
 | `utils/signing.py` | HMAC-SHA256 `sign` and constant-time `verify` |
@@ -323,11 +339,12 @@ Every `__init__.py` under `feedback_ingest/` is an empty package marker.
 | Requirement | Level | Implemented in | Proved by |
 |---|---|---|---|
 | Heterogeneous sources: Intercom, Play Store, Twitter, Discourse, plus a custom webhook in Enterpret's public shape | Must | `connectors/{intercom,playstore,twitter,discourse,custom}.py`, `connectors/registry.py` | `tests/unit/connectors/test_contract.py`, `test_registry.py`, `test_{intercom,playstore,twitter,discourse,custom}.py`, `tests/api/test_custom_webhook.py` |
-| Push integration | Must | `api/ingest.py`, `services/ingestion.py`, `utils/signing.py` | `tests/api/test_push_api.py`, `tests/e2e/test_push_to_query.py` |
-| Pull integration | Must | `services/pull.py`, `services/scheduler.py`, `api/sync.py`, `connectors/discourse_pull.py` | `tests/unit/services/test_pull.py`, `tests/unit/connectors/test_discourse_pull.py`, `tests/unit/services/test_scheduler.py`, `tests/api/test_sync_api.py`, `tests/e2e/test_pull_to_query.py`, `tests/live/test_discourse_live.py` (opt-in: `uv run pytest -m live`) |
+| Push integration | Must | `api/ingest.py`, `services/ingestion.py`, `utils/signing.py`, `api/body_limit.py` | `tests/api/test_push_api.py` (incl. `test_no_api_key_is_needed_but_a_signature_is`, `test_only_push_sources_take_webhooks_and_the_signature_is_checked_before_state`), `tests/api/test_webhook_limits.py`, `tests/unit/test_utils.py::test_hmac_matches_rfc_4231_case_2` (our HMAC matches the published RFC 4231 test vector), `tests/e2e/test_push_to_query.py` |
+| Pull integration | Must | `services/pull.py`, `services/scheduler.py`, `api/sync.py`, `connectors/discourse_pull.py` | `tests/unit/services/test_pull.py`, `tests/unit/connectors/test_discourse_pull.py`, `tests/unit/services/test_scheduler.py`, `tests/unit/services/test_pull_concurrency.py`, `tests/unit/connectors/test_discourse_pull_limits.py`, `tests/api/test_sync_api.py`, `tests/e2e/test_pull_to_query.py`, `tests/live/test_discourse_live.py` (opt-in: `uv run pytest -m live`) |
 | Source-specific metadata (app version, country, ...) | Must | `domain/metadata.py`, each connector's `transform` | `tests/unit/test_models.py`, `tests/unit/connectors/test_contract.py`, the per-connector golden tests `tests/unit/connectors/test_{intercom,playstore,twitter,discourse}.py`, `tests/adapters/contract_upsert.py` (whole records, metadata included, round-tripped through SQL by `test_sqlalchemy.py`) |
-| Multi-tenancy | Must | `api/deps.py`, `api/tenants.py`, tenant-scoped stores, composite FKs in `adapters/sqlalchemy/tables.py` | `tests/adapters/contract_stores.py`, `tests/adapters/test_sqlalchemy.py`, `tests/api/test_records_api.py`, `tests/api/test_push_api.py`, `tests/api/test_admin_api.py` |
+| Multi-tenancy | Must | `api/deps.py`, `api/tenants.py`, tenant-scoped stores, composite FKs in `adapters/sqlalchemy/tables.py` | `tests/adapters/contract_stores.py`, `tests/adapters/test_sqlalchemy.py::test_rows_must_belong_to_their_sources_tenant`, `tests/api/test_tenants_api.py`, `tests/api/test_records_api.py`, `tests/api/test_push_api.py`, `tests/api/test_admin_api.py`, `tests/api/test_replay_api.py`, `tests/unit/services/test_pipeline.py::test_an_unknown_or_foreign_source_is_dead` (an event whose tenant does not own its source goes dead) |
 | Uniform structure: record types (`kind`) and common attributes (language, tenant, source, ...) | Must | `domain/models.py` (`FeedbackRecord`, `KIND_BY_SOURCE`, `KIND_BY_RECORD_TYPE`), `domain/enums.py` | `tests/unit/test_models.py`, `tests/unit/connectors/test_contract.py`, `tests/unit/connectors/test_custom.py` (survey kind, kind per record type) |
-| Idempotency (de-dupe) | Good-to-have | UNIQUE keys in `adapters/sqlalchemy/tables.py`, `SqlRawEventQueue.enqueue`, `SqlFeedbackStore.upsert` | `tests/e2e/test_push_to_query.py`, `tests/adapters/contract_queue.py`, `tests/adapters/contract_upsert.py` (incl. `same_version_from_a_newer_connector_replaces_the_row`), `tests/unit/services/test_pull.py` |
+| Idempotency (de-dupe) | Good-to-have | UNIQUE keys in `adapters/sqlalchemy/tables.py`, `SqlRawEventQueue.enqueue`, `SqlFeedbackStore.upsert` | `tests/e2e/test_push_to_query.py`, `tests/adapters/contract_queue.py`, `tests/adapters/contract_upsert.py` (incl. `same_version_from_a_newer_connector_replaces_the_row`), `tests/adapters/test_sqlalchemy.py::test_the_database_itself_rejects_a_duplicate_key` (the UNIQUE constraints tested against the engine directly, skipping the app-level lookup), `tests/unit/services/test_pull.py` |
+| Extensibility: worked example | Extra | `connectors/custom.py` added by the five-step recipe (enum value, kind mapping in `KIND_BY_RECORD_TYPE`, `CustomMetadata`, connector file, registry entry, fixtures); no service, route or table changed | `tests/unit/connectors/test_registry.py`, `tests/unit/test_models.py::test_every_source_type_has_a_metadata_model`, `tests/unit/connectors/test_custom.py`, `tests/api/test_custom_webhook.py`, `tests/e2e/test_demo_smoke.py` |
 | Multiple sources of the same type per tenant | Good-to-have | keys on `source_id`, `api/sources.py` | `tests/e2e/test_multi_source_same_type.py`, `tests/adapters/contract_stores.py` |
-| Beyond the brief: durable before ack, retry, dead letter, replay, restart | Extra | `services/pipeline.py`, `services/worker.py`, `api/admin.py`, `api/errors.py` | `tests/api/test_push_api.py::test_storage_down_is_503_never_202_and_logged`, `tests/api/test_admin_api.py::test_transient_failures_go_dead_then_replay_processes_after_the_fix`, `tests/unit/services/test_worker.py`, `tests/unit/services/test_pipeline.py`, `test_pipeline_failures.py`, `tests/e2e/test_dlq_replay.py`, `tests/e2e/test_restart_resume.py` |
+| Beyond the brief: durable before ack, retry, dead letter, replay, restart | Extra | `services/pipeline.py`, `services/worker.py`, `api/admin.py`, `api/errors.py` | `tests/api/test_push_api.py::test_storage_down_is_503_never_202_and_logged`, `tests/api/test_admin_api.py::test_transient_failures_go_dead_then_replay_processes_after_the_fix`, `tests/api/test_replay_api.py::test_bulk_replay_requeues_only_the_callers_matching_rows`, `tests/api/test_health.py`, `tests/unit/services/test_worker.py`, `tests/unit/services/test_pipeline.py`, `test_pipeline_failures.py`, `tests/e2e/test_dlq_replay.py`, `tests/e2e/test_restart_resume.py` |

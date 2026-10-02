@@ -8,6 +8,7 @@ agents plan, build, review and hand over; this file holds only what is specific 
 - [docs/decisions/](docs/decisions/): ADR-001 storage and queue, ADR-002 record and idempotency, ADR-003 connectors.
 - [docs/phases/](docs/phases/): per-phase design docs with "Deviations recorded".
 - [docs/interview/](docs/interview/): whiteboard script, Q&A bank, failure scenarios, runbook, debt ledger.
+- [docs/research/](docs/research/): public Enterpret notes; `00_tailoring_decisions.md` holds the honesty rules for any Enterpret claim.
 
 ## Commands
 ```bash
@@ -18,11 +19,13 @@ scripts/demo.sh            # ten-step demo; needs the network for the Discourse 
 uv run pytest -m live      # real meta.discourse.org pull, opt-in
 ```
 All four gates must be green before any commit. Settings use the `FI_` prefix (see `feedback_ingest/config.py`).
+`POST /admin/tenants` is refused until `FI_BOOTSTRAP_TOKEN` is set to something other than the default.
 
 ## Repo rules
 - Python 3.12, uv, FastAPI, SQLAlchemy 2 (SQLite by default, `FI_DATABASE_URL` swaps), Pydantic v2, mypy strict, ruff ALL.
 - Layout: `domain/` (models), `ports/` (Protocols), `adapters/` (sqlalchemy, memory, http), `connectors/` (one per source + registry), `services/`, `api/`, `wiring.py`, `main.py`. Services import ports only.
 - Every port has a SQLite adapter and a memory fake; both run the contract tests under `tests/adapters/`.
+- Webhooks are push-only and take no API key: the source id picks the source, its HMAC proves the sender.
 - Add a source: enum value, connector file with its input model, metadata model in the union, `KIND_BY_SOURCE` entry (`custom` maps per record type in `KIND_BY_RECORD_TYPE` instead), registry entry, fixtures under `tests/fixtures/<type>/`; the contract test fails until all exist.
 - Files ≤120 lines. Comments only for `# ponytail:` markers (ceiling + upgrade) and rare "why".
 - Fixtures are synthetic; never commit real ids, keys or customer text. `.seed.json` and `*.db*` are ignored.

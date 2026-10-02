@@ -1,8 +1,15 @@
-# Phase 1 — Domain, ports, adapters
+# Phase 1: Domain, ports, adapters
 
 Status: implemented 2026-10-03, three review rounds, committed
 
 Depends on ADR-001 and ADR-002. Produces no HTTP endpoints yet.
+
+**Update after Fleet 2 (commit cbb788c) and the tailoring pass (b8f6e2b).** The code wins over this LLD. Names and shapes that changed:
+- `SourceStore.list_by_mode(mode)` is now `list_enabled(mode)` (enabled sources only). `update_cursor(source_id, tenant_id, cursor)` is tenant-scoped. The port also has `get_by_id` (webhooks only), `set_enabled` and `set_config`.
+- `RawEventQueue.enqueue(event)` returns `Enqueued(id, status)`, the stored row's id and status (new or existing), not a bool. `list_by_status` also takes `source_id`. `requeue` refuses only a `processing` row whose lease is still live.
+- `HttpClient.get_json(url, params: Sequence[tuple[str, str]] = ())`. `HttpxClient` follows no redirects (a 3xx is a `TransformError`), ignores proxy settings in the environment, streams the body and raises `TransientError("response too large")` past `FI_HTTP_MAX_BYTES` (2,000,000). Error messages carry the status and URL, never the body.
+- `FeedbackRecord.kind` is a computed field, derived from `source_type` (for `custom`, from the record's `type`), not a validated input. `SourceType` gained `custom` and `FeedbackKind` gained `survey`.
+- The schema is created at startup by `wiring.sql_adapters` (`create_all`, then `assert_schema_matches`), as well as in `tests/conftest.py`.
 
 ## What this phase builds, in one paragraph
 
@@ -11,7 +18,8 @@ every other file talks in (Tenant, Source, RawEvent, FeedbackRecord). "Ports" ar
 say what the system needs from the outside world (a place to keep records, a queue of raw events, an HTTP
 client, a clock) without saying how. "Adapters" are the implementations: one on SQLAlchemy/SQLite for real
 runs, one in memory for fast tests. Services (next phases) only ever import ports, never adapters, so swapping
-SQLite for Postgres or the table-queue for a broker touches one adapter file.
+SQLite for Postgres or the table-queue for a broker stays inside the adapters (Postgres: set `FI_DATABASE_URL`, add a driver,
+change three queries (claim, upsert, enqueue), add migrations).
 
 ## Plain-language glossary for this phase
 
@@ -56,32 +64,32 @@ SQLite for Postgres or the table-queue for a broker touches one adapter file.
 `errors.py`
 - Three plain classes, each subclassing `Exception` directly: `TransformError` for permanent payload problems (goes straight to dead), `TransientError` for retryable ones, `NotFoundError` for an unknown id. None of them carry extra fields; an HTTP status, when there is one, is in the message. `UnauthorizedError` returns in Phase 3 with the API layer.
 
-## Ports (`feedback_ingest/ports/`) — Protocols only, no logic
+## Ports (`feedback_ingest/ports/`): Protocols only, no logic
 
 `stores.py`
 - `TenantStore`: `add(tenant) -> None`, `get_by_api_key_hash(api_key_hash) -> Tenant | None`
-- `SourceStore`: `add(source) -> None`, `get(source_id, tenant_id) -> Source | None`, `list_for_tenant(tenant_id) -> list[Source]`, `list_by_mode(mode) -> list[Source]`, `update_cursor(source_id, cursor) -> None` (raises `NotFoundError` for an unknown id)
+- `SourceStore`: `add(source) -> None`, `get(source_id, tenant_id) -> Source | None`, `list_for_tenant(tenant_id) -> list[Source]`, `list_enabled(mode) -> list[Source]` (named `list_by_mode` before Fleet 2), `update_cursor(source_id, tenant_id, cursor) -> None` (raises `NotFoundError` for an unknown id)
 - `FeedbackStore`: `upsert(record) -> UpsertOutcome`, `list_for_tenant(tenant_id, *, source_id=None, kind=None, since=None, limit=100, include_deleted=False) -> list[FeedbackRecord]` (tombstoned rows are hidden unless `include_deleted=True`)
 
 `queue.py`
-- `RawEventQueue`: `enqueue(event) -> bool` (False when the `(source_id, external_event_id)` already exists), `claim(now, lease_seconds, limit) -> list[RawEvent]` (raises `ValueError` when `limit` or `lease_seconds` is < 1), `mark_processed(event) -> bool`, `mark_failed(event, error, next_attempt_at) -> bool`, `mark_dead(event, error) -> bool`, `requeue(event_id, now) -> bool` (replay: status back to pending, attempts reset), `get(event_id) -> RawEvent | None`, `list_by_status(status, *, tenant_id=None, limit=100) -> list[RawEvent]`, `counts(tenant_id=None) -> dict[EventStatus, int]`
+- `RawEventQueue`: `enqueue(event) -> Enqueued(id, status)` (built after Fleet 2; it was a bool: False when the `(source_id, external_event_id)` already exists), `claim(now, lease_seconds, limit) -> list[RawEvent]` (raises `ValueError` when `limit` or `lease_seconds` is < 1), `mark_processed(event) -> bool`, `mark_failed(event, error, next_attempt_at) -> bool`, `mark_dead(event, error) -> bool`, `requeue(event_id, now) -> bool` (replay: status back to pending, attempts reset), `get(event_id) -> RawEvent | None`, `list_by_status(status, *, tenant_id=None, limit=100) -> list[RawEvent]`, `counts(tenant_id=None) -> dict[EventStatus, int]`
   - The `mark_*` methods are fenced: they take the claimed event and only change a row that is still `processing` with that event's `attempts` and `lease_until`, and return False otherwise (row missing, or re-claimed by another worker). `requeue` returns False for a missing row or one that is currently `processing`.
 
 `http.py`
-- `HttpClient`: `get_json(url, params: dict[str, str]) -> dict[str, Any]`; failures surface as `TransientError` (retry later) or `TransformError` (do not retry). The adapter below decides which.
+- `HttpClient`: `get_json(url, params: Sequence[tuple[str, str]] = ()) -> dict[str, Any]` (was `dict[str, str]`); failures surface as `TransientError` (retry later) or `TransformError` (do not retry). The adapter below decides which.
 
 `clock.py`
 - `Clock`: `now() -> datetime` (naive UTC).
 
 ## Adapters
 
-`adapters/sqlalchemy/db.py` — `make_engine(database_url)`; for SQLite URLs it attaches a connect listener that sets `isolation_level = None` (so SQLAlchemy emits `BEGIN` itself, the pysqlite recipe) and runs `PRAGMA journal_mode=WAL`, `PRAGMA busy_timeout=5000` and `PRAGMA foreign_keys=ON`, plus a `begin` listener that issues `BEGIN IMMEDIATE` so every write transaction takes the write lock up front instead of failing on upgrade, and plain `BEGIN` when the connection carries the `read_only` execution option, so reads never wait on a writer. Sync engine only (no aiosqlite). There is no session helper and no schema helper: each adapter holds two sessionmakers, `self._write = sessionmaker(engine, expire_on_commit=False)` and `self._read = sessionmaker(engine.execution_options(read_only=True), expire_on_commit=False)`, and wraps each method in `with self._write.begin()` or, for every get/list/counts method, `with self._read.begin()`, and the schema is created with `Base.metadata.create_all(engine)` (today in `tests/conftest.py`).
+`adapters/sqlalchemy/db.py`: `make_engine(database_url)`; for SQLite URLs it attaches a connect listener that sets `isolation_level = None` (so SQLAlchemy emits `BEGIN` itself, the pysqlite recipe) and runs `PRAGMA journal_mode=WAL`, `PRAGMA busy_timeout=5000` and `PRAGMA foreign_keys=ON`, plus a `begin` listener that issues `BEGIN IMMEDIATE` so every write transaction takes the write lock up front instead of failing on upgrade, and plain `BEGIN` when the connection carries the `read_only` execution option, so reads never wait on a writer. Sync engine only (no aiosqlite). There is no session helper and no schema helper: each adapter holds two sessionmakers, `self._write = sessionmaker(engine, expire_on_commit=False)` and `self._read = sessionmaker(engine.execution_options(read_only=True), expire_on_commit=False)`, and wraps each method in `with self._write.begin()` or, for every get/list/counts method, `with self._read.begin()`, and the schema is created with `Base.metadata.create_all(engine)` (in `tests/conftest.py`, and at startup in `wiring.py`). Fleet 2 moved the two sessionmakers into a `sessions(engine)` helper in `db.py`.
 
-`adapters/sqlalchemy/tables.py` — SQLAlchemy 2.0 `Mapped[...]` declarative tables: tenants, sources, raw_events, feedback_records. Constraints: `UNIQUE(tenants.api_key_hash)`, `UNIQUE(raw_events.source_id, external_event_id)`, `UNIQUE(feedback_records.source_id, external_id)`, index on `raw_events(status, next_attempt_at)`, index on `feedback_records(tenant_id, source_created_at)`. Foreign keys: `sources.tenant_id → tenants.id` and `(source_id, tenant_id) → sources(id, tenant_id)` on both raw_events and feedback_records (backed by `UNIQUE(sources.id, tenant_id)`), so a row cannot claim a tenant other than its source's. The JSON column is named `metadata` in the DB but the attribute is `source_metadata` (SQLAlchemy reserves `.metadata`).
+`adapters/sqlalchemy/tables.py`: SQLAlchemy 2.0 `Mapped[...]` declarative tables: tenants, sources, raw_events, feedback_records. Constraints: `UNIQUE(tenants.api_key_hash)`, `UNIQUE(raw_events.source_id, external_event_id)`, `UNIQUE(feedback_records.source_id, external_id)`, index on `raw_events(status, next_attempt_at)`, index on `feedback_records(tenant_id, source_created_at)`. Foreign keys: `sources.tenant_id → tenants.id` and `(source_id, tenant_id) → sources(id, tenant_id)` on both raw_events and feedback_records (backed by `UNIQUE(sources.id, tenant_id)`), so a row cannot claim a tenant other than its source's. The JSON column is named `metadata` in the DB but the attribute is `source_metadata` (SQLAlchemy reserves `.metadata`).
 
-`adapters/sqlalchemy/stores.py` — `SqlTenantStore`, `SqlSourceStore`, `SqlFeedbackStore`. `SqlSourceStore.add` unwraps the `SecretStr` and stores the secret as plain text in the `sources` row. Upsert is read-then-write inside one transaction: load existing by `(source_id, external_id)`; insert if absent; update when the new `version_at` (`source_updated_at or source_created_at`) is >= the stored one; else return `skipped_older`, with one exception, the tombstone rule: a delete applies regardless of version, so an older record carrying `deleted_at` onto a live row sets only `deleted_at` (text and other fields stay) and returns `updated`. An update keeps the stored `id`, `source_created_at` and `ingested_at`, and a tombstone is sticky: `deleted_at` stays set even when a newer edit arrives. The version rule: every accepted update stores `source_updated_at = version_at`, so a record without `source_updated_at` still advances the stored version and a later copy with an older `source_created_at` is skipped. `# ponytail: read-then-write under BEGIN IMMEDIATE serialises all writers; switch to INSERT…ON CONFLICT when Postgres needs concurrent writers`.
+`adapters/sqlalchemy/stores.py`: `SqlTenantStore`, `SqlSourceStore`, `SqlFeedbackStore`. `SqlSourceStore.add` unwraps the `SecretStr` and stores the secret as plain text in the `sources` row. Upsert is read-then-write inside one transaction: load existing by `(source_id, external_id)`; insert if absent; update when the new `version_at` (`source_updated_at or source_created_at`) is >= the stored one; else return `skipped_older`, with one exception, the tombstone rule: a delete applies regardless of version, so an older record carrying `deleted_at` onto a live row sets only `deleted_at` (text and other fields stay) and returns `updated`. An update keeps the stored `id`, `source_created_at` and `ingested_at`, and a tombstone is sticky: `deleted_at` stays set even when a newer edit arrives. The version rule: every accepted update stores `source_updated_at = version_at`, so a record without `source_updated_at` still advances the stored version and a later copy with an older `source_created_at` is skipped. `# ponytail: read-then-write under BEGIN IMMEDIATE serialises all writers; switch to INSERT…ON CONFLICT when Postgres needs concurrent writers`.
 
-`adapters/sqlalchemy/raw_event_queue.py` — `SqlRawEventQueue`. `claim` first rejects `limit` or `lease_seconds` < 1 with `ValueError`, then is ONE statement so two workers cannot take the same row. The claimable predicate is repeated on the outer UPDATE, so a row another worker grabbed between the subquery and the update is skipped, and `failed` rows whose retry time has come are claimable too:
+`adapters/sqlalchemy/raw_event_queue.py`: `SqlRawEventQueue`. `claim` first rejects `limit` or `lease_seconds` < 1 with `ValueError`, then is ONE statement so two workers cannot take the same row. The claimable predicate is repeated on the outer UPDATE, so a row another worker grabbed between the subquery and the update is skipped, and `failed` rows whose retry time has come are claimable too:
 ```sql
 UPDATE raw_events SET status='processing', lease_until=:lease, attempts=attempts+1
 WHERE id IN (SELECT id FROM raw_events
@@ -94,11 +102,11 @@ RETURNING *
 ```
 `RETURNING` has no guaranteed order, so the claimed rows are sorted by `next_attempt_at` in Python. The `mark_*` methods are one fenced `UPDATE … WHERE id=:id AND status='processing' AND attempts=:attempts AND lease_until=:lease_until RETURNING id` that also clears `lease_until`; `requeue` is `UPDATE … WHERE id=:id AND status != 'processing'`. `# ponytail: claimable predicate repeated on the outer UPDATE keeps it race-safe on SQLite and Postgres READ COMMITTED; add FOR UPDATE SKIP LOCKED on Postgres for many workers`.
 
-`adapters/memory/` — `MemoryTenantStore`, `MemorySourceStore`, `MemoryFeedbackStore`, `MemoryRawEventQueue`, `FixedClock(now)` (always returns the same time). Dict-backed, same semantics (including the lease-expiry rule, the fencing rule, the tombstone rule and the uniqueness rules; duplicates raise `ValueError` where SQLite raises `IntegrityError`). The one gap is foreign keys: `# ponytail: no FK check in the fake; the SQLite contract test covers tenant mismatch`.
+`adapters/memory/`: `MemoryTenantStore`, `MemorySourceStore`, `MemoryFeedbackStore`, `MemoryRawEventQueue`, `FixedClock(now)` (always returns the same time). Dict-backed, same semantics (including the lease-expiry rule, the fencing rule, the tombstone rule and the uniqueness rules; duplicates raise `ValueError` where SQLite raises `IntegrityError`). The one gap is foreign keys: `# ponytail: no FK check in the fake; the SQLite contract test covers tenant mismatch`.
 
-`adapters/http/httpx_client.py` — `HttpxClient` wrapping `httpx.Client(timeout=10, follow_redirects=True)`, with an optional `transport` so tests can pass `httpx.MockTransport`. Any status >= 300 is an error: 408/429/5xx → `TransientError`, every other status (3xx left after redirects, other 4xx) → `TransformError`. `httpx.InvalidURL` → `TransformError`; any other `httpx.RequestError` (network, timeout, too many redirects) → `TransientError`. A body where `.json()` raises `ValueError` or `RecursionError` → `TransientError`; JSON that is not an object → `TransformError`. Status errors put the status, the URL and the first 200 characters of the body in the message.
+`adapters/http/httpx_client.py`: as first built (Fleet 2 changed it, see the note at the top), `HttpxClient` wrapping `httpx.Client(timeout=10, follow_redirects=True)`, with an optional `transport` so tests can pass `httpx.MockTransport`. Any status >= 300 is an error: 408/429/5xx → `TransientError`, every other status (3xx left after redirects, other 4xx) → `TransformError`. `httpx.InvalidURL` → `TransformError`; any other `httpx.RequestError` (network, timeout, too many redirects) → `TransientError`. A body where `.json()` raises `ValueError` or `RecursionError` → `TransientError`; JSON that is not an object → `TransformError`. Status errors put the status, the URL and the first 200 characters of the body in the message.
 
-`utils/` — `hashing.payload_hash(payload) -> str` (sha256 of `json.dumps(sort_keys=True, separators=(",",":"))`), `time.to_naive_utc(value)` and `SystemClock`, `signing.sign(secret, body) / verify(secret, body, signature)` (stdlib hmac, constant-time compare; an empty secret or signature never verifies). There is no id helper; tests build ids with `uuid4().hex`.
+`utils/`: `hashing.payload_hash(payload) -> str` (sha256 of `json.dumps(sort_keys=True, separators=(",",":"))`), `time.to_naive_utc(value)` and `SystemClock`, `signing.sign(secret, body) / verify(secret, body, signature)` (stdlib hmac, constant-time compare; an empty secret or signature never verifies). There is no id helper; tests build ids with `uuid4().hex`.
 
 ## Files
 ```
@@ -133,7 +141,7 @@ Contract cases are written once as plain functions taking the adapter set, group
 9. mark_failed sets `next_attempt_at` in the future and claim skips it until then; mark_dead rows are never claimed; requeue makes a dead row claimable
 10. counts groups by status and respects tenant filter
 11. a tombstone survives a newer edit: the row is hidden from `list_for_tenant` but returned, edited and still deleted, with `include_deleted=True`; a tombstone older than the stored version still deletes and keeps the newer text
-12. filters (`source_id`, `kind`, `since`, `limit`), api-key lookup, `list_by_mode` and `update_cursor` behave; duplicate tenants/sources raise, `update_cursor` on an unknown id raises `NotFoundError`
+12. filters (`source_id`, `kind`, `since`, `limit`), api-key lookup, `list_enabled` and `update_cursor` behave; duplicate tenants/sources raise, `update_cursor` on an unknown id raises `NotFoundError`
 13. fencing: a worker whose lease expired and whose row was re-claimed cannot mark it dead or failed, even after a requeue reset `attempts`; `mark_*` and `requeue` on a missing id return False; `requeue` of a processing row returns False
 14. aware datetimes passed to `claim`, `mark_failed` and `requeue` are normalised to naive UTC
 15. `claim` with `limit` or `lease_seconds` < 1 raises `ValueError`
@@ -142,7 +150,7 @@ SQLite-only tests in `test_sqlalchemy.py`: WAL is on; a feedback record or raw e
 from its source's tenant is rejected with `IntegrityError`; reads (`counts`, `list_for_tenant`) do not wait while another connection holds `BEGIN IMMEDIATE`; four threads, each with its own engine, drain 40
 events with `claim(limit=3)` at the same moment and every event is claimed exactly once.
 
-`test_httpx_client.py` (httpx `MockTransport`): params are sent and redirects followed; 408/429/500/503 →
+`test_httpx_client.py` (httpx `MockTransport`; as first built, Fleet 2 replaced the redirect cases with "redirects are not followed", proxies ignored and the size cap): params are sent and redirects followed; 408/429/500/503 →
 `TransientError` with the status and body in the message; 304, 404, a JSON array and an invalid URL → `TransformError`;
 a non-JSON body and too-deeply nested JSON → `TransientError`; `ConnectError` and `TooManyRedirects` → `TransientError`.
 
@@ -156,6 +164,6 @@ malformed signatures.
 ## How to explain this phase in the interview
 "Every outside dependency sits behind a small interface. The interface has two implementations, a real one and
 an in-memory one, and the same contract cases run against both. That is how I know the fake behaves like the real
-thing, and it is how a Postgres or broker swap stays a one-file change. The raw-events table is the queue: a
+thing, and it is how a Postgres or broker swap stays inside the adapters. The raw-events table is the queue: a
 worker takes a row by writing a lease in a single atomic UPDATE, so two workers can't take the same row, and a
 crashed worker's row becomes available again when its lease expires."

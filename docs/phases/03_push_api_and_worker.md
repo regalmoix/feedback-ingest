@@ -1,11 +1,20 @@
-# Phase 3 — Push API, pipeline, worker
+# Phase 3: Push API, pipeline, worker
 
 Status: implemented 2026-10-03 (commit e245efe, merged ee1ec69), review fixes applied. Depends on Phases 1–2, ADR-001 and ADR-003. First phase with a runnable server.
+
+**Update after Fleet 2 (commit cbb788c).** The code wins over this LLD. What changed here:
+- The webhook takes no API key (Phase 6) and only push sources accept webhooks (Fleet 2). Order: source by id (404), not a push source (409 "source does not accept webhooks"), bad or missing signature (401), disabled (409), body not a JSON object or nested too deep (400), then 202. Signature check, parse and insert run in the threadpool. Every route refuses bodies over 1 MiB with 413.
+- `enqueue` returns `Enqueued(id, status)`. A duplicate that hits a dead row logs a WARNING ("not requeued, replay it").
+- Unexpected exceptions are stored in `raw_events.error` as `"<Type> (see logs)"`; the traceback goes only to the log. Every path to dead logs `dead: <error>` at WARNING. The pipeline stamps `ingested_at` with `model_validate(record.model_dump() | {"ingested_at": now})`.
+- `/health` returns 503 "degraded" only when an enabled worker or scheduler thread is unhealthy. Its body also has `worker_enabled`, `scheduler_enabled`, `scheduler_alive` and `failing_sources` (a count).
+- Bulk replay: `POST /admin/raw-events/replay?source_id=&status=&limit=`.
+- `wiring.sql_adapters` builds the adapters; the `create_app` lifespan builds the services and starts the worker and scheduler inside a `try`.
+- Log lines escape `\r` and `\n` in messages, so a payload cannot forge a log line.
 
 ## What this phase builds, in one paragraph
 
 The front door and the engine. A webhook endpoint accepts a payload for one configured source, checks the
-caller's API key and the source's signature, writes the payload to `raw_events` and answers 202 ("saved, not
+source's signature (an API key too, until Phase 6 removed it), writes the payload to `raw_events` and answers 202 ("saved, not
 yet processed"). A worker thread repeatedly claims a batch of raw events, runs the connector's transform, upserts
 the records, and marks each event processed, failed-with-retry, or dead. Admin endpoints list dead events and
 replay one. A health endpoint shows the worker is alive and how deep the queue is. The one sentence that
@@ -37,14 +46,14 @@ so `FI_LEASE_SECONDS=0` fails at startup instead of at the first claim.
   Re-add `UnauthorizedError` to `domain/errors.py` in this phase.
 
 ## Services (all sync, constructed with ports only)
-`services/ingestion.py` — `IngestionService(queue: RawEventQueue, clock: Clock)`
+`services/ingestion.py`: `IngestionService(queue: RawEventQueue, clock: Clock)`
 - `accept(source: Source, payload: Mapping[str, Any]) -> AcceptResult(raw_event_id: str, duplicate: bool)`:
   builds `RawEvent(id=uuid4().hex, tenant_id=source.tenant_id, source_id=source.id,
   external_event_id=CONNECTORS[source.type].external_event_id(payload), payload, received_at=now,
   next_attempt_at=now)` and `enqueue`s it. Used by the push endpoint now and by `PullService` in Phase 4, so
   push and pull share one path.
 
-`services/pipeline.py` — `PipelineService(sources: SourceStore, feedback: FeedbackStore, queue: RawEventQueue, clock: Clock, max_attempts: int, backoff_cap_seconds: int)`
+`services/pipeline.py`: `PipelineService(sources: SourceStore, feedback: FeedbackStore, queue: RawEventQueue, clock: Clock, max_attempts: int, backoff_cap_seconds: int)`
 - `process(event: RawEvent) -> EventStatus` (the status it ended in):
   1. `source = sources.get(event.source_id, tenant_id=event.tenant_id)`; missing → `mark_dead` ("source not found").
   2. `records = CONNECTORS[source.type].transform(source, dict(event.payload))`.
@@ -63,14 +72,14 @@ so `FI_LEASE_SECONDS=0` fails at startup instead of at the first claim.
   - All log lines carry `raw_event_id`, `tenant_id`, `source_id`, `attempts` as structured `extra=`.
   - `# ponytail: retries unknown exceptions too; classify more exceptions as permanent once we see them in prod`.
 
-`services/worker.py` — `WorkerService(queue: RawEventQueue, pipeline: PipelineService, clock: Clock, poll_seconds: float, lease_seconds: int, batch: int)`
+`services/worker.py`: `WorkerService(queue: RawEventQueue, pipeline: PipelineService, clock: Clock, poll_seconds: float, lease_seconds: int, batch: int)`
 - `run_once() -> int`: `events = queue.claim(clock.now(), lease_seconds, batch)`; `process` each (a crash in
   one is logged as `process crashed` and the rest of the batch still runs); records `last_ok_at`; return count.
 - `healthy` = alive and `clock.now() - last_ok_at <= max(3 * poll_seconds, 10 s)`. `stop()` warns if the
   thread outlives `join(lease_seconds)`; its batch is reclaimed after the lease.
 - `start()` spawns a daemon `threading.Thread` running `run_once` in a loop, sleeping `poll_seconds` when a batch
   was empty, until `stop()` sets the `threading.Event`. `alive` property = thread is alive.
-- `# ponytail: one thread, one process; uvicorn --workers N would start N of these, which is safe because the claim is atomic, but set FI_WORKER_ENABLED=false on all but one if you want a single consumer`.
+- `# ponytail: one thread, one process; uvicorn --workers N would start N of these, which is safe because the claim is atomic`. Corrected after Fleet 2: all N processes read the same environment, so `FI_WORKER_ENABLED` cannot be off in only some of them; run separate processes, one with the worker on, to have exactly one consumer.
 
 ## API (`feedback_ingest/api/`, sync `def` endpoints so FastAPI runs them in its threadpool)
 `deps.py`
@@ -79,10 +88,11 @@ so `FI_LEASE_SECONDS=0` fails at startup instead of at the first claim.
   `tenants.get_by_api_key_hash`; missing/empty → `UnauthorizedError`. (`utils/hashing.sha256_text`.)
 - `tenant_source(source_id: str, tenant, ctx) -> Source`: `sources.get(source_id, tenant_id=tenant.id)` or `NotFoundError`.
 
-`ingest.py` — `POST /v1/sources/{source_id}/events`
+`ingest.py`: `POST /v1/sources/{source_id}/events`
 1. Tenant from API key (401), source for that tenant (404). The source may be push or pull; a pull connector
-   also implements `transform`, so the webhook path works for any source.
-2. `body = await request.body()`? No — sync endpoint: declare `body: bytes = Body(...)` via `request.body()` in
+   also implements `transform`, so the webhook path works for any source. (Superseded: no API key since
+   Phase 6, and push sources only since Fleet 2. See the note at the top.)
+2. `body = await request.body()`? No, sync endpoint: declare `body: bytes = Body(...)` via `request.body()` in
    a sync-compatible way: make this endpoint `async def`, `await request.body()`, then run the insert with
    `await run_in_threadpool(ctx.ingestion.accept, source, payload)` so the event loop never blocks on the DB.
 3. `CONNECTORS[source.type].verify_signature(source.webhook_secret.get_secret_value(), body, request.headers)` →
@@ -98,7 +108,7 @@ so `FI_LEASE_SECONDS=0` fails at startup instead of at the first claim.
 - `POST /admin/raw-events/{id}/replay` → `requeue(id, now)`; 404 if not this tenant's or unknown; 409 if currently processing; `200 {"status": "pending"}`.
 - `GET /admin/queue` → `counts(tenant_id=tenant.id)` per status.
 
-`health.py` — `GET /health` (no auth) → `{"status": "ok", "worker_alive": bool, "queue": counts(tenant_id=None)}`;
+`health.py`: `GET /health` (no auth) → `{"status": "ok", "worker_alive": bool, "queue": counts(tenant_id=None)}`;
 returns 503 with `status: "degraded"` when the worker is enabled but not `healthy` (thread dead, or no
 completed pass within the window, e.g. every claim failing).
 
@@ -150,8 +160,9 @@ tests/e2e/{conftest,test_push_to_query,test_restart_resume,test_dlq_replay}.py
   duplicate (Phase 6; it was `None` on a duplicate before).
 - `Adapters` and `AppState` live in `api/deps.py`, not `main.py`.
 - Services are plain dataclasses.
-- Pull-mode sources are accepted on the webhook too, per ADR-003 as amended; a source without a webhook
-  secret answers 409 "source has no webhook secret" (Phase 6; was 401).
+- Phase 6: pull-mode sources were accepted on the webhook too, and a source without a webhook secret
+  answered 409. Superseded by Fleet 2: webhooks are push-only. A pull source answers 409 "source does not
+  accept webhooks" and cannot be created with a `webhook_secret` (422); a push source always has a secret.
 - Phase 6: the webhook takes no `X-API-Key`. `SourceStore.get_by_id` finds the source (404), the per-source
   signature proves the caller (401), and the tenant comes from the source row (ADR-003 ruling 8 as amended).
 - Phase 6: replay also revives a `processing` row whose lease has expired; 409 only while a lease is live.
@@ -167,8 +178,8 @@ tests/e2e/{conftest,test_push_to_query,test_restart_resume,test_dlq_replay}.py
 - Done: `tests/api/__init__.py`, `tests/e2e/__init__.py` and both sub-conftests are deleted.
 
 ## How to explain this phase in the interview
-"The webhook does three checks and one write: whose tenant, which source, is the signature right, then insert
-the raw payload and answer 202. If the database is down we answer 503 and the sender retries; we never say yes
+"The webhook does two checks and one write: the source id in the URL picks the source, and that source's
+signature proves the sender. Then we insert the raw payload and answer 202. If the database is down we answer 503 and the sender retries; we never say yes
 to something we haven't saved. A worker thread claims a batch with a lease, transforms, upserts, and marks the
 row. Bad payloads go dead on the first try; flaky things back off and retry; after five tries they go dead too.
 Dead rows are listed per tenant and replayed with one call. Health shows whether the worker is alive and how

@@ -1,6 +1,14 @@
-# Phase 5 — Tenancy, sources and records API, seed, demo
+# Phase 5: Tenancy, sources and records API, seed, demo
 
 Status: implemented 2026-10-03 (commits 301a023 / a5f708f, merged), review fixes applied. Depends on Phases 3–4.
+
+**Update after Fleet 2 (commit cbb788c) and the tailoring pass (b8f6e2b).** The code wins over this LLD. What changed here:
+- `SourceStore.list_by_mode` is now `list_enabled(mode)`; `set_config(source_id, tenant_id, config)` was added.
+- `PATCH /v1/sources/{id}` takes `{enabled?, config?}`. `config` is merged key by key into the stored config and `check_source` runs again on the result (422 on failure). This is how a tenant lowers `window_days`.
+- `POST /v1/sources`: a tenant-chosen push secret must be at least 16 characters (422); a pull source with a `webhook_secret` is 422, because webhooks are push-only.
+- `POST /admin/tenants` is refused (401) while `FI_BOOTSTRAP_TOKEN` is still the default `change-me` or empty, and startup logs a WARNING saying "set FI_BOOTSTRAP_TOKEN".
+- `scripts/demo.sh` exports a random `FI_BOOTSTRAP_TOKEN` before starting the server. `seed.py` requires it, writes `.seed.json` with mode 600 and prints only its path, never secrets. `scripts/sign.py` reads the secret from `FI_SIGN_SECRET` and only signs.
+- Seeded tenants are `lumenote` and `brightwave` (see the last deviation).
 
 ## What this phase builds, in one paragraph
 
@@ -12,7 +20,7 @@ tenant A's sources, records or raw events.
 
 ## Domain change
 - `Source.enabled: bool = True`. Sources are disabled, never deleted (ADR-002: deleting and re-adding would
-  re-ingest history as duplicates). `SourceStore.list_by_mode` returns enabled sources only;
+  re-ingest history as duplicates). `SourceStore.list_enabled` (named `list_by_mode` before Fleet 2) returns enabled sources only;
   `SourceStore.set_enabled(source_id, tenant_id, enabled)` added to the port and both adapters.
 - `check_source(source)` (ADR-003) lives in `connectors/registry.py` and is called by the create endpoint:
   pull mode requires a puller and the connector's required config keys; push mode requires a secret.
@@ -25,7 +33,7 @@ tenant A's sources, records or raw events.
   only time the secret is shown in clear; later reads mask it).
 - `GET /v1/sources` → `list[SourceView]` (secret masked as `"***"`, includes `cursor`, `enabled`).
 - `GET /v1/sources/{id}` → `SourceView` (404 across tenants).
-- `PATCH /v1/sources/{id}` body `{enabled: bool}` → `SourceView`.
+- `PATCH /v1/sources/{id}` body `{enabled: bool}` → `SourceView` (built after Fleet 2: `{enabled?, config?}`, see the note at the top).
 - `POST /v1/sources/{id}/sync` (from Phase 4) stays in this file.
 
 `api/records.py`
@@ -36,17 +44,17 @@ tenant A's sources, records or raw events.
 
 `api/tenants.py` (bootstrap only; no auth tier beyond a shared bootstrap token)
 - `POST /admin/tenants` with header `X-Bootstrap-Token` equal to `settings.bootstrap_token` (default
-  `"change-me"`, printed with a warning at startup when unchanged) → creates `Tenant(id, name, api_key_hash)`,
+  `"change-me"`; built after Fleet 2: the default is refused with 401 and a startup warning) → creates `Tenant(id, name, api_key_hash)`,
   returns `201 {id, name, api_key}` once. `# ponytail: shared bootstrap token; real deployments put this behind an ops identity`.
 
 ## Scripts
-`scripts/seed.py` — runs against a live server (`FI_BASE_URL`, default `http://127.0.0.1:8000`) using `httpx`:
+`scripts/seed.py`: runs against a live server (`FI_BASE_URL`, default `http://127.0.0.1:8000`) using `httpx`:
 creates tenants "acme" and "globex"; for each: one Discourse pull source (`base_url=https://meta.discourse.org`,
 `start_after=2021-01-01`, `until=2021-01-05`), two Playstore push sources ("acme-android", "acme-ios-wrapper"),
 one Twitter push, one Intercom push. Prints a table of tenant → api_key and source → id/secret, and writes the
 same to `.seed.json` (git-ignored) for `demo.sh`. Synthetic names only.
 
-`scripts/demo.sh` — the rehearsal script (bash, uses `curl`, `jq`, `python3` for HMAC via `scripts/sign.py`):
+`scripts/demo.sh`: the rehearsal script (bash, uses `curl`, `jq`, `python3` for HMAC via `scripts/sign.py`):
 1. start server in background (`uv run uvicorn … --port 8000`), wait for `/health`.
 2. `uv run scripts/seed.py`.
 3. push `tests/fixtures/playstore/review.json` to acme-android twice → print both 202s (`duplicate=false`, then `true`).
@@ -60,7 +68,7 @@ same to `.seed.json` (git-ignored) for `demo.sh`. Synthetic names only.
 ## Tests
 - `tests/api/test_sources_api.py`: create push source without secret → secret generated and returned once, masked
   on GET; create pull source missing `base_url` → 422 with the key named; create pull source for a push-only
-  type → 422; list/get across tenants → 404; PATCH enabled=false → excluded from `list_by_mode` (scheduler skips it).
+  type → 422; list/get across tenants → 404; PATCH enabled=false → excluded from `list_enabled` (scheduler skips it).
 - `tests/api/test_records_api.py`: filters by `source_id`, `kind`, `since`; `limit` bounds; tombstones hidden
   unless `include_deleted=true`; tenant B cannot read A's record by id (404) or via `source_id` (404).
 - `tests/api/test_tenants_api.py`: bootstrap token required; api key works on `/v1/sources` afterwards.

@@ -21,7 +21,8 @@ the demo is in [whiteboard.md](whiteboard.md).
   responses.
 
 Shell variables you will see: `$BASE` is `http://127.0.0.1:8000`, `$FIX` is `tests/fixtures`, `$PY` is
-`.venv/bin/python`. `LUMENOTE_KEY` and `BRIGHTWAVE_KEY` are the two tenants' API keys, read from `.seed.json`. Both tenants are
+`.venv/bin/python`. The script also exports a random `FI_BOOTSTRAP_TOKEN` (`openssl rand -hex 32`), because the
+server refuses the default token. `LUMENOTE_KEY` and `BRIGHTWAVE_KEY` are the two tenants' API keys, read from `.seed.json`. Both tenants are
 synthetic: Lumenote is a consumer voice-notes app (Play Store reviews, a Discourse community, a survey webhook),
 Brightwave a B2B SaaS (Intercom support, Twitter, an NPS webhook).
 
@@ -61,15 +62,18 @@ curl -sS --fail-with-body "$BASE/health"
 **They see:**
 ```
 {"status":"ok","worker_enabled":true,"worker_alive":true,"scheduler_enabled":true,"scheduler_alive":true,
- "queue":{"pending":0,"processing":0,"processed":0,"failed":0,"dead":0}}
+ "failing_sources":0,"queue":{"pending":0,"processing":0,"processed":0,"failed":0,"dead":0}}
 ```
 
 **Say:** "One process: the API, a worker thread and a pull scheduler thread. Health is the first thing I look at
-in an incident: are both threads alive, and how deep is the queue."
+in an incident: are both threads alive, how many pull sources failed their last scheduled sync, and how deep is
+the queue."
 
 **Follow-up:** "What makes health go red?"
-**Answer:** A dead worker or scheduler thread, or no completed worker pass in about 10 seconds, gives 503
-(`feedback_ingest/api/health.py`).
+**Answer:** Only our own threads. A dead worker or scheduler thread, or no completed worker pass in about 10
+seconds, gives 503 and `"status":"degraded"`. A failing pull source does not: it raises the `failing_sources`
+count (a number, no ids) and the status stays 200, because restarting us would not fix someone else's API
+(`feedback_ingest/api/health.py`, `tests/api/test_health.py`).
 
 ## Step 2. Seed two tenants and their sources
 
@@ -84,8 +88,8 @@ in an incident: are both threads alive, and how deep is the queue."
 on Intercom, `brightwave-x` on Twitter, `brightwave-nps` on the custom webhook).
 
 **Say:** "A source is one tenant's configured connection. Lumenote ships a stable and a beta Android app, so
-that is two Playstore source rows, each with its own secret. The API key and the secret are shown once, at creation; we store only a hash of
-the key."
+that is two Playstore source rows, each with its own secret. The API key and the secret are shown once, at
+creation; we store only a hash of the key. Creating a tenant takes the bootstrap token, not an API key."
 
 **Follow-up:** "Why is the Discourse source pull and the others push?"
 **Answer:** Discourse has a public API we poll live; Playstore has no review webhook in reality, so recorded
@@ -93,7 +97,8 @@ fixtures stand in for that poller, and the transform is the same either way (ADR
 
 ## Step 3. The same review to lumenote-android twice
 
-**Command:** (the script's `push` helper signs the file with `scripts/sign.py`, then runs)
+**Command:** (the script's `push` helper first signs the file: `sig="$(FI_SIGN_SECRET="$2" "$PY" scripts/sign.py "$3")"`.
+`sign.py` reads the secret from `FI_SIGN_SECRET` and only prints the hex HMAC; it sends nothing. Then it runs)
 ```
 curl -sS --fail-with-body -X POST "$BASE/v1/sources/$1/events" \
   -H "X-Signature: $sig" --data-binary "@$3"
@@ -131,7 +136,8 @@ apps can share a review id without colliding."
 
 **Follow-up:** "What if a tenant deletes the source and adds it again?"
 **Answer:** Sources are disabled, never deleted (`PATCH` with `enabled: false`), so the old row and its keys stay;
-a disabled source refuses pushes with 409.
+a disabled source refuses pushes with 409. To turn it back on, `PATCH` with `enabled: true`. A new `POST` makes a
+new source with a new id, and its items ingest again as new records.
 
 ## Step 5. Lumenote sees two records; brightwave sees none
 
@@ -179,7 +185,8 @@ curl -sS --fail-with-body "$BASE/v1/records?kind=survey" -H "X-API-Key: $LUMENOT
 `type`, `createdAt` in epoch seconds, `text` and flat typed metadata. One delivery is one raw event; the
 connector returns one record per entry, and for this connector only the kind comes from each record's `type`
 (`REVIEW`, `CONVERSATION`, `FORUM_CONVERSATION_THREAD`, `SURVEY`). The survey kind was one enum value and one
-line in the kind map. It is the same five-step add-a-source recipe as the other four connectors."
+line in the kind map. It went in with the same five-step add-a-source recipe as the other four connectors: a
+`SourceType` value, a metadata model, a connector file with its input model, a registry entry, and fixtures."
 
 **Follow-up:** "What if one record in the batch is bad?"
 **Answer:** The whole batch goes dead with the reason (an unknown `type` is an "unsupported record type"
@@ -226,13 +233,22 @@ curl -sS --fail-with-body "$BASE/v1/records?kind=post&limit=3" -H "X-API-Key: $L
 real forum posts with their topic titles and authors.
 
 **Say:** "Polling is just another producer. The connector fetches pages from the real forum, and every payload
-goes through the same accept call as a webhook. The bookmark, the cursor, is saved only after the page's rows
-are on disk. The seed fixes the window to four days in January 2021, so the demo is repeatable."
+goes through the same accept call as a webhook. The bookmark, the cursor, moves only on the final page of a
+window, and only after that page's rows are on disk. Here the window end is in the past, so the cursor jumps to
+it: `2021-01-05`. The seed fixes the window to four days in January 2021, so the demo is repeatable."
 
 **Follow-up:** "What if Discourse rate-limits us halfway?"
-**Answer:** The 429 becomes a transient error, the pull stops, saved pages stay saved, and the cursor has not
-moved, so the next run starts from the same place and repeats are dropped; the sync answers 502 with the error,
-and `/health` counts it in `failing_sources`; the WARNING log line names the source (`feedback_ingest/services/pull.py`).
+**Answer:** The 429 becomes a transient error and the pull stops. Rows already saved stay saved, and the cursor
+has not moved, so the next run restarts the window and the repeats are dropped. This sync answers 502 with the
+error. If a scheduled sync fails the same way, `/health` counts it in `failing_sources`, and the WARNING log
+line names the source (`feedback_ingest/services/pull.py`). A second sync of the same source while one is
+running gets 409.
+
+**Follow-up:** "What about a very busy forum?"
+**Answer:** Discourse search returns at most 10 pages for one query, about 500 posts. A window is at least one
+day, so about 500 posts per day is the hard limit. Past that the sync stops with an error that says to lower `window_days`, and the cursor does not move. You
+lower it with `PATCH /v1/sources/{id}` and `{"config": {"window_days": "1"}}`
+(`feedback_ingest/connectors/discourse_pull.py`).
 
 ## Step 9. 20 pushes queued, kill -9, restart
 
@@ -278,5 +294,6 @@ thread, and `uv run pytest` runs them all.
 > "So, the four things: a duplicate stored once, two apps of the same type kept apart, a tenant that sees nothing
 > of another, and a hard kill that lost nothing. Plus a bad payload parked with its reason and replayed, and a
 > live pull through the same pipeline. All of it rests on one rule: save the raw payload before we say yes, then
-> everything is a retry or a replay. Adding a new source is one connector file, one metadata model, one registry
-> line and fixtures. Happy to add a field live, or to break something and show you where it lands."
+> everything is a retry or a replay. Adding a new source is five steps: an enum value, a metadata model, a
+> connector file, a registry entry and fixtures, and the custom webhook went in exactly that way. Happy to add a
+> field live, or to break something and show you where it lands."
