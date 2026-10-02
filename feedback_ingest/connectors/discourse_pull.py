@@ -23,8 +23,8 @@ _POSTS_PER_CALL = 20
 # ponytail: every poll re-scans the whole window; store last post id per topic if Discourse
 # volume grows. The cursor only advances on the final page because search order is not
 # guaranteed oldest-first; a crash mid-run re-fetches from the old cursor (dedup absorbs it).
-# ponytail: at most 20 search pages (~1000 posts) per window; a busier window never reaches its
-# final page so the cursor stalls; lower config["window_days"] or page by date if that happens.
+# ponytail: at most 20 search pages (~1000 posts) per window; a busier window raises after page 20
+# with the cursor unmoved; lower config["window_days"] or page by date if that happens.
 def pull_pages(source: Source, http: HttpClient, now: datetime) -> Iterator[PullPage]:
     base_url = config(source, "base_url")
     since = source.cursor or config(source, "start_after")
@@ -50,11 +50,16 @@ def pull_pages(source: Source, http: HttpClient, now: datetime) -> Iterator[Pull
         final = not (grouped and grouped.more_full_page_results)
         cursor = since
         if final:
-            moved = newest - _OVERLAP if newest else since_at
+            moved = max(newest - _OVERLAP, since_at) if newest else since_at
             cursor = (max(moved, until) if until < now else moved).isoformat()
         yield PullPage(payloads=_fetch_posts(base_url, http, search), cursor=cursor)
         if final:
             return
+    msg = (
+        f"discourse source {source.id}: window exceeds {_MAX_PAGES} pages; "
+        "lower config['window_days']"
+    )
+    raise TransformError(msg)
 
 
 def _fetch_posts(base_url: str, http: HttpClient, search: SearchPageIn) -> list[dict[str, Any]]:

@@ -1,6 +1,8 @@
+import pytest
 from discourse_stub import BASE, NOW, StubHttp, pull_source, routes
 
 from feedback_ingest.connectors.discourse import DiscourseConnector
+from feedback_ingest.domain.errors import TransformError
 
 PULLER = DiscourseConnector()
 
@@ -49,9 +51,17 @@ def test_a_quiet_window_advances_the_cursor_to_the_window_end() -> None:
     assert http.calls == [f"{BASE}/search.json after:2026-02-01 before:2026-02-08"]
 
 
-def test_page_guard_stops_a_server_that_ignores_page() -> None:
+def test_page_guard_stops_a_server_that_ignores_page_and_says_so() -> None:
     same = routes([[1], [1]])[f"{BASE}/search.json", "1"]
     found = routes([[1]]) | {(f"{BASE}/search.json", str(p)): same for p in range(1, 30)}
-    pages = list(PULLER.pull(pull_source(), StubHttp(found), NOW))
-    assert len(pages) == 20
-    assert {page.cursor for page in pages} == {"2026-02-01"}
+    pages = PULLER.pull(pull_source(), StubHttp(found), NOW)
+    cursors = [next(pages).cursor for _ in range(20)]
+    assert set(cursors) == {"2026-02-01"}
+    with pytest.raises(TransformError, match="window exceeds 20 pages"):
+        next(pages)
+
+
+def test_the_cursor_never_moves_back_past_where_it_started() -> None:
+    since = "2026-02-01T00:00:30"  # post 1 is 00:01, so newest minus the overlap is 00:00
+    [page] = PULLER.pull(pull_source(cursor=since), StubHttp(routes([[1]])), NOW)
+    assert page.cursor == since

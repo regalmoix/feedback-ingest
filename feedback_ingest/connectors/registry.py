@@ -1,3 +1,6 @@
+from collections.abc import Mapping
+from urllib.parse import urlsplit
+
 from pydantic import TypeAdapter, ValidationError
 
 from feedback_ingest.connectors.base import PullConnector, SourceConnector
@@ -23,18 +26,35 @@ _NAIVE_UTC: TypeAdapter[NaiveUtc] = TypeAdapter(NaiveUtc)
 
 
 def check_source(source: Source) -> None:
-    if source.mode is not SourceMode.PULL:
-        return
-    if source.type not in PULLERS:
-        msg = f"{source.type} cannot pull"
-        raise ValueError(msg)
-    for key in PULLERS[source.type].required_config:
-        if key not in source.config:
-            msg = f"{source.type} pull source needs config[{key!r}]"
+    required = CONNECTORS[source.type].required_config
+    if source.mode is SourceMode.PULL:
+        if source.type not in PULLERS:
+            msg = f"{source.type} cannot pull"
             raise ValueError(msg)
-    if "start_after" in source.config:
+        required += PULLERS[source.type].pull_config
+    for key in required:
+        if key not in source.config:
+            msg = f"{source.type} {source.mode} source needs config[{key!r}]"
+            raise ValueError(msg)
+    _check_values(source.config)
+
+
+def _check_values(config: Mapping[str, str]) -> None:
+    if "base_url" in config:
+        url = urlsplit(config["base_url"])
+        if url.scheme not in {"http", "https"} or url.username or url.password:
+            msg = "config['base_url'] must be an http(s) URL without credentials"
+            raise ValueError(msg)
+    try:
+        window_ok = int(config.get("window_days", "1")) > 0
+    except ValueError:
+        window_ok = False
+    if not window_ok:
+        msg = f"config['window_days'] is not a positive integer: {config['window_days']!r}"
+        raise ValueError(msg)
+    if "start_after" in config:
         try:
-            _NAIVE_UTC.validate_python(source.config["start_after"])
+            _NAIVE_UTC.validate_python(config["start_after"])
         except ValidationError:
-            msg = f"config['start_after'] is not a datetime: {source.config['start_after']!r}"
+            msg = f"config['start_after'] is not a datetime: {config['start_after']!r}"
             raise ValueError(msg) from None

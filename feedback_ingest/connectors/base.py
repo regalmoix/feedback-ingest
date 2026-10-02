@@ -36,4 +36,6 @@ class SourceConnector(Protocol):
 
 
 class PullConnector(SourceConnector, Protocol):
+    pull_config: ClassVar[tuple[str, ...]]  # extra config keys a pull-mode Source must have
+
     def pull(self, source: Source, http: HttpClient, now: datetime) -> Iterator[PullPage]: ...

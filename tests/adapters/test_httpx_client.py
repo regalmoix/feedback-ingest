@@ -67,3 +67,10 @@ def test_request_failures_are_transient(error: type[httpx.RequestError]) -> None
 
     with pytest.raises(TransientError):
         HttpxClient(httpx.MockTransport(handler)).get_json("https://example.test", {})
+
+
+def test_error_messages_drop_credentials_from_the_url() -> None:
+    with pytest.raises(TransformError) as raised:
+        _client(404).get_json("https://user:hunter2@example.test/x", {})
+    assert "hunter2" not in str(raised.value)
+    assert "https://example.test/x" in str(raised.value)

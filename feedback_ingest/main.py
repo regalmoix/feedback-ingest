@@ -1,30 +1,15 @@
 import logging
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 from typing import override
 
 from fastapi import FastAPI
-from sqlalchemy import Engine
 
-from feedback_ingest.adapters.http.httpx_client import HttpxClient
-from feedback_ingest.adapters.sqlalchemy.db import make_engine
-from feedback_ingest.adapters.sqlalchemy.raw_event_queue import SqlRawEventQueue
-from feedback_ingest.adapters.sqlalchemy.stores import (
-    SqlFeedbackStore,
-    SqlSourceStore,
-    SqlTenantStore,
-)
-from feedback_ingest.adapters.sqlalchemy.tables import Base
 from feedback_ingest.api import admin, health, ingest, records, sources, sync, tenants
-from feedback_ingest.api.deps import Adapters, AppState
+from feedback_ingest.api.deps import Adapters
 from feedback_ingest.api.errors import add_error_handlers
 from feedback_ingest.config import Settings
-from feedback_ingest.services.ingestion import IngestionService
-from feedback_ingest.services.pipeline import PipelineService
-from feedback_ingest.services.pull import PullService
-from feedback_ingest.services.scheduler import SchedulerService
-from feedback_ingest.services.worker import WorkerService
-from feedback_ingest.utils.time import SystemClock
+from feedback_ingest.wiring import app_state, sql_adapters
 
 _LOG = logging.getLogger("feedback_ingest")
 _LOG_KEYS = ("raw_event_id", "tenant_id", "source_id", "attempts")
@@ -53,33 +38,11 @@ def _configure_logging() -> None:
     logger.setLevel(logging.INFO)
 
 
-def _sql_adapters(engine: Engine) -> Adapters:
-    return Adapters(
-        tenants=SqlTenantStore(engine),
-        sources=SqlSourceStore(engine),
-        feedback=SqlFeedbackStore(engine),
-        queue=SqlRawEventQueue(engine),
-        http=HttpxClient(),
-        clock=SystemClock(),
-    )
-
-
-def _app_state(settings: Settings, a: Adapters) -> AppState:
-    pipeline = PipelineService(
-        a.sources, a.feedback, a.queue, a.clock, settings.max_attempts, settings.backoff_cap_seconds
-    )
-    worker = WorkerService(
-        a.queue,
-        pipeline,
-        a.clock,
-        settings.worker_poll_seconds,
-        settings.lease_seconds,
-        settings.claim_batch,
-    )
-    ingestion = IngestionService(a.queue, a.clock)
-    pull = PullService(a.sources, ingestion, a.http, a.clock)
-    scheduler = SchedulerService(pull, settings.pull_interval_seconds)
-    return AppState(settings, a, ingestion, worker, pull, scheduler)
+def _warn_about_bootstrap_token(token: str) -> None:
+    if not token:
+        _LOG.warning("FI_BOOTSTRAP_TOKEN is empty; POST /admin/tenants is disabled")
+    elif token == Settings.model_fields["bootstrap_token"].default:
+        _LOG.warning("FI_BOOTSTRAP_TOKEN is the default; set it before exposing /admin/tenants")
 
 
 def create_app(settings: Settings | None = None, adapters: Adapters | None = None) -> FastAPI:
@@ -88,27 +51,22 @@ def create_app(settings: Settings | None = None, adapters: Adapters | None = Non
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        engine = None
-        active = adapters
-        if active is None:
-            engine = make_engine(settings.database_url)
-            Base.metadata.create_all(engine)
-            active = _sql_adapters(engine)
-        ctx = _app_state(settings, active)
-        if settings.bootstrap_token == Settings.model_fields["bootstrap_token"].default:
-            _LOG.warning("FI_BOOTSTRAP_TOKEN is the default; set it before exposing /admin/tenants")
-        app.state.ctx = ctx
-        if settings.worker_enabled:
-            ctx.worker.start()
-        if settings.scheduler_enabled:
-            ctx.scheduler.start()
-        try:
-            yield
-        finally:
-            ctx.scheduler.stop()
-            ctx.worker.stop()
-            if engine is not None:
-                engine.dispose()
+        built = (
+            nullcontext(adapters) if adapters is not None else sql_adapters(settings.database_url)
+        )
+        with built as active:
+            ctx = app_state(settings, active)
+            _warn_about_bootstrap_token(settings.bootstrap_token)
+            app.state.ctx = ctx
+            if settings.worker_enabled:
+                ctx.worker.start()
+            if settings.scheduler_enabled:
+                ctx.scheduler.start()
+            try:
+                yield
+            finally:
+                ctx.scheduler.stop()
+                ctx.worker.stop()
 
     app = FastAPI(title="Feedback ingest", lifespan=lifespan)
     add_error_handlers(app)

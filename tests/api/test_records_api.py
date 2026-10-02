@@ -1,13 +1,12 @@
 import pytest
 from fastapi.testclient import TestClient
 
-from api.conftest import KEY_A, KEY_B, app_state, fixture_body, push
+from api.conftest import KEY_A, MINE, THEIRS, app_state, fixture_body, push
 from feedback_ingest.api.deps import Adapters
 from feedback_ingest.domain.enums import SourceType
 from feedback_ingest.domain.models import Source
 
 REVIEW, POST, DELETED = "gp:AOqpTEST-review-0001", "9001", "9002"
-MINE, THEIRS = {"X-API-Key": KEY_A}, {"X-API-Key": KEY_B}
 
 
 @pytest.fixture
@@ -44,7 +43,9 @@ def test_tombstones_are_hidden_unless_asked_for(app_client: TestClient) -> None:
 
 
 @pytest.mark.usefixtures("ids")
-@pytest.mark.parametrize("query", ["limit=0", "limit=501", "kind=tweet", "since=soon"])
+@pytest.mark.parametrize(
+    "query", ["limit=0", "limit=501", "kind=tweet", "since=soon", "knd=review", "tenant_id=x"]
+)
 def test_bad_query_values_are_422(app_client: TestClient, query: str) -> None:
     assert app_client.get(f"/v1/records?{query}", headers=MINE).status_code == 422
 

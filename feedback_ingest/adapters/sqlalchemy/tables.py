@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import JSON, ForeignKey, ForeignKeyConstraint, Index, UniqueConstraint
+from sqlalchemy import JSON, ForeignKey, ForeignKeyConstraint, Index, UniqueConstraint, true
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -12,7 +12,7 @@ class Base(DeclarativeBase):
 class TenantRow(Base):
     __tablename__ = "tenants"
     id: Mapped[str] = mapped_column(primary_key=True)
-    name: Mapped[str]
+    name: Mapped[str] = mapped_column(unique=True)
     api_key_hash: Mapped[str] = mapped_column(unique=True)
 
 
@@ -27,7 +27,7 @@ class SourceRow(Base):
     config: Mapped[dict[str, str]] = mapped_column(JSON)
     webhook_secret: Mapped[str | None]
     cursor: Mapped[str | None]
-    enabled: Mapped[bool] = mapped_column(default=True)
+    enabled: Mapped[bool] = mapped_column(default=True, server_default=true())
 
 
 class RawEventRow(Base):

@@ -25,6 +25,7 @@ from feedback_ingest.utils.signing import sign
 FIXTURES = Path(__file__).parents[1] / "fixtures"
 SECRET = "whsec-test"  # noqa: S105  synthetic test secret
 KEY_A, KEY_B = "key-tenant-a", "key-tenant-b"
+MINE, THEIRS = {"X-API-Key": KEY_A}, {"X-API-Key": KEY_B}
 
 
 def fixture_body(source_type: SourceType, name: str) -> bytes:

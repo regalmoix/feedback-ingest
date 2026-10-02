@@ -3,12 +3,9 @@ from fastapi.testclient import TestClient
 from sqlalchemy import Engine
 
 from e2e.conftest import add_pull_source, discourse_http, wait_until
+from feedback_ingest.adapters.sqlalchemy.feedback_store import SqlFeedbackStore
 from feedback_ingest.adapters.sqlalchemy.raw_event_queue import SqlRawEventQueue
-from feedback_ingest.adapters.sqlalchemy.stores import (
-    SqlFeedbackStore,
-    SqlSourceStore,
-    SqlTenantStore,
-)
+from feedback_ingest.adapters.sqlalchemy.stores import SqlSourceStore, SqlTenantStore
 from feedback_ingest.api.deps import Adapters
 from feedback_ingest.config import Settings
 from feedback_ingest.domain.enums import EventStatus, FeedbackKind

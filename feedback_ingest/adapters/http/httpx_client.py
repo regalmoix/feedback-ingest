@@ -12,6 +12,9 @@ class HttpxClient:
     def __init__(self, transport: httpx.BaseTransport | None = None) -> None:
         self._client = httpx.Client(timeout=10, transport=transport, follow_redirects=True)
 
+    def close(self) -> None:
+        self._client.close()
+
     def get_json(self, url: str, params: dict[str, str]) -> dict[str, Any]:
         try:
             target = httpx.URL(url).copy_merge_params(params) if params else url
@@ -24,14 +27,18 @@ class HttpxClient:
         if status >= HTTPStatus.MULTIPLE_CHOICES:
             retryable = status in _RETRYABLE_4XX or status >= HTTPStatus.INTERNAL_SERVER_ERROR
             kind = TransientError if retryable else TransformError
-            msg = f"{status} from {url}: {response.text[:200]}"
+            msg = f"{status} from {_safe(url)}: {response.text[:200]}"
             raise kind(msg)
         try:
             data = response.json()
         except (ValueError, RecursionError) as exc:
-            msg = f"invalid JSON from {url}: {response.text[:200]}"
+            msg = f"invalid JSON from {_safe(url)}: {response.text[:200]}"
             raise TransientError(msg) from exc
         if not isinstance(data, dict):
-            msg = f"expected a JSON object from {url}"
+            msg = f"expected a JSON object from {_safe(url)}"
             raise TransformError(msg)
         return data
+
+
+def _safe(url: str) -> httpx.URL:
+    return httpx.URL(url).copy_with(username=None, password=None)

@@ -18,6 +18,8 @@ router = APIRouter()
 async def ingest_event(
     request: Request, source: Annotated[Source, Depends(tenant_source)], ctx: Ctx
 ) -> AcceptResult:
+    if not source.enabled:
+        raise HTTPException(HTTPStatus.CONFLICT, detail="source is disabled")
     body = await request.body()
     secret = source.webhook_secret
     connector = CONNECTORS[source.type]

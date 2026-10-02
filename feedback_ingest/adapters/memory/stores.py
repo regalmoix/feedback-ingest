@@ -11,8 +11,9 @@ class MemoryTenantStore:
         self._tenants: dict[str, Tenant] = {}
 
     def add(self, tenant: Tenant) -> None:
-        if tenant.id in self._tenants or self.get_by_api_key_hash(tenant.api_key_hash):
-            msg = f"duplicate tenant {tenant.id}"
+        taken = any(t.name == tenant.name for t in self._tenants.values())
+        if taken or tenant.id in self._tenants or self.get_by_api_key_hash(tenant.api_key_hash):
+            msg = f"duplicate tenant {tenant.name!r}"
             raise ValueError(msg)
         self._tenants[tenant.id] = tenant
 

@@ -3,8 +3,13 @@ from typing import Any, Protocol
 
 
 class _Response(Protocol):
+    @property
+    def is_success(self) -> bool: ...
+    @property
+    def status_code(self) -> int: ...
+    @property
+    def text(self) -> str: ...
     def json(self) -> Any: ...  # noqa: ANN401  JSON from our own API
-    def raise_for_status(self) -> object: ...
 
 
 class Client(Protocol):
@@ -17,30 +22,28 @@ TENANTS = ("acme", "globex")
 DISCOURSE = {
     "base_url": "https://meta.discourse.org",
     "start_after": "2021-01-01",
-    "until": "2021-01-05",
     "window_days": "4",
 }
 
 
+def _post(client: Client, url: str, body: object, headers: Mapping[str, str]) -> dict[str, Any]:
+    response = client.post(url, json=body, headers=headers)
+    if not response.is_success:
+        msg = f"POST {url}: {response.status_code} {response.text}"
+        raise RuntimeError(msg)
+    created: dict[str, Any] = response.json()
+    return created
+
+
 def create_tenant(client: Client, bootstrap_token: str, name: str) -> dict[str, str]:
-    response = client.post(
-        "/admin/tenants", json={"name": name}, headers={"X-Bootstrap-Token": bootstrap_token}
-    )
-    response.raise_for_status()
-    tenant: dict[str, str] = response.json()
-    return tenant
+    return _post(client, "/admin/tenants", {"name": name}, {"X-Bootstrap-Token": bootstrap_token})
 
 
 def create_source(
     client: Client, api_key: str, type_: str, name: str, config: dict[str, str] | None = None
 ) -> dict[str, Any]:
     body = {"type": type_, "name": name, "mode": "pull" if config else "push"}
-    response = client.post(
-        "/v1/sources", json=body | {"config": config or {}}, headers={"X-API-Key": api_key}
-    )
-    response.raise_for_status()
-    source: dict[str, Any] = response.json()
-    return source
+    return _post(client, "/v1/sources", body | {"config": config or {}}, {"X-API-Key": api_key})
 
 
 def seed_tenant(client: Client, bootstrap_token: str, name: str) -> dict[str, Any]:

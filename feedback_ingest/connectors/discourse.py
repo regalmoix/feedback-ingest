@@ -18,7 +18,8 @@ from feedback_ingest.utils.html import strip_tags
 class DiscourseConnector:
     source_type: ClassVar[SourceType] = SourceType.DISCOURSE
     version: ClassVar[int] = 1
-    required_config: ClassVar[tuple[str, ...]] = ("base_url", "start_after")
+    required_config: ClassVar[tuple[str, ...]] = ("base_url",)
+    pull_config: ClassVar[tuple[str, ...]] = ("start_after",)
 
     def external_event_id(self, payload: Mapping[str, Any]) -> str:
         try:

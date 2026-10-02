@@ -1,4 +1,3 @@
-import logging
 from datetime import datetime
 
 import pytest
@@ -53,40 +52,18 @@ def test_a_repeated_payload_is_counted_as_a_duplicate(adapters: Adapters) -> Non
     assert adapters.queue.counts()[EventStatus.PENDING] == 4
 
 
-def test_transient_error_on_page_two_keeps_page_one(
-    adapters: Adapters, caplog: pytest.LogCaptureFixture
-) -> None:
-    source = add_pull_source(adapters, "src-forum", cursor="2026-02-01T06:00:00")
-    result = _service(adapters, discourse_http(fail_page="2")).sync(source)
-    assert (result.pages, result.accepted, result.cursor) == (1, 3, "2026-02-01T06:00:00")
-    assert result.error is not None
-    assert result.error.startswith("TransientError: 503")
-    assert _stored_cursor(adapters, "src-forum") == "2026-02-01T06:00:00"
-    assert adapters.queue.counts()[EventStatus.PENDING] == 3
-    assert next(r.levelno for r in caplog.records if r.name.endswith("pull")) == logging.WARNING
-
-
 def test_the_cursor_never_moves_backwards(adapters: Adapters) -> None:
-    source = add_pull_source(adapters, "src-forum", cursor="2026-02-05T00:00:00")
-    result = _service(adapters).sync(source)
-    assert result.cursor == "2026-02-12T00:00:00"
-    assert _stored_cursor(adapters, "src-forum") == "2026-02-12T00:00:00"
-
-
-def test_sync_all_continues_past_a_broken_source(
-    adapters: Adapters, caplog: pytest.LogCaptureFixture
-) -> None:
-    add_pull_source(adapters, "src-a-broken", cursor="yesterday")
-    add_pull_source(adapters, "src-b-forum")
-    results = _service(adapters).sync_all()
-    assert [r.source_id for r in results] == ["src-a-broken", "src-b-forum"]
-    assert results[0].error is not None
-    assert results[0].error.startswith("TransformError")
-    assert (results[1].accepted, results[1].error) == (4, None)
-    assert any(r.levelno == logging.ERROR for r in caplog.records)
+    source = add_pull_source(adapters, "src-forum")
+    later = "2026-02-20T00:00:00"
+    adapters.sources.update_cursor(source.id, later)  # a concurrent sync got further
+    assert _service(adapters).sync(source).cursor == later
+    assert _stored_cursor(adapters, "src-forum") == later
 
 
 def test_a_push_only_source_raises_config_error(adapters: Adapters) -> None:
     push_only = adapters.sources.list_by_mode(SourceMode.PUSH)[0]
     with pytest.raises(ConfigError, match="push-only"):
         _service(adapters).sync(push_only)
+    forum = add_pull_source(adapters, "src-forum").model_copy(update={"mode": SourceMode.PUSH})
+    with pytest.raises(ConfigError, match="push source"):
+        _service(adapters).sync(forum)

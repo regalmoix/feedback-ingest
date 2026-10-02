@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 from api.conftest import KEY_A, KEY_B, app_state, memory_adapters, seed_source
 from feedback_ingest.adapters.memory.clock import FixedClock
 from feedback_ingest.api.deps import Adapters
+from feedback_ingest.domain.enums import SourceMode, SourceType
 from feedback_ingest.domain.models import Source
 
 
@@ -53,12 +54,18 @@ def test_200_with_the_pull_result(app_client: TestClient, forum: Source) -> None
     assert sum(app_state(app_client).adapters.queue.counts().values()) == 4
 
 
-def test_404_for_a_push_only_source(app_client: TestClient, forum: Source) -> None:
-    push_only = f"src-{forum.tenant_id}-playstore"
-    result = _sync(app_client, push_only)
-    assert result["status"] == 404
-    assert "push-only" in str(result["detail"])
-
-
-def test_health_reports_the_scheduler(app_client: TestClient) -> None:
-    assert app_client.get("/health").json()["scheduler_alive"] is True
+def test_409_unless_an_enabled_pull_source(
+    app_client: TestClient, adapters: Adapters, forum: Source
+) -> None:
+    push_mode = forum.model_copy(
+        update={"id": "src-forum-push", "mode": SourceMode.PUSH, "webhook_secret": "s"}
+    )
+    adapters.sources.add(push_mode)
+    adapters.sources.set_enabled(forum.id, forum.tenant_id, False)
+    for source_id in (f"src-{forum.tenant_id}-{SourceType.PLAYSTORE}", push_mode.id, forum.id):
+        result = _sync(app_client, source_id)
+        assert result == {
+            "status": 409,
+            "detail": f"source {source_id} is not an enabled pull source",
+        }
+    assert sum(app_state(app_client).adapters.queue.counts().values()) == 0

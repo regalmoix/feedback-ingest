@@ -1,3 +1,4 @@
+import threading
 from collections.abc import Iterator
 from datetime import datetime
 
@@ -55,3 +56,22 @@ def test_a_failing_tick_does_not_stop_the_next(
     scheduler.start()
     wait_until(lambda: len(ticks) >= 2)
     assert scheduler.alive
+
+
+def test_stop_warns_when_a_sync_outlives_the_join(
+    scheduler: SchedulerService, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    started, release = threading.Event(), threading.Event()
+
+    def slow() -> list[PullResult]:
+        started.set()
+        release.wait(5)
+        return []
+
+    monkeypatch.setattr(scheduler.pull, "sync_all", slow)
+    monkeypatch.setattr("feedback_ingest.services.scheduler._JOIN_SECONDS", 0.01)
+    scheduler.start()
+    assert started.wait(5)
+    scheduler.stop()
+    release.set()
+    assert "scheduler still syncing on stop" in caplog.text

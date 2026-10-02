@@ -13,12 +13,9 @@ from sqlalchemy.exc import IntegrityError
 
 from feedback_ingest.adapters.memory.clock import FixedClock
 from feedback_ingest.adapters.sqlalchemy.db import make_engine
+from feedback_ingest.adapters.sqlalchemy.feedback_store import SqlFeedbackStore
 from feedback_ingest.adapters.sqlalchemy.raw_event_queue import SqlRawEventQueue
-from feedback_ingest.adapters.sqlalchemy.stores import (
-    SqlFeedbackStore,
-    SqlSourceStore,
-    SqlTenantStore,
-)
+from feedback_ingest.adapters.sqlalchemy.stores import SqlSourceStore, SqlTenantStore
 
 CASES = STORE_CASES + UPSERT_CASES + QUEUE_CASES + FENCING_CASES
 

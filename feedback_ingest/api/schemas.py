@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from feedback_ingest.domain.enums import EventStatus, FeedbackKind, SourceMode, SourceType
 
@@ -20,6 +20,7 @@ class HealthResponse(BaseModel):
     status: Literal["ok", "degraded"]
     worker_enabled: bool
     worker_alive: bool
+    scheduler_enabled: bool
     scheduler_alive: bool
     queue: dict[EventStatus, int]
 
@@ -32,21 +33,11 @@ class SourceCreate(BaseModel):
     webhook_secret: str | None = None
 
 
-class SourceCreated(BaseModel):
+class SourceCreated(SourceCreate):
     id: str
-    type: SourceType
-    name: str
-    mode: SourceMode
-    config: dict[str, str]
-    webhook_secret: str | None
 
 
-class SourceView(BaseModel):
-    id: str
-    type: SourceType
-    name: str
-    mode: SourceMode
-    config: dict[str, str]
+class SourceView(SourceCreated):
     webhook_secret: Literal["***"] | None
     cursor: str | None
     enabled: bool
@@ -57,6 +48,7 @@ class SourceUpdate(BaseModel):
 
 
 class RecordQuery(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     source_id: str | None = None
     kind: FeedbackKind | None = None
     since: datetime | None = None
@@ -65,7 +57,7 @@ class RecordQuery(BaseModel):
 
 
 class TenantCreate(BaseModel):
-    name: str
+    name: str = Field(min_length=1)
 
 
 class TenantCreated(BaseModel):

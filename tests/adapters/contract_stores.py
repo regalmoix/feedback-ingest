@@ -63,8 +63,9 @@ def filters_and_lookups_match(a: Adapters) -> None:
 
 def duplicates_and_unknown_ids_raise(a: Adapters) -> None:
     seed(a)
-    for duplicate in (TENANT_A, TENANT_A.model_copy(update={"id": "other"})):
-        with pytest.raises((ValueError, IntegrityError)):
+    same_name = TENANT_A.model_copy(update={"id": "other", "api_key_hash": "hash-other"})
+    for duplicate in (TENANT_A, TENANT_A.model_copy(update={"id": "other"}), same_name):
+        with pytest.raises(ValueError, match="duplicate tenant"):
             a.tenants.add(duplicate)
     with pytest.raises((ValueError, IntegrityError)):
         a.sources.add(SOURCE_A1)

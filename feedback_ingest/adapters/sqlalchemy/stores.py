@@ -1,13 +1,11 @@
 from sqlalchemy import ColumnElement, Engine, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import sessionmaker
 
-from feedback_ingest.adapters.sqlalchemy.feedback_store import SqlFeedbackStore
 from feedback_ingest.adapters.sqlalchemy.tables import SourceRow, TenantRow
 from feedback_ingest.domain.enums import SourceMode
 from feedback_ingest.domain.errors import NotFoundError
 from feedback_ingest.domain.models import Source, Tenant
-
-__all__ = ["SqlFeedbackStore", "SqlSourceStore", "SqlTenantStore"]
 
 
 class SqlTenantStore:
@@ -16,8 +14,12 @@ class SqlTenantStore:
         self._read = sessionmaker(engine.execution_options(read_only=True), expire_on_commit=False)
 
     def add(self, tenant: Tenant) -> None:
-        with self._write.begin() as session:
-            session.add(TenantRow(**tenant.model_dump()))
+        try:
+            with self._write.begin() as session:
+                session.add(TenantRow(**tenant.model_dump()))
+        except IntegrityError as exc:
+            msg = f"duplicate tenant {tenant.name!r}"
+            raise ValueError(msg) from exc
 
     def get_by_api_key_hash(self, api_key_hash: str) -> Tenant | None:
         with self._read.begin() as session:

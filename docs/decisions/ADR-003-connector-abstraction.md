@@ -75,7 +75,7 @@ def record_id(source_id: str, external_id: str) -> str:
 class SourceConnector(Protocol):
     source_type: ClassVar[SourceType]
     version: ClassVar[int]  # bump when transform output changes; stamped on every record
-    required_config: ClassVar[tuple[str, ...]]  # config keys a pull Source must have
+    required_config: ClassVar[tuple[str, ...]]  # config keys every Source of this type must have
 
     def external_event_id(self, payload: Mapping[str, Any]) -> str: ...
     def transform(self, source: Source, payload: Mapping[str, Any]) -> list[FeedbackRecord]: ...
@@ -83,6 +83,8 @@ class SourceConnector(Protocol):
 
 
 class PullConnector(SourceConnector, Protocol):
+    pull_config: ClassVar[tuple[str, ...]]  # extra config keys a pull-mode Source must have
+
     def pull(self, source: Source, http: HttpClient, now: datetime) -> Iterator[PullPage]: ...
 ```
 
@@ -110,15 +112,15 @@ Configuration-time check, run when a Source is created (the API turns it into a 
 
 ```python
 def check_source(source: Source) -> None:
-    if source.mode is not SourceMode.PULL:
-        return
-    if source.type not in PULLERS:
-        raise ValueError(f"{source.type} cannot pull")
-    for key in PULLERS[source.type].required_config:
+    required = CONNECTORS[source.type].required_config
+    if source.mode is SourceMode.PULL:
+        if source.type not in PULLERS:
+            raise ValueError(f"{source.type} cannot pull")
+        required += PULLERS[source.type].pull_config
+    for key in required:
         if key not in source.config:
-            raise ValueError(f"{source.type} pull source needs config[{key!r}]")
-    if "start_after" in source.config:
-        ...  # must parse as a NaiveUtc datetime, else ValueError
+            raise ValueError(f"{source.type} {source.mode} source needs config[{key!r}]")
+    ...  # base_url is http(s) without credentials, window_days > 0, start_after parses as NaiveUtc
 ```
 
 A push source without a `webhook_secret` is rejected by the `Source` model itself, so `check_source` does not repeat that check.
@@ -146,7 +148,7 @@ A push source without a `webhook_secret` is rejected by the `Source` model itsel
    - If the process crashes between the commit and the cursor save, the page is fetched again. Rule 2 drops the repeats.
    - A page's cursor must be safe to resume from: everything older than it is in this page or an earlier one. With oldest-first pages, that is the page's newest timestamp minus a small overlap. If a source only sorts newest-first, the connector holds the cursor back and yields it on the final page.
 
-5. **Registries: `CONNECTORS` and `PULLERS`, built from tuples of instances, as above.** A test asserts `set(SourceType) == CONNECTORS.keys()`, that no two connectors claim one type, that `PULLERS.keys() <= CONNECTORS.keys()`, and that every type has at least one fixture. `check_source` rejects a pull-mode Source whose type has no puller, that lacks a key in the puller's `required_config`, or whose `start_after` does not parse. There is no `isinstance` discovery.
+5. **Registries: `CONNECTORS` and `PULLERS`, built from tuples of instances, as above.** A test asserts `set(SourceType) == CONNECTORS.keys()`, that no two connectors claim one type, that `PULLERS.keys() <= CONNECTORS.keys()`, and that every type has at least one fixture. `check_source` rejects a pull-mode Source whose type has no puller, any Source that lacks a key in its connector's `required_config` (plus the puller's `pull_config` in pull mode), and config values that do not parse (`start_after`, `window_days`, `base_url`). There is no `isinstance` discovery.
 
 6. **Input models: every connector validates first.** `transform` starts with `PlaystoreReviewIn.model_validate(payload)` (or `DiscoursePostIn`, `TweetIn`, `IntercomEventIn`), then maps plain typed fields. Input models use `extra="ignore"`. Why: under `mypy --strict`, `payload["review"]["text"]` is `Any`, so it passes the type check without checking anything. A `ValidationError` is a permanent failure. The worker catches `ValidationError` next to `TransformError` and marks the event dead. That is one `except` clause in the worker, not one per connector, and it also catches a bad `FeedbackRecord` or metadata model.
 

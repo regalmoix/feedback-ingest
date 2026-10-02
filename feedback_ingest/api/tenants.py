@@ -4,7 +4,7 @@ from http import HTTPStatus
 from typing import Annotated
 from uuid import uuid4
 
-from fastapi import APIRouter, Header
+from fastapi import APIRouter, Header, HTTPException
 
 from feedback_ingest.api.deps import Ctx
 from feedback_ingest.api.schemas import TenantCreate, TenantCreated
@@ -28,5 +28,8 @@ def create_tenant(
         raise UnauthorizedError(msg)
     api_key = secrets.token_urlsafe(32)
     tenant = Tenant(id=uuid4().hex, name=body.name, api_key_hash=sha256_text(api_key))
-    ctx.adapters.tenants.add(tenant)
+    try:
+        ctx.adapters.tenants.add(tenant)
+    except ValueError as exc:
+        raise HTTPException(HTTPStatus.CONFLICT, detail=f"tenant {body.name!r} exists") from exc
     return TenantCreated(id=tenant.id, name=tenant.name, api_key=api_key)

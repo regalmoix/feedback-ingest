@@ -29,6 +29,8 @@ class SchedulerService:
         self._stop.set()
         if self._thread is not None:
             self._thread.join(timeout=_JOIN_SECONDS)
+            if self._thread.is_alive():
+                log.warning("scheduler still syncing on stop; it resumes from the saved cursor")
 
     @property
     def alive(self) -> bool:

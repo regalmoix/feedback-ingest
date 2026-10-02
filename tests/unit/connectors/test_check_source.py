@@ -12,13 +12,43 @@ def test_pull_needs_a_puller(source_type: SourceType) -> None:
         check_source(source(source_type, SourceMode.PULL))
 
 
-@pytest.mark.parametrize("key", PULLERS[SourceType.DISCOURSE].required_config)
-def test_pull_needs_every_required_config_key(key: str) -> None:
-    pull = source(SourceType.DISCOURSE, SourceMode.PULL)
-    check_source(pull)
-    missing = {k: v for k, v in pull.config.items() if k != key}
+DISCOURSE = PULLERS[SourceType.DISCOURSE]
+
+
+@pytest.mark.parametrize(
+    ("mode", "key"),
+    [(SourceMode.PULL, k) for k in DISCOURSE.required_config + DISCOURSE.pull_config]
+    + [(SourceMode.PUSH, k) for k in DISCOURSE.required_config],
+)
+def test_every_required_config_key_is_checked(mode: SourceMode, key: str) -> None:
+    configured = source(SourceType.DISCOURSE, mode)
+    check_source(configured)
+    missing = {k: v for k, v in configured.config.items() if k != key}
     with pytest.raises(ValueError, match=key):
-        check_source(pull.model_copy(update={"config": missing}))
+        check_source(configured.model_copy(update={"config": missing}))
+
+
+def test_push_does_not_need_pull_only_keys() -> None:
+    push = source(SourceType.DISCOURSE)
+    check_source(push.model_copy(update={"config": {"base_url": "https://forum.example.test"}}))
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("window_days", "0"),
+        ("window_days", "-3"),
+        ("window_days", "a week"),
+        ("base_url", "forum.example.test"),
+        ("base_url", "ftp://forum.example.test"),
+        ("base_url", "https://user:pw@forum.example.test"),
+        ("start_after", "soon"),
+    ],
+)
+def test_bad_config_values_are_rejected(key: str, value: str) -> None:
+    pull = source(SourceType.DISCOURSE, SourceMode.PULL)
+    with pytest.raises(ValueError, match=key):
+        check_source(pull.model_copy(update={"config": {**pull.config, key: value}}))
 
 
 @pytest.mark.parametrize("secret", [None, ""])

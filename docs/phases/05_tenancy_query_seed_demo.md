@@ -1,6 +1,6 @@
 # Phase 5 — Tenancy, sources and records API, seed, demo
 
-Status: designed 2026-10-03. Depends on Phases 3–4.
+Status: implemented 2026-10-03 (commits 301a023 / a5f708f, merged), review fixes applied. Depends on Phases 3–4.
 
 ## What this phase builds, in one paragraph
 
@@ -81,6 +81,21 @@ scripts/{seed.py,seed_lib.py,sign.py,demo.sh}
 tests/api/{test_sources_api,test_records_api,test_tenants_api}.py
 tests/e2e/{test_multi_source_same_type,test_demo_smoke}.py  tests/unit/connectors/test_check_source.py
 ```
+
+## Deviations recorded
+- `FeedbackStore.get(record_id, tenant_id)` was added to the port for `GET /v1/records/{id}`.
+- No `FeedbackRecordView`: the API returns `FeedbackRecord` itself.
+- `SqlFeedbackStore` lives in `adapters/sqlalchemy/feedback_store.py`.
+- `scripts/` is a package (`scripts/__init__.py`) so tests can import `scripts.seed_lib`.
+- `demo.sh` runs uvicorn with `.venv/bin/python` directly so `kill -9` hits the server, not `uv`.
+- `config["window_days"]` (4) bounds the seeded Discourse window instead of `config["until"]`.
+- Review fixes: disabled sources refuse pushes and syncs (409); `check_source` checks a connector's
+  `required_config` in both modes (Discourse `base_url`) and `pull_config` in pull mode (`start_after`),
+  plus `window_days` and an http(s) `base_url` without credentials; unknown `/v1/records` query
+  parameters are 422; tenant names are unique (409) and non-empty (422); startup warns when the bootstrap
+  token is empty and refuses a database whose tables miss a column; `seed.py` writes `.seed.json` after
+  each tenant and fails with the server's detail; `demo.sh` fails fast on any HTTP error, a dead server,
+  an undrained queue or a sync error.
 
 ## How to explain this phase in the interview
 "A tenant creates sources with their own API key; a source is one configured instance, so two Playstore apps are

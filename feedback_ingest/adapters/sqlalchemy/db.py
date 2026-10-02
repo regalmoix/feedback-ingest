@@ -1,7 +1,10 @@
 from sqlite3 import Connection as SqliteConnection
 
-from sqlalchemy import Connection, Engine, create_engine, event
+from sqlalchemy import Connection, Engine, create_engine, event, inspect
 from sqlalchemy.pool import ConnectionPoolEntry
+from sqlalchemy.schema import CreateColumn
+
+from feedback_ingest.adapters.sqlalchemy.tables import Base
 
 
 def make_engine(database_url: str) -> Engine:
@@ -22,3 +25,18 @@ def make_engine(database_url: str) -> Engine:
             conn.exec_driver_sql("BEGIN" if read_only else "BEGIN IMMEDIATE")
 
     return engine
+
+
+# ponytail: create_all never alters an existing table; fail fast here until there are migrations
+def assert_schema_matches(engine: Engine) -> None:
+    inspector = inspect(engine)
+    for table in Base.metadata.sorted_tables:
+        present = {column["name"] for column in inspector.get_columns(table.name)}
+        for column in table.columns:
+            if column.name not in present:
+                ddl = CreateColumn(column).compile(dialect=engine.dialect)
+                msg = (
+                    f"schema out of date: {table.name}.{column.name} missing; delete the db file "
+                    f"or run ALTER TABLE {table.name} ADD COLUMN {ddl}"
+                )
+                raise RuntimeError(msg)

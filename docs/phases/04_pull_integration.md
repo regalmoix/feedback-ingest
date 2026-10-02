@@ -1,6 +1,6 @@
 # Phase 4 — Pull integration (Discourse)
 
-Status: designed 2026-10-03. Depends on Phases 2–3 and ADR-003.
+Status: implemented 2026-10-03 (commits 301a023 / a5f708f, merged), review fixes applied. Depends on Phases 2–3 and ADR-003.
 
 ## What this phase builds, in one paragraph
 
@@ -82,6 +82,20 @@ tests/unit/services/{test_pull,test_scheduler}.py  tests/api/test_sync_api.py
 tests/e2e/test_pull_to_query.py  tests/live/test_discourse_live.py
 tests/fixtures/discourse/{search_page1,search_page2,posts_topic_*.json}
 ```
+
+## Deviations recorded
+- `ConfigError` lives in `services/pull.py`, not in `domain/errors.py`.
+- `PullResult` carries `source_id`, so `sync_all` results can be told apart.
+- The `MockTransport` helpers (`discourse_http`, `add_pull_source`) live in `tests/e2e/conftest.py`.
+- Pull fixtures are under `tests/fixtures/discourse/pull/`.
+- The scheduler waits one interval before its first tick.
+- The sync endpoint is in `api/sync.py`, not `api/sources.py`.
+- Review fixes: the sync endpoint answers 409 unless the source is an enabled pull source (was 404 for
+  push-only); `sync_all` turns a `ConfigError` into that source's `PullResult.error`; a generic failure
+  returns `"<ExceptionType> (see logs)"`; the cursor never moves backwards (connector and service both
+  take the max); a window that needs more than 20 search pages raises instead of stalling silently; the
+  live window is bounded by `config["window_days"]`, not `config["until"]`; `/health` is degraded when an
+  enabled scheduler thread is dead.
 
 ## How to explain this phase in the interview
 "Polling is just another producer. The connector returns pages; each page's payloads go through the exact same
