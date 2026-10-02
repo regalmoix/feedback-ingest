@@ -112,9 +112,10 @@ has no usable id gets `payload_hash` as its `external_event_id`, so an identical
 it into a record later. If we cannot save it we return 503, so the sender retries and nothing we accepted is
 lost.
 
-**Go deeper:** A duplicate delivery also gets 202, with `"duplicate": true` and `raw_event_id: null`, so the
-sender stops retrying. Everything that fails at the door is never stored: a bad API key or bad signature is
-401, a foreign source is 404, a disabled source is 409, a body that is not a JSON object is 400. Processing
+**Go deeper:** A duplicate delivery also gets 202, with `"duplicate": true` and the `raw_event_id` of the row
+already stored, so the sender stops retrying. Everything that fails at the door is never stored: an unknown
+source is 404, a disabled source or one without a webhook secret is 409, a bad signature is 401, a body that
+is not a JSON object is 400. Processing
 inside the request would make the sender wait on our transform and lose the event if we crash.
 
 **Point at:** `feedback_ingest/api/ingest.py`, `feedback_ingest/services/ingestion.py` (`AcceptResult`),
@@ -159,7 +160,7 @@ accept that work can run twice and make running twice give the same result, thro
 row. The record id itself is deterministic (a `uuid5` of source and external id), so even the id does not
 change. "Effectively once" is the honest name for this.
 
-**Point at:** `feedback_ingest/connectors/base.py` (`record_id`), `feedback_ingest/adapters/sqlalchemy/raw_event_queue.py`
+**Point at:** `feedback_ingest/connectors/base.py` (`new_record`), `feedback_ingest/adapters/sqlalchemy/raw_event_queue.py`
 (`enqueue`), `feedback_ingest/adapters/sqlalchemy/feedback_store.py` (`upsert`).
 
 ---
@@ -272,7 +273,8 @@ fetch the same pages; that wastes calls but the unique key drops the repeats. On
 saved. The cursor does not move, so the next tick starts from the same bookmark and the repeats are dropped.
 
 **Go deeper:** 408, 429, 5xx, network errors and the 10-second timeout are all transient; other 4xx are
-permanent. The sync result shows `"error": "TransientError: 429 from ..."`. The Discourse cursor only moves on
+permanent. The manual sync answers 502 with `"error": "429 from …/search.json"` in the result, and `/health` lists the
+source in `failing_sources` after a failed scheduled tick. The Discourse cursor only moves on
 the final page of a run, because search results are not guaranteed oldest first. Gaps to admit: we do not read
 `Retry-After`, and the scheduler does not back off per source; it just tries again every 300 seconds.
 
@@ -281,13 +283,14 @@ the final page of a run, because search results are not guaranteed oldest first.
 
 ### Q19. The pull cursor is stuck. Why?
 
-**Say:** Four causes: a repeated error like a 429, a window too busy to reach its last page within 20 pages, a
-bad cursor or config, or the scheduler is not running or the source is disabled. A manual sync shows which one,
-because its result carries the error.
+**Say:** Four causes: a repeated error like a 429, a window too busy to reach its last page within 10 pages, a
+bad config, or the scheduler is not running or the source is disabled. `/health` lists the source under
+`failing_sources` when its last scheduled sync failed, and a manual sync shows the reason: it answers 502 with
+the error in the result.
 
-**Go deeper:** A window that needs more than 20 search pages raises after page 20 with the cursor unchanged, so
-the result shows `pages: 20` and `"error": "TransformError (see logs)"`; the fix is a smaller `window_days`. An
-unparseable cursor is also a `TransformError`. A dead scheduler shows `scheduler_alive: false` and health 503.
+**Go deeper:** A window that needs more than 10 search pages (Discourse refuses page 11) stops after page 10
+with the cursor unchanged, so the result shows `pages: 10` and an `error` that says `window exceeds 10 pages`;
+the fix is a smaller `window_days`. A dead scheduler shows `scheduler_alive: false` and health 503.
 Moving the cursor back by hand is always safe because repeats are dropped; moving it forward skips posts. The
 step-by-step is Runbook 2 in [firefight_runbook.md](firefight_runbook.md).
 
@@ -375,8 +378,9 @@ header. We check it on the raw bytes, with a constant-time compare, before we pa
 signature is 401 and is never written.
 
 **Go deeper:** HMAC is a short code made from the body and a shared secret; only someone with the secret can
-make it. Order of checks: API key gives the tenant (401), the source must belong to that tenant (404), the
-source must be enabled (409), then the signature (401), then "is it a JSON object" (400). An empty secret never
+make it. There is no API key on this route, because a real sender cannot add ours. Order of checks: the
+source by its unguessable id (404), the source must be enabled and have a webhook secret (409), then the
+signature (401), then "is it a JSON object" (400). The tenant comes from the source row. An empty secret never
 verifies. Gap: the default scheme has no timestamp, so a captured request could be sent again; the duplicate
 key makes that harmless, and real schemes like Zendesk's sign a timestamp too.
 

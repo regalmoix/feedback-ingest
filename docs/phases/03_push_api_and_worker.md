@@ -146,11 +146,18 @@ tests/e2e/{conftest,test_push_to_query,test_restart_resume,test_dlq_replay}.py
 ## Deviations recorded
 - `httpx2` is a dev dependency: Starlette's `TestClient` needs it.
 - `tests/api` and `tests/e2e` are packages (`__init__.py`) so mypy accepts more than one `conftest.py`.
-- `AcceptResult.raw_event_id` is `None` on a duplicate: the queue port cannot look up the stored id.
+- `AcceptResult.raw_event_id` is always the stored row's id: `enqueue` returns it, the existing one on a
+  duplicate (Phase 6; it was `None` on a duplicate before).
 - `Adapters` and `AppState` live in `api/deps.py`, not `main.py`.
 - Services are plain dataclasses.
-- Pull-mode sources are accepted on the webhook too, per ADR-003 as amended (signature still required, so a
-  pull source without a secret answers 401).
+- Pull-mode sources are accepted on the webhook too, per ADR-003 as amended; a source without a webhook
+  secret answers 409 "source has no webhook secret" (Phase 6; was 401).
+- Phase 6: the webhook takes no `X-API-Key`. `SourceStore.get_by_id` finds the source (404), the per-source
+  signature proves the caller (401), and the tenant comes from the source row (ADR-003 ruling 8 as amended).
+- Phase 6: replay also revives a `processing` row whose lease has expired; 409 only while a lease is live.
+- Phase 6: the attempt-cap error keeps the last error (`attempt limit exceeded; last error: …`); the
+  processed log line reports upsert outcomes (`inserted=…, updated=…, skipped_older=…`); a worker batch in
+  which every event crashed does not refresh the health timestamp; `start()` can follow `stop()`.
 - `ReplayResponse` dropped: replay returns `{"status": "pending"}` as a plain dict.
 
 ## Deferred trims (done in Phase 6)

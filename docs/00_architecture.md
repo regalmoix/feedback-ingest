@@ -19,8 +19,8 @@ data, and anything that fails to process is parked in a dead list where it can b
 ```
                 push (webhook)                                         pull (poll)
  Source ──► POST /v1/sources/{id}/events             SchedulerService tick  or  POST /v1/sources/{id}/sync
-            X-API-Key → tenant                                      │
-            source must belong to tenant                            ▼
+            source by id (unguessable), no API key                   │
+            tenant comes from the source row                        ▼
             X-Signature HMAC-SHA256 over raw body    PullService.sync ──► PULLERS[type].pull ──► Discourse
                     │                                               │      (HttpxClient)        search.json
                     │                                               │                           t/{id}/posts.json
@@ -126,7 +126,7 @@ sequenceDiagram
   autonumber
   participant S as Source webhook
   participant R as api/ingest.py
-  participant D as api/deps.py
+  participant D as SourceStore
   participant C as CONNECTORS by type
   participant I as IngestionService
   participant Q as raw_events
@@ -134,19 +134,22 @@ sequenceDiagram
   participant P as PipelineService
   participant F as FeedbackStore
 
-  S->>R: POST /v1/sources/{id}/events with X-API-Key and X-Signature
-  R->>D: current_tenant by sha256 of the key, then tenant_source
-  alt unknown key or another tenant's source
-    R-->>S: 401 or 404
+  S->>R: POST /v1/sources/{id}/events with X-Signature, no API key
+  R->>D: SourceStore.get_by_id(source_id)
+  alt unknown source
+    R-->>S: 404
+  end
+  alt disabled source, or a source without a webhook secret
+    R-->>S: 409
   end
   R->>C: verify_signature over the raw body with the source secret
-  alt disabled source, bad signature, body not a JSON object
-    R-->>S: 409, 401 or 400
+  alt bad signature, body not a JSON object
+    R-->>S: 401 or 400
   end
   R->>I: accept(source, payload) in a threadpool
   I->>C: external_event_id(payload)
   I->>Q: enqueue as pending
-  Q-->>I: inserted, or duplicate by UNIQUE source_id and external_event_id
+  Q-->>I: the stored row id: new, or the existing one on a duplicate
   I-->>R: AcceptResult
   R-->>S: 202 with raw_event_id and duplicate flag
   Note over R,Q: a storage error maps to 503 and the source retries
@@ -174,7 +177,7 @@ sequenceDiagram
 
   T->>PS: sync(source), or sync_all every FI_PULL_INTERVAL_SECONDS
   PS->>PC: pull(source, http, now)
-  loop each search page, at most 20 per window
+  loop each search page, at most 10 per window (Discourse rejects page 11)
     PC->>H: get_json search.json with q after and before, page n
     H->>X: GET
     PC->>H: get_json t/{topic_id}/posts.json, 20 post ids per call
@@ -186,8 +189,9 @@ sequenceDiagram
     PS->>SS: update_cursor to the max of stored and page cursor
   end
   Note over PC,SS: the cursor moves only on the final page, to the newest post minus a 60 s overlap
-  Note over PS,SS: TransientError such as 429 or 5xx stops the run and the cursor stays put
+  Note over PS,SS: a TransientError or TransformError stops the run, the cursor stays put and the message lands in PullResult.error (POST sync answers 502); any other error propagates (503 from the endpoint, logged by the scheduler tick)
   PS-->>T: PullResult with pages, accepted, duplicates, cursor, error
+  Note over T: the scheduler keeps the latest tick's errors per source; /health is degraded and lists failing_sources
   Note over I: from here the worker path is identical to push
 ```
 
@@ -196,8 +200,9 @@ sequenceDiagram
 Every row in `raw_events` moves through these states. `failed` and `pending` are both claimable once
 `next_attempt_at` is due; a `processing` row whose lease expired (worker crashed) is claimable again.
 Each claim adds one to `attempts`, and a row past `FI_MAX_ATTEMPTS` goes dead without being transformed,
-so a payload that crashes the worker every time cannot loop forever. Replay works on any row that is not
-`processing`.
+so a payload that crashes the worker every time cannot loop forever. Replay works on any row except a
+`processing` one whose lease is still live; a `processing` row with an expired lease (crashed worker) can be
+replayed.
 
 ```mermaid
 stateDiagram-v2
@@ -211,6 +216,7 @@ stateDiagram-v2
   dead --> pending : replay, attempts reset to 0
   failed --> pending : replay
   processed --> pending : replay
+  processing --> pending : replay after the lease expired
 ```
 
 Writes after a claim are fenced: `mark_*` only succeeds while `status`, `attempts` and `lease_until` still
@@ -230,13 +236,16 @@ flowchart LR
 ```
 
 - The plain API key is shown once by `POST /admin/tenants`; only its hash is stored.
-- Every router resolves the tenant first (`api/deps.py`). A source id that belongs to another tenant is a 404,
-  not a 403, so ids do not leak. Store and queue reads take `tenant_id`.
+- Every route checks the tenant; record and source reads take `tenant_id`. The one exception is the push
+  webhook, which a third-party sender calls without our API key: it looks the source up by its unguessable id
+  and trusts the call only after that source's own signature checks out, and the raw event takes its tenant
+  from the source row. A source id that belongs to another tenant is a 404, not a 403, so ids do not leak.
 - `raw_events` and `feedback_records` carry a composite foreign key `(source_id, tenant_id)` to `sources`, so
   a row cannot claim a tenant its source does not belong to.
 - Keys are per source, not per type, so two Playstore apps for one tenant give two records for the same
   review id.
-- `/health` is the only unauthenticated route and shows global queue counts, no tenant data.
+- `/health` and the push webhook are the unauthenticated routes. `/health` shows global queue counts and
+  the ids of pull sources whose latest scheduled sync failed, no tenant data.
 
 ## Domain model
 
@@ -265,19 +274,19 @@ Every `__init__.py` under `feedback_ingest/` is an empty package marker.
 | `api/deps.py` | `Adapters` and `AppState` containers; `current_tenant` (API key) and `tenant_source` dependencies |
 | `api/errors.py` | Maps `NotFoundError` to 404, `UnauthorizedError` to 401, storage errors to 503 |
 | `api/schemas.py` | Request and response models for the HTTP API |
-| `api/ingest.py` | Push webhook: disabled check, signature check, JSON check, `IngestionService.accept`, 202 |
-| `api/sync.py` | Manual pull trigger for one pull source |
+| `api/ingest.py` | Push webhook: source by id, disabled and no-secret checks (409), signature check, JSON check, `IngestionService.accept`, 202 |
+| `api/sync.py` | Manual pull trigger for one pull source; 502 with the `PullResult` when the source failed |
 | `api/sources.py` | Create, list, get and enable/disable sources; generates and masks webhook secrets |
 | `api/records.py` | Tenant-scoped record query and single-record read |
 | `api/admin.py` | Raw-event list (newest first), detail, replay, and queue counts per tenant |
 | `api/tenants.py` | Tenant bootstrap behind `X-Bootstrap-Token`; returns the API key once |
-| `api/health.py` | Worker and scheduler liveness plus queue counts; 503 when degraded |
+| `api/health.py` | Worker and scheduler liveness, failing pull sources, queue counts; 503 when degraded |
 | `domain/enums.py` | `SourceType`, `SourceMode`, `FeedbackKind`, `EventStatus`, `UpsertOutcome` |
 | `domain/models.py` | `Tenant`, `Source`, `RawEvent`, `FeedbackRecord`, naive-UTC datetimes, kind per source |
 | `domain/metadata.py` | Per-source metadata models, discriminated by `source_type` |
 | `domain/errors.py` | `TransformError`, `TransientError`, `NotFoundError`, `UnauthorizedError`, `check_limit` |
 | `ports/stores.py` | `TenantStore`, `SourceStore`, `FeedbackStore` Protocols |
-| `ports/queue.py` | `RawEventQueue` Protocol: enqueue, claim with lease, fenced marks, requeue, list, counts |
+| `ports/queue.py` | `RawEventQueue` Protocol: enqueue (returns the stored id), claim with lease, fenced marks, requeue, list, counts |
 | `ports/http.py` | `HttpClient` Protocol: `get_json` |
 | `ports/clock.py` | `Clock` Protocol: `now` |
 | `adapters/sqlalchemy/db.py` | Engine factory (SQLite WAL, busy timeout, foreign keys, `BEGIN IMMEDIATE`) and startup schema check |
@@ -301,7 +310,7 @@ Every `__init__.py` under `feedback_ingest/` is an empty package marker.
 | `services/pipeline.py` | `PipelineService.process`: transform, upsert, then processed, failed with backoff, or dead |
 | `services/worker.py` | `WorkerService`: background thread that claims batches and calls the pipeline |
 | `services/pull.py` | `PullService.sync` and `sync_all`: run a puller, accept each payload, advance the cursor |
-| `services/scheduler.py` | `SchedulerService`: background thread that calls `sync_all` every interval |
+| `services/scheduler.py` | `SchedulerService`: background thread that calls `sync_all` every interval and keeps the latest errors per source |
 | `utils/hashing.py` | `sha256_text` (API keys) and `payload_hash` (fallback event id) |
 | `utils/signing.py` | HMAC-SHA256 `sign` and constant-time `verify` |
 | `utils/time.py` | `to_naive_utc` and `SystemClock` |

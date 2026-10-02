@@ -67,19 +67,19 @@ All read from the environment by `feedback_ingest/config.py` (prefix `FI_`).
 
 | Route | Auth | Purpose |
 |---|---|---|
-| `GET /health` | none | Worker and scheduler liveness, queue counts; 503 when degraded |
+| `GET /health` | none | Worker and scheduler liveness, `failing_sources`, queue counts; 503 when degraded |
 | `POST /admin/tenants` | `X-Bootstrap-Token` | Create a tenant; returns its API key once |
 | `POST /v1/sources` | `X-API-Key` | Create a source; a push source gets a webhook secret, shown once |
 | `GET /v1/sources` | `X-API-Key` | List the tenant's sources, secrets masked |
 | `GET /v1/sources/{id}` | `X-API-Key` | One source |
 | `PATCH /v1/sources/{id}` | `X-API-Key` | Enable or disable a source |
-| `POST /v1/sources/{id}/events` | `X-API-Key` + `X-Signature` | Push webhook: HMAC-SHA256 of the body, 202 with `raw_event_id` and `duplicate` |
-| `POST /v1/sources/{id}/sync` | `X-API-Key` | Pull now; returns pages, accepted, duplicates, cursor, error |
+| `POST /v1/sources/{id}/events` | `X-Signature` only | Push webhook: the source id picks the source, HMAC-SHA256 of the body proves the sender; 202 with `raw_event_id` (the stored row, also on a duplicate) and `duplicate`; 409 if the source is disabled or has no webhook secret |
+| `POST /v1/sources/{id}/sync` | `X-API-Key` | Pull now; returns pages, accepted, duplicates, cursor, error; 502 when `error` is set |
 | `GET /v1/records` | `X-API-Key` | Query records: `source_id`, `kind`, `since`, `limit`, `include_deleted` |
 | `GET /v1/records/{id}` | `X-API-Key` | One record |
 | `GET /admin/raw-events` | `X-API-Key` | Raw events by `status` (default `dead`), newest first, `limit` |
 | `GET /admin/raw-events/{id}` | `X-API-Key` | One raw event with its payload and error |
-| `POST /admin/raw-events/{id}/replay` | `X-API-Key` | Back to `pending` with attempts reset; 409 while processing |
+| `POST /admin/raw-events/{id}/replay` | `X-API-Key` | Back to `pending` with attempts reset; 409 while a worker holds a live lease |
 | `GET /admin/queue` | `X-API-Key` | The tenant's raw-event counts per status |
 
 A source or event id that belongs to another tenant answers 404.

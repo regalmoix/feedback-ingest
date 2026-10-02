@@ -34,7 +34,8 @@ Say this before you press enter.
 > timer. Many customers, called tenants, share the service, and each one only ever sees its own data.
 >
 > The design fits in one sentence: we save the raw payload to disk before we say yes, and everything after that
-> is a retry or a replay. A webhook checks the API key, the source and the signature, writes one row to a
+> is a retry or a replay. A webhook finds its source by id and checks that source's signature (no API key: a real sender cannot add
+> ours), writes one row to a
 > `raw_events` table, and answers 202. A background worker takes rows from that table, asks the right connector
 > to turn each one into a standard feedback record, and saves it keyed on source plus the source's own id. So
 > duplicates collapse to one row, bad payloads go to a dead list, and anything can be replayed.
@@ -91,7 +92,7 @@ fixtures stand in for that poller, and the transform is the same either way (ADR
 
 **Command:** (the script's `push` helper signs the file with `scripts/sign.py`, then runs)
 ```
-curl -sS --fail-with-body -X POST "$BASE/v1/sources/$1/events" -H "X-API-Key: $ACME_KEY" \
+curl -sS --fail-with-body -X POST "$BASE/v1/sources/$1/events" \
   -H "X-Signature: $sig" --data-binary "@$3"
 ```
 with `$1 = $ANDROID`, `$3 = tests/fixtures/playstore/review.json`, run twice.
@@ -99,11 +100,13 @@ with `$1 = $ANDROID`, `$3 = tests/fixtures/playstore/review.json`, run twice.
 **They see:**
 ```
 {"raw_event_id":"<32 hex chars>","duplicate":false}
-{"raw_event_id":null,"duplicate":true}
+{"raw_event_id":"<the same 32 hex chars>","duplicate":true}
 ```
 
 **Say:** "202 means saved, not processed yet. The second copy has the same event id, the review id plus its
-last-modified time, so it is dropped, and we still answer 202 so the sender stops retrying."
+last-modified time, so it is dropped, and we still answer 202, with the id of the row already stored, so the
+sender stops retrying. Notice there is no API key on this call: the source id picks the source, and only that
+source's signature gets in."
 
 **Follow-up:** "What if the signature is wrong?"
 **Answer:** 401 and nothing is stored; the HMAC is checked on the raw bytes before we parse or write
@@ -113,7 +116,7 @@ last-modified time, so it is dropped, and we still answer 202 so the sender stop
 
 **Command:**
 ```
-curl -sS --fail-with-body -X POST "$BASE/v1/sources/$IOS/events" -H "X-API-Key: $ACME_KEY" \
+curl -sS --fail-with-body -X POST "$BASE/v1/sources/$IOS/events" \
   -H "X-Signature: $sig" --data-binary "@tests/fixtures/playstore/review.json"
 ```
 then the script waits until the queue is idle.
@@ -155,7 +158,7 @@ API key."
 
 **Command:**
 ```
-curl -sS --fail-with-body -X POST "$BASE/v1/sources/$ANDROID/events" -H "X-API-Key: $ACME_KEY" \
+curl -sS --fail-with-body -X POST "$BASE/v1/sources/$ANDROID/events" \
   -H "X-Signature: $sig" --data-binary "@tests/fixtures/playstore/malformed.json"
 curl -sS --fail-with-body "$BASE/admin/raw-events?status=dead" -H "X-API-Key: $ACME_KEY" |
   jq -c '[.[] | {id, status, attempts, next_attempt_at}]'
@@ -196,7 +199,8 @@ are on disk. The seed fixes the window to four days in January 2021, so the demo
 
 **Follow-up:** "What if Discourse rate-limits us halfway?"
 **Answer:** The 429 becomes a transient error, the pull stops, saved pages stay saved, and the cursor has not
-moved, so the next run starts from the same place and repeats are dropped (`feedback_ingest/services/pull.py`).
+moved, so the next run starts from the same place and repeats are dropped; the sync answers 502 with the error,
+and `/health` lists the source in `failing_sources` (`feedback_ingest/services/pull.py`).
 
 ## Step 8. 20 pushes queued, kill -9, restart
 

@@ -88,7 +88,7 @@ Match what you found to one row.
 |---|---|
 | **A.** Dead events, and the cause is fixed now (the database is back, or a bug was patched). | Replay them. See step 6. |
 | **B.** Dead events with a shape or validation error. | Fix the input model in `feedback_ingest/connectors/playstore.py`. Add the new payload as a fixture next to `tests/fixtures/playstore/review.json`. Bump `version` in the connector. Run `uv run pytest`. Restart the server. Then replay (step 6). |
-| **C.** Nothing arrived: `processed` did not grow, and nothing is dead. | Read the server's access log for this source's URL. `401`: wrong API key or wrong signature (check E). `404`: wrong source id in the sender's URL, or another tenant's id. `409`: the source is disabled (check D). `400`: the body is not a JSON object. `503`: our database was down, and the sender should retry. Our own app logs do not record 401s, so the access log is the place to look. |
+| **C.** Nothing arrived: `processed` did not grow, and nothing is dead. | Read the server's access log for this source's URL. `401`: wrong signature (check E); the webhook takes no API key. `404`: wrong source id in the sender's URL. `409`: the source is disabled (check D), or has no webhook secret. `400`: the body is not a JSON object. `503`: our database was down, and the sender should retry. Our own app logs do not record 401s, so the access log is the place to look. |
 | **D.** Is the source there, and is it the one the client thinks? | Run the source check below. A disabled source refuses webhooks with 409 `source is disabled`, so `enabled: false` **does** explain missing Playstore reviews: everything sent while it was off was refused, not stored. Turn it back on (the `PATCH` command in Runbook 2, step 2) and ask the client to re-send that period. Repeats are safe. |
 | **E.** The client says "we are sending" but you see 401s. | Run the signature probe below. It tells you whether the secret the client uses matches ours, and it stores nothing. |
 | **F.** It is a pull source, not Playstore. | Run a manual sync (P4), then see Runbook 2. For a push source like Playstore, sync answers 409 "is not an enabled pull source". |
@@ -114,7 +114,7 @@ printf '[]' > probe.json && SIG=$(.venv/bin/python scripts/sign.py '<client secr
 ```
 
 ```
-curl -s -w '\nHTTP %{http_code}\n' -X POST "http://127.0.0.1:8000/v1/sources/$SOURCE_ID/events" -H "X-API-Key: $API_KEY" -H "X-Signature: $SIG" --data-binary @probe.json
+curl -s -w '\nHTTP %{http_code}\n' -X POST "http://127.0.0.1:8000/v1/sources/$SOURCE_ID/events" -H "X-Signature: $SIG" --data-binary @probe.json
 ```
 
 Good: `HTTP 400` with `body must be a JSON object`, so the secret matches. Bad: `HTTP 401` with `bad or missing signature`, so the client's secret is not ours. There is no rotation endpoint today, so either the client goes back to the secret it got when the source was created, or an operator updates `sources.webhook_secret` by hand.
@@ -127,7 +127,7 @@ One event:
 curl -s -X POST "http://127.0.0.1:8000/admin/raw-events/$EVENT_ID/replay" -H "X-API-Key: $API_KEY"
 ```
 
-Good: `{"status": "pending"}`. The worker picks it up within about a second. Bad: `409` means the event is being processed right now, so wait and try again. `404` means a wrong id.
+Good: `{"status": "pending"}`. The worker picks it up within about a second. Bad: `409` means a worker holds a live lease on it right now, so wait and try again (once the lease expires, replay works even if the worker died). `404` means a wrong id.
 
 Every dead event for this source:
 
@@ -182,8 +182,8 @@ Write this within one working day. Keep it blameless: describe what happened, no
 
 Discourse is a **pull** source. The scheduler (P4) runs every pull source once every 300 seconds (`FI_PULL_INTERVAL_SECONDS`). Each run reads the source's **cursor**, searches one window of `window_days` days (default 7) starting there, and saves the cursor again **only when the run reaches its final page**. Four things can stop it moving:
 - a **429** or other error part-way through,
-- the **20-page cap**: a window holding more than about 1000 posts never reaches its final page,
-- a **bad cursor or config**,
+- the **10-page cap**: a window holding more than about 500 posts never reaches its final page (Discourse refuses page 11, so we stop at 10),
+- a **bad config**,
 - the scheduler itself is not running, or the source is disabled.
 
 ### Step 1. Is the scheduler running?
@@ -217,18 +217,17 @@ curl -s -X PATCH "http://127.0.0.1:8000/v1/sources/$SOURCE_ID" -H "X-API-Key: $A
 curl -s -X POST "http://127.0.0.1:8000/v1/sources/$SOURCE_ID/sync" -H "X-API-Key: $API_KEY" | jq .
 ```
 
-The reply has `pages`, `accepted` (new), `duplicates`, `cursor` and `error`. Run it twice and compare the `cursor`. A flaky error shows its message in `error`, starting with `TransientError:`. Any other error shows only its class name plus `(see logs)`, like `TransformError (see logs)`, and the reason is in the `pull failed` log line (step 4).
+The reply has `pages`, `accepted` (new), `duplicates`, `cursor` and `error`. Run it twice and compare the `cursor`. When `error` is set the reply is HTTP 502, and `error` is the message itself, like `429 from https://…/search.json` (the response body is only in the WARNING log line, step 4). A storage failure is not in `error`: the sync answers 503 `storage unavailable`.
 
 | What you see | What it means | What to do |
 |---|---|---|
 | `error: null`, `cursor` moved forward | Healthy. It was only behind. | Run it a few more times, or wait for the scheduler. Each run moves at most `window_days`. |
 | `error: null`, `cursor` close to now, `accepted: 0` | Caught up, with no new posts. Some `duplicates` are normal, because of the 60-second overlap. | Nothing. Note that the pull searches by **creation** date, so an edit to an old post is not picked up. That is expected, not a stall. |
 | `error` has `429` or `5xx`, or a timeout | Discourse is rate-limiting us or is down. The pages before the error are saved, but the cursor did not move. | Wait. The scheduler retries every tick and does not back off. If it keeps happening, raise `FI_PULL_INTERVAL_SECONDS` and restart. Check that only **one** process is pulling: under `uvicorn --workers N`, every process runs its own scheduler. |
-| `error: "TransformError (see logs)"`, `pages: 20`, `cursor` unchanged, and the log says `window exceeds 20 pages` | The 20-page cap. The window holds more than about 1000 posts, so the run stops after page 20 without reaching its final page, and the cursor does not move. Every run re-reads the same pages, and they all come back as duplicates. | Make the window smaller (command below). |
-| `error: "TransformError (see logs)"`, `pages: 0`, and the log says `unparseable cursor` | The saved cursor is not a date. | Set the cursor by hand (command below). |
+| `error` says `window exceeds 10 pages`, `pages: 10`, `cursor` unchanged | The 10-page cap. The window holds more than about 500 posts, so the run stops after page 10 without reaching its final page, and the cursor does not move. Every run re-reads the same pages, and they all come back as duplicates. | Make the window smaller (command below). |
 | `error` has `omitted posts` | Discourse search listed a post that the topic call did not return, often a post deleted a moment ago. It retries, and usually clears when Discourse's search catches up. | Wait a few ticks. If it stays stuck on the same topic, escalate. Moving the cursor past it by hand skips those posts. |
-| `error: "TransformError (see logs)"`, and the log says `404 from` or another 4xx | The `base_url` is wrong, or the forum is private. | Fix `config.base_url` by hand in the database. Keep it a plain http(s) URL with no user name or password: source creation rejects those, but a hand edit skips that check. |
-| `error` is another class name plus `(see logs)`, like `OperationalError (see logs)` | Our database failed during the run. Pages before the error are saved. | Fix the database first (Runbook 1, step 1), then sync again. |
+| `error` has `404 from` or another 4xx | The `base_url` is wrong, or the forum is private. | Fix `config.base_url` by hand in the database. Keep it a plain http(s) URL with no user name or password: source creation rejects those, but a hand edit skips that check. |
+| HTTP `503` with `storage unavailable` | Our database failed during the run. Pages before the error are saved. | Fix the database first (Runbook 1, step 1), then sync again. |
 | HTTP `409` with `is not an enabled pull source` | This is a push source, or a disabled pull source. | Push source: use Runbook 1. Disabled: turn it on (step 2). |
 
 Shrink the window. The API cannot change config yet, so edit the database. The server reads sources fresh on every run, so no restart is needed:
@@ -246,16 +245,12 @@ sqlite3 feedback.db "UPDATE sources SET cursor = '2026-10-01T00:00:00' WHERE id 
 ### Step 4. Read the pull log lines for this source
 
 ```
-grep "source_id=$SOURCE_ID" server.log | grep -E "pulled|pull stopped|pull failed" | tail -20
+grep "source_id=$SOURCE_ID" server.log | grep -E "pulled|pull stopped" | tail -20
+grep -E " from https?://.*: " server.log | tail -5   # status plus the first 200 chars of the reply body
+grep -A 40 "scheduler tick failed" server.log | grep -E "^[A-Za-z_.]+(Error|Exception): " | tail -5
 ```
 
-Good: `pulled N pages: X new, Y duplicates` once per tick. Bad: `pull stopped, will resume next tick` (a flaky error, like a 429) or `pull failed` (anything else, with a traceback) on every tick.
-
-For `pull failed`, the reason is the last line of the traceback printed under it:
-
-```
-grep -A 40 "pull failed.*source_id=$SOURCE_ID" server.log | grep -E "^[A-Za-z_.]+(Error|Exception): " | tail -5
-```
+Good: `pulled N pages: X new, Y duplicates` once per tick. Bad: `pull stopped at the saved cursor: …` (a source error, like a 429 or the page cap) on every tick, or `scheduler tick failed` with a traceback (our own failure, such as the database; that tick stopped at that source).
 
 ### Step 5. Check that records arrive
 

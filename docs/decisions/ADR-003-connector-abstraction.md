@@ -98,15 +98,15 @@ A connector that uses the default signature delegates to it in two lines:
 ### The two registries (`feedback_ingest/connectors/registry.py`)
 
 ```python
-_DISCOURSE = DiscourseConnector()
-_ALL: tuple[SourceConnector, ...] = (_DISCOURSE, PlaystoreConnector(), TwitterConnector(), IntercomConnector())
-_PULL: tuple[PullConnector, ...] = (_DISCOURSE,)
-
-CONNECTORS: dict[SourceType, SourceConnector] = {c.source_type: c for c in _ALL}
-PULLERS: dict[SourceType, PullConnector] = {c.source_type: c for c in _PULL}
+_DISCOURSE: PullConnector = DiscourseConnector()
+CONNECTORS: dict[SourceType, SourceConnector] = {
+    c.source_type: c
+    for c in (_DISCOURSE, PlaystoreConnector(), TwitterConnector(), IntercomConnector())
+}
+PULLERS: dict[SourceType, PullConnector] = {SourceType.DISCOURSE: _DISCOURSE}
 ```
 
-Callers index the dicts directly (`CONNECTORS[source.type]`, `PULLERS[source.type]`); there is no `connector_for` or `puller_for` helper. The keys come from each connector's own `source_type`, so a key cannot drift from its value. mypy checks each object against the Protocol at the tuple annotation. A missing method or a missing `version` is a type error on that line.
+Callers index the dicts directly (`CONNECTORS[source.type]`, `PULLERS[source.type]`); there is no `connector_for` or `puller_for` helper. The keys come from each connector's own `source_type`, so a key cannot drift from its value. mypy checks each object against the Protocol at the dict annotation (and the puller at the `_DISCOURSE: PullConnector` annotation). A missing method or a missing `version` is a type error on that line.
 
 Configuration-time check, run when a Source is created (the API turns it into a 422):
 
@@ -154,14 +154,14 @@ A push source without a `webhook_secret` is rejected by the `Source` model itsel
 
 7. **What `transform` receives: the whole `Source`, with `webhook_secret: SecretStr | None`.** The risk is a log line or exception message that prints a Source and leaks the secret. A slimmer `SourceRef` model would protect only the transform. `SecretStr` prints `**********` everywhere: logs, `repr`, the API. It is a one-word type change and adds no model. The router calls `get_secret_value()` once, to verify. The SQL store must write `get_secret_value()` too, because `model_dump(mode="json")` would store the asterisks. A round-trip test covers that. A transform reads only `tenant_id`, `id` and `config`. It never reads `cursor`.
 
-8. **Webhook routing, end to end:**
-   1. `POST /v1/sources/{source_id}/events` arrives with `X-API-Key`.
-   2. We hash the key and call `TenantStore.get_by_api_key_hash`. No tenant gives 401.
-   3. `SourceStore.get(source_id, tenant.id)`. A source owned by another tenant looks exactly like a missing one: 404. A pull-mode source is accepted too: a pull connector also implements `transform`, so its webhooks go through the same path (it still needs a `webhook_secret`, or step 4 fails).
-   4. `CONNECTORS[source.type].verify_signature(secret, raw_body_bytes, headers)` runs on the raw bytes, before JSON parsing. A failure gives 401.
-   5. We parse the JSON, compute `external_event_id`, and call `RawEventQueue.enqueue`. New or duplicate, the reply is 202.
+8. **Webhook routing, end to end** (amended in Phase 6: a webhook authenticates like a real one, with no API key):
+   1. `POST /v1/sources/{source_id}/events` arrives with `X-Signature` and no `X-API-Key`. A real sender (Intercom, Zendesk) cannot add our header.
+   2. `SourceStore.get_by_id(source_id)`. An unknown id gives 404. The id is an unguessable uuid, so it picks the source but proves nothing by itself.
+   3. A disabled source gives 409. A source without a `webhook_secret` gives 409 "source has no webhook secret", before any signature check. A pull-mode source with a secret is accepted: a pull connector also implements `transform`, so its webhooks go through the same path.
+   4. `CONNECTORS[source.type].verify_signature(secret, raw_body_bytes, headers)` runs on the raw bytes, before JSON parsing. A failure gives 401. This is what proves the caller.
+   5. We parse the JSON, compute `external_event_id`, and call `RawEventQueue.enqueue`, which returns the stored row's id (the existing one on a duplicate). New or duplicate, the reply is 202 with that id.
    6. Later, the worker claims the row, loads the Source, calls `transform`, upserts each record, and marks the event processed. A `ValidationError` or `TransformError` marks it dead. A `TransientError` marks it failed and schedules a retry.
-   - Tenant isolation happens in step 3: the secret used in step 4 belongs to a source this tenant owns.
+   - Tenant isolation: the raw event's `tenant_id` comes from the source row, and only a caller holding that source's secret can write to it. Every other route still resolves the tenant from `X-API-Key`.
 
 9. **Known limit: `FeedbackKind` is where the design strains.** An NPS survey with a 0–10 score does not fit `review | conversation | post`. The answer: "a new kind is an enum value plus optional fields in metadata; the record is the extension point that costs most". Adding the enum value needs no migration, because `kind` is stored as text. The real cost comes when the new kind needs a field everyone queries, like an NPS score. That field becomes a new common column, which means a migration plus a replay. That cost is in the record, not in the connector.
 
@@ -209,7 +209,7 @@ Chairman additions, found while checking the rulings:
 - `external_event_id` runs on unvalidated input, so it must never raise (ruling 2).
 - A page cursor taken from newest-first results would skip unfetched pages after a crash (ruling 4).
 - The Discourse poller searches by creation date, so an edit to an old post is missed until a periodic re-scan. Ruling 2 is what makes that re-scan safe. Without it, every edit in the re-scan would be dropped.
-- Real third-party senders (Intercom, Zendesk) cannot add our `X-API-Key` header. Our replay script sends it. For a real sender, the unguessable `source_id` in the path plus that source's signature authenticate the call, and the tenant comes from the source row.
+- Real third-party senders (Intercom, Zendesk) cannot add our `X-API-Key` header. So the webhook does not ask for it (ruling 8 as amended): the unguessable `source_id` in the path plus that source's signature authenticate the call, and the tenant comes from the source row.
 
 ## Rejected alternatives and why
 
@@ -237,7 +237,7 @@ Adding Zendesk is one file plus one metadata model plus one registry entry plus 
 1. Add `SourceType.ZENDESK`. The completeness test fails right away.
 2. Add `ZendeskMetadata` (with `source_type: Literal["zendesk"]`) to `domain/metadata.py` and to the `SourceMetadata` union.
 3. Write `connectors/zendesk.py` with a `ZendeskTicketIn` input model, `required_config` (empty unless it pulls), `external_event_id` (`f"{ticket id}:{updated_at}"`), `transform`, and a `verify_signature` override for Zendesk's timestamp-plus-body scheme. Add `pull` only if Zendesk will be polled.
-4. Add `ZendeskConnector()` to `_ALL`, and to `_PULL` if it pulls.
+4. Add `ZendeskConnector()` to the `CONNECTORS` tuple, and to `PULLERS` (via a typed local) if it pulls.
 5. Put a recorded, synthetic payload in `tests/fixtures/zendesk/`, plus a malformed one. Run the contract test, and add one golden test for Zendesk's odd cases.
 
 No service, route, worker or table changes.
@@ -263,7 +263,7 @@ Every record carries `connector_version`. Fix the transform, bump `version`, and
 Fixture in, expected record out, no mocks. One contract test runs every connector over every fixture. It checks that output is deterministic, types match, the version is stamped, the event id is stable and changes on an edit, a malformed payload goes dead, and the signature accepts a signed body and rejects a tampered one. Pull uses a stub HTTP client. A failure on page 2 must leave page 1's cursor saved.
 
 **"How does a webhook find its tenant?"**
-The URL is `/v1/sources/{source_id}/events`. The API key gives the tenant. We look up the source by id and tenant together, so another tenant's source looks missing (404). Then we check the signature with that source's secret, on the raw bytes, before we write anything.
+The URL is `/v1/sources/{source_id}/events`, with no API key, because a real sender cannot add ours. We look the source up by its unguessable id (404 if unknown), check the signature with that source's secret on the raw bytes before we write anything (401 if wrong), and take the tenant from the source row.
 
 **"What if a source edits a post?"**
 The edit has a new update time, so it gets a new raw-event id and is stored. The worker transforms it, and the upsert sees a newer timestamp and overwrites the record. The same post re-pulled without changes has the same id and is dropped. An older copy arriving late loses the timestamp check. A Twitter edit gets a new tweet id, so we key the record on the original tweet id.

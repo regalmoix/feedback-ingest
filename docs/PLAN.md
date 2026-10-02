@@ -1,6 +1,6 @@
 # Plan: Feedback Ingestion Service (take-home round 3)
 
-> Progress (2026-10-03): Phases 0–3 committed on `main` (Phase 1: three review rounds; Phase 2: one fix round; Phase 3: fix round in progress); ADR-001..003 accepted; Phases 4 and 5 building in parallel worktrees; Phase 6 designed.
+> Progress: Complete 2026-10-03: Phases 0–6 committed; `docs/00_architecture.md` is the current reference; this plan is kept as the original design record and some names below predate review changes (dedupe_key, puller.py, asyncio worker, FeedbackKind.tweet).
 
 ## Context
 

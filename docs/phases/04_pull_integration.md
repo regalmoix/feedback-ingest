@@ -84,19 +84,25 @@ tests/fixtures/discourse/{search_page1,search_page2,posts_topic_*.json}
 ```
 
 ## Deviations recorded
-- `ConfigError` lives in `services/pull.py`, not in `domain/errors.py`. It stays a separate class
-  because it maps to 409, while `NotFoundError` maps to 404.
+- `ConfigError` is gone (Phase 6). The sync endpoint answers 409 for a source that is not an enabled pull
+  source, and `check_source` guarantees every pull source has a puller, so `PullService.sync` simply indexes
+  `PULLERS[source.type]`.
 - `PullResult` carries `source_id`, so `sync_all` results can be told apart.
 - The `MockTransport` helpers (`discourse_http`, `add_pull_source`) live in `tests/helpers.py` (moved in Phase 6).
 - Pull fixtures are under `tests/fixtures/discourse/pull/`.
 - The scheduler waits one interval before its first tick.
 - The sync endpoint is in `api/sync.py`, not `api/sources.py`.
 - Review fixes: the sync endpoint answers 409 unless the source is an enabled pull source (was 404 for
-  push-only); `sync_all` turns a `ConfigError` into that source's `PullResult.error`; a generic failure
-  returns `"<ExceptionType> (see logs)"`; the cursor never moves backwards (connector and service both
-  take the max); a window that needs more than 20 search pages raises instead of stalling silently; the
+  push-only); the cursor never moves backwards (connector and service both take the max); a window that
+  needs more than 10 search pages (Discourse rejects page 11) raises instead of stalling silently; the
   live window is bounded by `config["window_days"]`, not `config["until"]`; `/health` is degraded when an
   enabled scheduler thread is dead.
+- Phase 6 error handling: `sync` catches only `TransientError` and `TransformError` and puts `str(exc)` in
+  `PullResult.error`; any other exception propagates (503 from the endpoint, `scheduler tick failed` in the
+  log). `POST /sync` answers 502 with the `PullResult` when `error` is set. The scheduler keeps the latest
+  tick's errors per source and `/health` is degraded with `failing_sources`. A search response without
+  `grouped_search_result` is a `TransientError`, never read as the last page. `run_once` on the scheduler
+  is gone; the loop calls `sync_all`.
 
 ## How to explain this phase in the interview
 "Polling is just another producer. The connector returns pages; each page's payloads go through the exact same

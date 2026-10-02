@@ -72,11 +72,11 @@ The terms are in teaching order, so each one only uses words defined above it.
 ### API key hash
 - **What:** We never store a tenant's API key, only a hash of it (a one-way fingerprint), and we find the tenant by that hash.
 - **Where:** `Tenant.api_key_hash`, `UNIQUE(tenants.api_key_hash)` in `adapters/sqlalchemy/tables.py`, and `TenantStore.get_by_api_key_hash`; `current_tenant` in `api/deps.py` reads the `X-API-Key` header.
-- **Why:** The key tells us the tenant, and no match means 401; real third-party senders cannot add our header, so for them the unguessable `source_id` in the URL plus the signature do that job.
+- **Why:** The key tells us the tenant, and no match means 401; the push webhook does not ask for it, because real third-party senders cannot add our header: there the unguessable `source_id` in the URL plus the signature do that job, and the tenant comes from the source row.
 
 ### 202 Accepted
 - **What:** The HTTP reply that means "saved, not finished yet".
-- **Where:** `POST /v1/sources/{source_id}/events` in `api/ingest.py`, which replies with `raw_event_id` and `duplicate` (`raw_event_id` is null on a duplicate).
+- **Where:** `POST /v1/sources/{source_id}/events` in `api/ingest.py`, which replies with `raw_event_id` and `duplicate` (on a duplicate, `raw_event_id` is the id of the row already stored).
 - **Why:** We send it only after the raw row is committed, and we send it for a duplicate too, so the sender stops retrying.
 
 ### 503 on DB down
@@ -118,7 +118,7 @@ The terms are in teaching order, so each one only uses words defined above it.
 
 ### Replay
 - **What:** Running stored raw payloads through the transform again, usually after fixing a bug.
-- **Where:** `requeue(event_id, now)` puts a row back to pending and resets attempts; `POST /admin/raw-events/{id}/replay` in `api/admin.py` does that for one event, and answers 409 while it is processing. Replay by source and time window is not built yet (planned, Phase 6), so today you loop over the list with `jq`.
+- **Where:** `requeue(event_id, now)` puts a row back to pending and resets attempts; `POST /admin/raw-events/{id}/replay` in `api/admin.py` does that for one event, and answers 409 only while a worker holds a live lease (a `processing` row whose lease expired can be replayed). Replay by source and time window is not built yet (planned, Phase 6), so today you loop over the list with `jq`.
 - **Why:** Raw is kept, so a bug never means lost data; replay runs the same upsert, where an equal timestamp counts as newer (ADR-002), so a fixed row is still written, and the upsert never clears `deleted_at`, so deleted items stay deleted.
 
 ### uvicorn workers

@@ -11,9 +11,10 @@ files, so if someone opens the repo the drawing matches.
 
 Draw a box on the left: **Source** (Intercom, Playstore, Twitter, Discourse). Two arrows out of it.
 
-- Arrow 1, **push**: `POST /v1/sources/{id}/events` [api/ingest.py]. Say: "The webhook does three checks and one
-  write. Whose tenant (API key), which source (id must belong to that tenant), is the signature right (HMAC
-  over the raw bytes with that source's secret). Then one insert, then 202. 202 means saved, not processed."
+- Arrow 1, **push**: `POST /v1/sources/{id}/events` [api/ingest.py]. Say: "The webhook does two checks and one
+  write. Which source (unguessable id), is the signature right (HMAC over the raw bytes with that source's
+  secret). No API key, because a real sender cannot add ours; the tenant comes from the source row. Then one
+  insert, then 202. 202 means saved, not processed."
 - Arrow 2, **pull**: `POST /v1/sources/{id}/sync` or the scheduler tick [api/sync.py, services/scheduler.py,
   services/pull.py]. Say: "Polling is just another producer. The connector returns pages; every payload goes
   through the same accept call a webhook uses."
@@ -60,15 +61,15 @@ the raw table rebuilds this table."
 ## 4. Reads and tenancy (1 minute)
 
 Draw `GET /v1/records?source_id&kind&since` [api/records.py] and `GET /v1/sources` [api/sources.py]. Draw a
-key icon. Say: "Every request carries an API key. We store only its hash. Every read is filtered by that
+key icon. Say: "Every request except the webhook carries an API key. We store only its hash. Every read is filtered by that
 tenant; a foreign id is a 404, not a 403, so we do not leak existence. A source is one configured instance,
 so two Playstore apps are two rows with their own secrets and cursors."
 
 ## 5. Operations (1 minute)
 
 Draw `GET /health` and `GET /admin/raw-events?status=dead` and `POST /admin/raw-events/{id}/replay`
-[api/health.py, api/admin.py]. Say: "Health tells me the worker and scheduler are alive and how deep the queue
-is. Dead events are listed per tenant, newest first, and replayed with one call. Every log line carries the
+[api/health.py, api/admin.py]. Say: "Health tells me the worker and scheduler are alive, which pull sources failed their last
+scheduled sync, and how deep the queue is. Dead events are listed per tenant, newest first, and replayed with one call. Every log line carries the
 raw event id, so one id takes me from ingress to record."
 
 ## 6. The three guarantees (close, 1 minute)
