@@ -27,6 +27,7 @@ class SourceRow(Base):
     config: Mapped[dict[str, str]] = mapped_column(JSON)
     webhook_secret: Mapped[str | None]
     cursor: Mapped[str | None]
+    enabled: Mapped[bool] = mapped_column(default=True)
 
 
 class RawEventRow(Base):
