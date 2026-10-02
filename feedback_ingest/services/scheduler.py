@@ -2,6 +2,8 @@ import logging
 import threading
 from dataclasses import dataclass, field
 
+from feedback_ingest.domain.enums import SourceMode
+from feedback_ingest.domain.models import Source
 from feedback_ingest.services.pull import PullService
 
 log = logging.getLogger(__name__)
@@ -36,8 +38,20 @@ class SchedulerService:
 
     def _loop(self) -> None:
         while not self._stop.wait(self.interval_seconds):
+            errors: dict[str, str] = {}
             try:
-                results = self.pull.sync_all()
-                self.last_errors = {r.source_id: r.error for r in results if r.error}
-            except Exception:
+                for source in self.pull.sources.list_by_mode(SourceMode.PULL):
+                    if error := self._sync(source):
+                        errors[source.id] = error
+            except Exception as exc:
                 log.exception("scheduler tick failed")
+                errors = {"<tick>": type(exc).__name__}
+            self.last_errors = errors  # health shows this tick only
+
+    def _sync(self, source: Source) -> str | None:
+        try:
+            return self.pull.sync(source).error
+        except Exception:  # one broken source must not starve the rest of the tick
+            extra = {"tenant_id": source.tenant_id, "source_id": source.id}
+            log.exception("scheduled sync failed", extra=extra)
+            return "internal error (see logs)"

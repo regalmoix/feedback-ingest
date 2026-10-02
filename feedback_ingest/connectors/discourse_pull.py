@@ -1,3 +1,4 @@
+import logging
 from collections import defaultdict
 from collections.abc import Iterator
 from datetime import datetime, timedelta
@@ -15,6 +16,7 @@ from feedback_ingest.ports.http import HttpClient
 from feedback_ingest.utils.html import strip_tags
 from feedback_ingest.utils.time import NAIVE_UTC
 
+log = logging.getLogger(__name__)
 _OVERLAP = timedelta(seconds=60)
 _MAX_PAGES = 10  # Discourse answers 400 for page > 10
 _POSTS_PER_CALL = 20
@@ -37,8 +39,9 @@ def pull_pages(source: Source, http: HttpClient, now: datetime) -> Iterator[Pull
         raw = http.get_json(f"{base_url}/search.json", {"q": query, "page": str(page)})
         search = _validated(SearchPageIn, raw, "search.json")
         grouped = search.grouped_search_result
-        if grouped.error:
-            msg = f"discourse search failed: {grouped.error}"
+        if grouped.error:  # upstream text stays in the log, out of PullResult and the API
+            log.warning("discourse search error: %s", grouped.error, extra={"source_id": source.id})
+            msg = "discourse search reported an error"
             raise TransformError(msg)
         newest = max(
             [hit.created_at for hit in search.posts] + ([newest] if newest else []), default=None

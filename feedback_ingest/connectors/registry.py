@@ -1,4 +1,5 @@
 import ipaddress
+import socket
 from collections.abc import Mapping
 from urllib.parse import urlsplit
 
@@ -59,13 +60,17 @@ def _check_values(config: Mapping[str, str]) -> None:
             raise ValueError(msg) from None
 
 
-# ponytail: checks the literal host only, no DNS; a public name that resolves to an internal
+# ponytail: checks the literal host only, no DNS; only a public name that resolves to a private
 # address gets through. Resolve and pin the address at request time if tenants are untrusted.
 def _is_internal(host: str) -> bool:
-    if host == "localhost" or host.endswith((".local", ".internal")):
+    host = host.rstrip(".")
+    if host == "localhost" or host.endswith((".localhost", ".local", ".internal")):
         return True
     try:
         ip = ipaddress.ip_address(host)
     except ValueError:
-        return False
-    return ip.is_loopback or ip.is_private or ip.is_link_local or ip.is_reserved
+        try:  # short, decimal and hex IPv4 forms: 127.1, 2130706433, 0x7f000001
+            ip = ipaddress.ip_address(socket.inet_aton(host))
+        except OSError:
+            return False
+    return not ip.is_global

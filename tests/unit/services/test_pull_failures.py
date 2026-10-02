@@ -1,5 +1,4 @@
 import logging
-from typing import Any
 
 import httpx
 import pytest
@@ -10,7 +9,6 @@ from test_pull import service, stored_cursor
 from feedback_ingest.adapters.http.httpx_client import HttpxClient
 from feedback_ingest.api.deps import Adapters
 from feedback_ingest.domain.enums import EventStatus
-from feedback_ingest.domain.errors import TransientError
 from feedback_ingest.domain.models import RawEvent
 
 adapters = test_pull.adapters  # the same fixture, registered for this module
@@ -57,23 +55,3 @@ def test_a_window_past_the_page_cap_is_an_error_and_keeps_the_cursor(adapters: A
     assert result.error is not None
     assert "window exceeds 10 pages" in result.error
     assert stored_cursor(adapters, "src-forum") == CURSOR
-
-
-class _DownFor:
-    def __init__(self, base_url: str) -> None:
-        self.base_url, self.http = base_url, discourse_http()
-
-    def get_json(self, url: str, params: dict[str, str]) -> dict[str, Any]:
-        if url.startswith(self.base_url):
-            msg = f"503 from {url}"
-            raise TransientError(msg)
-        return self.http.get_json(url, params)
-
-
-def test_sync_all_continues_past_a_broken_source(adapters: Adapters) -> None:
-    add_pull_source(adapters, "src-a-broken", base_url="https://down.example.test")
-    add_pull_source(adapters, "src-b-forum")
-    results = service(adapters, _DownFor("https://down.example.test")).sync_all()
-    assert [r.source_id for r in results] == ["src-a-broken", "src-b-forum"]
-    assert results[0].error == "503 from https://down.example.test/search.json"
-    assert (results[1].accepted, results[1].error) == (4, None)

@@ -1,3 +1,4 @@
+import logging
 from urllib.parse import urlencode
 
 import pytest
@@ -46,7 +47,10 @@ def test_unexpected_response_shape_is_transient(route: tuple[str, str], body: Ro
         list(PULLER.pull(pull_source(), StubHttp(found), NOW))
 
 
-def test_search_error_is_a_transform_error() -> None:
+def test_search_error_text_is_logged_not_raised(caplog: pytest.LogCaptureFixture) -> None:
     found = routes([[1]]) | {SEARCH_1: {"posts": [], "grouped_search_result": {"error": "boom"}}}
-    with pytest.raises(TransformError, match="boom"):
+    with pytest.raises(TransformError) as raised:
         list(PULLER.pull(pull_source(), StubHttp(found), NOW))
+    assert str(raised.value) == "discourse search reported an error"
+    [warning] = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert "boom" in warning.getMessage()

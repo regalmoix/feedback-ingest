@@ -4,7 +4,6 @@ from dataclasses import dataclass
 from pydantic import BaseModel
 
 from feedback_ingest.connectors.registry import PULLERS
-from feedback_ingest.domain.enums import SourceMode
 from feedback_ingest.domain.errors import TransformError, TransientError
 from feedback_ingest.domain.models import Source
 from feedback_ingest.ports.clock import Clock
@@ -62,9 +61,6 @@ class PullService:
             cursor=cursor,
             error=error,
         )
-
-    def sync_all(self) -> list[PullResult]:
-        return [self.sync(source) for source in self.sources.list_by_mode(SourceMode.PULL)]
 
     # ponytail: assumes every cursor is an ISO timestamp (true for Discourse); let the connector
     # compare cursors when one is not

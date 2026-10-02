@@ -91,3 +91,15 @@ def test_event_past_the_attempt_cap_is_dead_without_transforming(
     dead = stored(adapters, event)
     assert dead.status == EventStatus.DEAD
     assert dead.error == "attempt limit exceeded; last error: TransientError: upstream timeout"
+
+
+def test_attempt_cap_without_a_recorded_error_says_the_worker_crashed(
+    adapters: Adapters, clock: FixedClock
+) -> None:
+    event = claimed(adapters)
+    for _ in range(MAX_ATTEMPTS):  # every claim crashed before the handler recorded anything
+        clock.advance(300)
+        [event] = adapters.queue.claim(clock.now(), LEASE, 1)
+    assert make_pipeline(adapters).process(event) == EventStatus.DEAD
+    expected = "attempt limit exceeded; last error: none recorded (worker crashed; see logs)"
+    assert stored(adapters, event).error == expected

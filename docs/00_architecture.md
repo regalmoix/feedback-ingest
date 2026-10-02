@@ -175,7 +175,7 @@ sequenceDiagram
   participant I as IngestionService
   participant SS as SourceStore
 
-  T->>PS: sync(source), or sync_all every FI_PULL_INTERVAL_SECONDS
+  T->>PS: sync(source), for each pull source every FI_PULL_INTERVAL_SECONDS
   PS->>PC: pull(source, http, now)
   loop each search page, at most 10 per window (Discourse rejects page 11)
     PC->>H: get_json search.json with q after and before, page n
@@ -189,7 +189,7 @@ sequenceDiagram
     PS->>SS: update_cursor to the max of stored and page cursor
   end
   Note over PC,SS: the cursor moves only on the final page, to the newest post minus a 60 s overlap
-  Note over PS,SS: a TransientError or TransformError stops the run, the cursor stays put and the message lands in PullResult.error (POST sync answers 502); any other error propagates (503 from the endpoint, logged by the scheduler tick)
+  Note over PS,SS: a TransientError or TransformError stops the run, the cursor stays put and the message lands in PullResult.error (POST sync answers 502); any other error propagates (503 from the endpoint; the scheduler logs it, records that source as failing and moves on to the next)
   PS-->>T: PullResult with pages, accepted, duplicates, cursor, error
   Note over T: the scheduler keeps the latest tick's errors per source; /health is degraded and counts failing_sources
   Note over I: from here the worker path is identical to push
@@ -309,8 +309,8 @@ Every `__init__.py` under `feedback_ingest/` is an empty package marker.
 | `services/ingestion.py` | `IngestionService.accept`: build the `RawEvent`, enqueue, report duplicate |
 | `services/pipeline.py` | `PipelineService.process`: transform, upsert, then processed, failed with backoff, or dead |
 | `services/worker.py` | `WorkerService`: background thread that claims batches and calls the pipeline |
-| `services/pull.py` | `PullService.sync` and `sync_all`: run a puller, accept each payload, advance the cursor |
-| `services/scheduler.py` | `SchedulerService`: background thread that calls `sync_all` every interval and keeps the latest errors per source |
+| `services/pull.py` | `PullService.sync`: run a puller, accept each payload, advance the cursor |
+| `services/scheduler.py` | `SchedulerService`: background thread that calls `sync` for each pull source every interval, isolating each source, and keeps that tick's errors per source |
 | `utils/hashing.py` | `sha256_text` (API keys) and `payload_hash` (fallback event id) |
 | `utils/signing.py` | HMAC-SHA256 `sign` and constant-time `verify` |
 | `utils/time.py` | `to_naive_utc` and `SystemClock` |

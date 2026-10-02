@@ -39,7 +39,8 @@ class PipelineService:
         extra = event_extra(event)
         # a crash outside this handler leaves the lease to expire; each re-claim bumps attempts
         if event.attempts > self.max_attempts:
-            error = f"attempt limit exceeded; last error: {event.error}"[:_MAX_ERROR]
+            last = event.error or "none recorded (worker crashed; see logs)"
+            error = f"attempt limit exceeded; last error: {last}"[:_MAX_ERROR]
             log.warning("dead: %s", error, extra=extra)
             return _finish(self.queue.mark_dead(event, error), EventStatus.DEAD, extra)
         try:

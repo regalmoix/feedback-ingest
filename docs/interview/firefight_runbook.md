@@ -247,10 +247,10 @@ sqlite3 feedback.db "UPDATE sources SET cursor = '2026-10-01T00:00:00' WHERE id 
 ```
 grep "source_id=$SOURCE_ID" server.log | grep -E "pulled|pull stopped" | tail -20
 grep -E " from https?://.*: " server.log | tail -5   # status plus the first 200 chars of the reply body
-grep -A 40 "scheduler tick failed" server.log | grep -E "^[A-Za-z_.]+(Error|Exception): " | tail -5
+grep -A 40 -E "scheduled sync failed|scheduler tick failed" server.log | grep -E "^[A-Za-z_.]+(Error|Exception): " | tail -5
 ```
 
-Good: `pulled N pages: X new, Y duplicates` once per tick. Bad: `pull stopped at the saved cursor: …` (a source error, like a 429 or the page cap) on every tick, or `scheduler tick failed` with a traceback (our own failure, such as the database; that tick stopped at that source).
+Good: `pulled N pages: X new, Y duplicates` once per tick. Bad: `pull stopped at the saved cursor: …` (a source error, like a 429 or the page cap) on every tick, or `scheduled sync failed` with a traceback (our own failure, such as the database; the tick moved on to the next source). `scheduler tick failed` means the tick could not even list the sources.
 
 ### Step 5. Check that records arrive
 

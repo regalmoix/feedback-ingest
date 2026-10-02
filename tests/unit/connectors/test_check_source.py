@@ -55,3 +55,9 @@ def test_bad_config_values_are_rejected(key: str, value: str) -> None:
     pull = source(SourceType.DISCOURSE, SourceMode.PULL)
     with pytest.raises(ValueError, match=key):
         check_source(pull.model_copy(update={"config": {**pull.config, key: value}}))
+
+
+def test_a_public_host_passes_without_dns() -> None:
+    pull = source(SourceType.DISCOURSE, SourceMode.PULL)
+    public = {**pull.config, "base_url": "https://meta.discourse.org"}
+    check_source(pull.model_copy(update={"config": public}))

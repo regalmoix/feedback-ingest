@@ -57,6 +57,11 @@ def test_pull_source_missing_a_config_key_is_422_naming_it(app_client: TestClien
         ("pull", FORUM | {"window_days": "0"}),
         ("pull", FORUM | {"base_url": "https://user:pw@forum.example.test"}),
         ("pull", FORUM | {"base_url": "http://127.0.0.1"}),
+        ("pull", FORUM | {"base_url": "http://127.1"}),
+        ("pull", FORUM | {"base_url": "http://2130706433"}),
+        ("pull", FORUM | {"base_url": "http://localhost."}),
+        ("pull", FORUM | {"base_url": "http://foo.localhost"}),
+        ("pull", FORUM | {"base_url": "http://100.64.0.1"}),
     ],
 )
 def test_bad_discourse_config_is_422(

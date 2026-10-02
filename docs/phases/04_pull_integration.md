@@ -32,10 +32,9 @@ the endpoint, and a live test.
   returned in `PullResult.error` and logged at WARNING with `source_id`, `tenant_id`. Any other exception is
   logged at ERROR and returned the same way; the scheduler must never die because one source is broken.
   `# ponytail: whole-page accept loop; batch enqueue if a page ever holds thousands of items`.
-- `sync_all() -> list[PullResult]`: `for source in sources.list_by_mode(SourceMode.pull)` (enabled only, see Phase 5) → `sync`.
 
 `services/scheduler.py` — `SchedulerService(pull: PullService, interval_seconds: float)`
-- Same thread/Event shape as `WorkerService`: `start()`, `stop()`, `alive`, `run_once()` = `pull.sync_all()`.
+- Same thread/Event shape as `WorkerService`: `start()`, `stop()`, `alive`, each tick calls `pull.sync` for every `sources.list_by_mode(SourceMode.pull)` source (enabled only, see Phase 5).
 - Started in the app lifespan when `settings.scheduler_enabled` (new setting, default True); `/health` reports
   `scheduler_alive` too.
 
@@ -59,10 +58,10 @@ the endpoint, and a live test.
 - `tests/unit/services/test_pull.py` (memory adapters + stub `HttpClient` keyed by URL):
   two pages → cursor equals page 2's cursor, `accepted` counts rows, duplicates counted when a payload is
   repeated; `TransientError` on page 2 → page 1's cursor persisted, `error` populated, page 2 not accepted;
-  cursor never moves backwards; `sync_all` continues past a broken source and returns one result per source;
+  cursor never moves backwards;
   push-only source → `ConfigError`.
-- `tests/unit/services/test_scheduler.py`: `run_once` calls `sync_all`; thread start/stop; an exception in one
-  tick does not stop the next.
+- `tests/unit/services/test_scheduler.py`: thread start/stop; an exception in one
+  source does not stop the next source, and one in a tick does not stop the next tick.
 - `tests/api/test_sync_api.py`: 401/404 paths; 200 with the result body; push-only source → 404.
 - `tests/e2e/test_pull_to_query.py`: SQLite file, real worker, `HttpxClient(transport=httpx.MockTransport(...))`
   serving recorded Discourse-shaped JSON for `search.json` (two pages) and `posts.json`: `POST /sync` → wait →
@@ -87,7 +86,7 @@ tests/fixtures/discourse/{search_page1,search_page2,posts_topic_*.json}
 - `ConfigError` is gone (Phase 6). The sync endpoint answers 409 for a source that is not an enabled pull
   source, and `check_source` guarantees every pull source has a puller, so `PullService.sync` simply indexes
   `PULLERS[source.type]`.
-- `PullResult` carries `source_id`, so `sync_all` results can be told apart.
+- `PullResult` carries `source_id`, so results can be told apart.
 - The `MockTransport` helpers (`discourse_http`, `add_pull_source`) live in `tests/helpers.py` (moved in Phase 6).
 - Pull fixtures are under `tests/fixtures/discourse/pull/`.
 - The scheduler waits one interval before its first tick.
@@ -102,7 +101,11 @@ tests/fixtures/discourse/{search_page1,search_page2,posts_topic_*.json}
   log). `POST /sync` answers 502 with the `PullResult` when `error` is set. The scheduler keeps the latest
   tick's errors per source and `/health` is degraded with `failing_sources`. A search response without
   `grouped_search_result` is a `TransientError`, never read as the last page. `run_once` on the scheduler
-  is gone; the loop calls `sync_all`.
+  is gone; the loop calls `sync` per source.
+- Phase 6 closing: `sync_all` is gone. The scheduler loop syncs each source in its own `try`; an
+  unexpected exception is logged (`scheduled sync failed`, with `tenant_id` and `source_id`) and recorded as
+  `internal error (see logs)`, and the next source still runs. If listing sources fails, the tick records
+  `{"<tick>": "<ExceptionName>"}`. `last_errors` is replaced once per tick, so `/health` shows the latest tick.
 
 ## How to explain this phase in the interview
 "Polling is just another producer. The connector returns pages; each page's payloads go through the exact same
