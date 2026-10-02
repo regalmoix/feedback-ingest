@@ -20,6 +20,7 @@ class HealthResponse(BaseModel):
     status: Literal["ok", "degraded"]
     worker_enabled: bool
     worker_alive: bool
+    scheduler_alive: bool
     queue: dict[EventStatus, int]
 
 

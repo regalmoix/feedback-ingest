@@ -15,12 +15,14 @@ from feedback_ingest.adapters.sqlalchemy.stores import (
     SqlTenantStore,
 )
 from feedback_ingest.adapters.sqlalchemy.tables import Base
-from feedback_ingest.api import admin, health, ingest, records, sources, tenants
+from feedback_ingest.api import admin, health, ingest, records, sources, sync, tenants
 from feedback_ingest.api.deps import Adapters, AppState
 from feedback_ingest.api.errors import add_error_handlers
 from feedback_ingest.config import Settings
 from feedback_ingest.services.ingestion import IngestionService
 from feedback_ingest.services.pipeline import PipelineService
+from feedback_ingest.services.pull import PullService
+from feedback_ingest.services.scheduler import SchedulerService
 from feedback_ingest.services.worker import WorkerService
 from feedback_ingest.utils.time import SystemClock
 
@@ -74,7 +76,10 @@ def _app_state(settings: Settings, a: Adapters) -> AppState:
         settings.lease_seconds,
         settings.claim_batch,
     )
-    return AppState(settings, a, IngestionService(a.queue, a.clock), worker)
+    ingestion = IngestionService(a.queue, a.clock)
+    pull = PullService(a.sources, ingestion, a.http, a.clock)
+    scheduler = SchedulerService(pull, settings.pull_interval_seconds)
+    return AppState(settings, a, ingestion, worker, pull, scheduler)
 
 
 def create_app(settings: Settings | None = None, adapters: Adapters | None = None) -> FastAPI:
@@ -95,16 +100,19 @@ def create_app(settings: Settings | None = None, adapters: Adapters | None = Non
         app.state.ctx = ctx
         if settings.worker_enabled:
             ctx.worker.start()
+        if settings.scheduler_enabled:
+            ctx.scheduler.start()
         try:
             yield
         finally:
+            ctx.scheduler.stop()
             ctx.worker.stop()
             if engine is not None:
                 engine.dispose()
 
     app = FastAPI(title="Feedback ingest", lifespan=lifespan)
     add_error_handlers(app)
-    for module in (ingest, admin, health, sources, records, tenants):
+    for module in (ingest, admin, health, sources, records, tenants, sync):
         app.include_router(module.router)
     return app
 

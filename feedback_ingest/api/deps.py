@@ -11,6 +11,8 @@ from feedback_ingest.ports.http import HttpClient
 from feedback_ingest.ports.queue import RawEventQueue
 from feedback_ingest.ports.stores import FeedbackStore, SourceStore, TenantStore
 from feedback_ingest.services.ingestion import IngestionService
+from feedback_ingest.services.pull import PullService
+from feedback_ingest.services.scheduler import SchedulerService
 from feedback_ingest.services.worker import WorkerService
 from feedback_ingest.utils.hashing import sha256_text
 
@@ -31,6 +33,8 @@ class AppState:
     adapters: Adapters
     ingestion: IngestionService
     worker: WorkerService
+    pull: PullService
+    scheduler: SchedulerService
 
 
 def get_ctx(request: Request) -> AppState:
