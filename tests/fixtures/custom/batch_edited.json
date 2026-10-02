@@ -1,0 +1,37 @@
+{
+  "records": [
+    {
+      "id": "lumenote-review-0001",
+      "fileID": "lumenote-surveys",
+      "type": "REVIEW",
+      "createdAt": 1770100000,
+      "updatedAt": 1770400000,
+      "text": "Update: 3.4.1 fixed the cut-off, long recordings work now.",
+      "author": "Avery Sample",
+      "language": "en",
+      "rating": 4,
+      "metadata": {"app_version": "3.4.1", "country": "DE"}
+    },
+    {
+      "id": "lumenote-chat-0001",
+      "fileID": "lumenote-surveys",
+      "type": "CONVERSATION",
+      "createdAt": 1770200000,
+      "updatedAt": 1770400000,
+      "title": "Export to PDF missing",
+      "text": "Found it under Share, thanks. Maybe put it back in the menu?",
+      "author": "Casey Placeholder",
+      "metadata": {"channel": "in-app chat", "plan": "pro"}
+    },
+    {
+      "id": "lumenote-nps-0001",
+      "fileID": "lumenote-surveys",
+      "type": "SURVEY",
+      "createdAt": 1770300000,
+      "updatedAt": 1770400000,
+      "title": "How likely are you to recommend Lumenote to a friend?",
+      "text": "Sync got faster this week, raising my score.",
+      "metadata": {"score": 9, "survey": "nps-2026-q1", "paying": true}
+    }
+  ]
+}

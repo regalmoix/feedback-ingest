@@ -1,0 +1,34 @@
+{
+  "records": [
+    {
+      "id": "lumenote-review-0001",
+      "fileID": "lumenote-surveys",
+      "type": "REVIEW",
+      "createdAt": 1770100000,
+      "text": "Transcription keeps cutting off after about ten minutes of recording.",
+      "author": "Avery Sample",
+      "language": "en",
+      "rating": 2,
+      "metadata": {"app_version": "3.4.0", "country": "DE"}
+    },
+    {
+      "id": "lumenote-chat-0001",
+      "fileID": "lumenote-surveys",
+      "type": "CONVERSATION",
+      "createdAt": 1770200000,
+      "title": "Export to PDF missing",
+      "text": "Where did the export to PDF button go after the update?",
+      "author": "Casey Placeholder",
+      "metadata": {"channel": "in-app chat", "plan": "pro"}
+    },
+    {
+      "id": "lumenote-nps-0001",
+      "fileID": "lumenote-surveys",
+      "type": "SURVEY",
+      "createdAt": 1770300000,
+      "title": "How likely are you to recommend Lumenote to a friend?",
+      "text": "Love the summaries, but sync between phone and laptop is slow.",
+      "metadata": {"score": 8, "survey": "nps-2026-q1", "paying": true}
+    }
+  ]
+}

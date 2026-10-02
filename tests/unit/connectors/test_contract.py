@@ -18,7 +18,8 @@ if TYPE_CHECKING:
     from feedback_ingest.domain.models import FeedbackRecord
 
 FIXTURE_CASES = [(t, name) for t in SourceType for name in fixture_names(t)]
-VALID_CASES = [(t, name) for t, name in FIXTURE_CASES if name != "malformed"]
+REJECTED = {"malformed", "unsupported_type"}
+VALID_CASES = [(t, name) for t, name in FIXTURE_CASES if name not in REJECTED]
 JUNK: list[dict[str, Any]] = [
     {},
     {"id": None},
@@ -63,7 +64,7 @@ def test_an_edit_is_a_new_raw_event_and_the_newer_text_wins(source_type: SourceT
     connector, src = CONNECTORS[source_type], source(source_type)
     by_item: defaultdict[str, list[tuple[str, FeedbackRecord]]] = defaultdict(list)
     for name in fixture_names(source_type):
-        if name == "malformed":
+        if name in REJECTED:
             continue
         payload = load(source_type, name)
         for record in connector.transform(src, payload):

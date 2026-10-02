@@ -5,7 +5,12 @@ from typing import Annotated, Any, NamedTuple, Self
 from pydantic import Field, SecretStr, StringConstraints, computed_field, model_validator
 
 from feedback_ingest.domain.enums import EventStatus, FeedbackKind, SourceMode, SourceType
-from feedback_ingest.domain.metadata import FrozenModel, SourceMetadata
+from feedback_ingest.domain.metadata import (
+    CustomMetadata,
+    CustomRecordType,
+    FrozenModel,
+    SourceMetadata,
+)
 from feedback_ingest.utils.time import NaiveUtc
 
 KIND_BY_SOURCE: dict[SourceType, FeedbackKind] = {
@@ -13,6 +18,13 @@ KIND_BY_SOURCE: dict[SourceType, FeedbackKind] = {
     SourceType.INTERCOM: FeedbackKind.CONVERSATION,
     SourceType.TWITTER: FeedbackKind.POST,
     SourceType.DISCOURSE: FeedbackKind.POST,
+}
+# the one exception: a custom (webhook) record carries its own kind, from the sender's record `type`
+KIND_BY_RECORD_TYPE: dict[CustomRecordType, FeedbackKind] = {
+    "REVIEW": FeedbackKind.REVIEW,
+    "CONVERSATION": FeedbackKind.CONVERSATION,
+    "FORUM_CONVERSATION_THREAD": FeedbackKind.POST,
+    "SURVEY": FeedbackKind.SURVEY,
 }
 Name = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)]
 
@@ -97,6 +109,8 @@ class FeedbackRecord(FrozenModel):
     @computed_field  # type: ignore[prop-decorator]
     @property
     def kind(self) -> FeedbackKind:
+        if isinstance(self.metadata, CustomMetadata):
+            return KIND_BY_RECORD_TYPE[self.metadata.record_type]
         return KIND_BY_SOURCE[self.source_type]
 
     @property

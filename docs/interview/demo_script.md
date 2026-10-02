@@ -1,6 +1,6 @@
 # Demo script
 
-What to say while `scripts/demo.sh` runs. It has nine steps and takes about two minutes. For each step you get
+What to say while `scripts/demo.sh` runs. It has ten steps and takes about two minutes. For each step you get
 the command (copied from the script), what the interviewer sees, what to say, and the follow-up it invites.
 
 Terms are in [glossary.md](glossary.md). If a follow-up goes deep, the long answers are in
@@ -10,18 +10,20 @@ the demo is in [whiteboard.md](whiteboard.md).
 ## Before you start
 
 - Run it once the day before, on the laptop you will use: `./scripts/demo.sh`.
-- It needs `uv`, `curl` and `jq`, port 8000 free, and network access for step 7 (it calls the live
+- It needs `uv`, `curl` and `jq`, port 8000 free, and network access for step 8 (it calls the live
   meta.discourse.org forum).
 - It deletes and recreates `demo.db`, so every run starts clean.
 - Every command is printed with a leading `$` before it runs, so the interviewer sees exactly what is called.
 - The script stops at the first failure (`set -euo pipefail` and `curl --fail-with-body`), so a run that reaches
   `done` means every step passed.
-- If there is no network: step 7 fails and the script stops. Say so, then run
+- If there is no network: step 8 fails and the script stops. Say so, then run
   `uv run pytest tests/e2e/test_pull_to_query.py -q`, which runs the same pull against recorded Discourse
   responses.
 
 Shell variables you will see: `$BASE` is `http://127.0.0.1:8000`, `$FIX` is `tests/fixtures`, `$PY` is
-`.venv/bin/python`. `ACME_KEY` and `GLOBEX_KEY` are the two tenants' API keys, read from `.seed.json`.
+`.venv/bin/python`. `LUMENOTE_KEY` and `BRIGHTWAVE_KEY` are the two tenants' API keys, read from `.seed.json`. Both tenants are
+synthetic: Lumenote is a consumer voice-notes app (Play Store reviews, a Discourse community, a survey webhook),
+Brightwave a B2B SaaS (Intercom support, Twitter, an NPS webhook).
 
 ---
 
@@ -29,8 +31,8 @@ Shell variables you will see: `$BASE` is `http://127.0.0.1:8000`, `$FIX` is `tes
 
 Say this before you press enter.
 
-> "This is a feedback ingestion service. Feedback comes from four places: Playstore reviews, tweets, Intercom
-> conversations and Discourse forum posts. Some sources push to us with signed webhooks; Discourse we pull on a
+> "This is a feedback ingestion service. Feedback comes from five places: Playstore reviews, tweets, Intercom
+> conversations, Discourse forum posts, and a custom webhook that takes Enterpret's public record shape. Some sources push to us with signed webhooks; Discourse we pull on a
 > timer. Many customers, called tenants, share the service, and each one only ever sees its own data.
 >
 > The design fits in one sentence: we save the raw payload to disk before we say yes, and everything after that
@@ -42,7 +44,7 @@ Say this before you press enter.
 >
 > This script runs that whole story against a real server and a real SQLite file. Watch for four things: a
 > duplicate that is stored once, two apps of the same type, a tenant that sees nothing, and a `kill -9` that
-> loses nothing."
+> loses nothing. Plus one batch from the custom webhook that becomes three records of three kinds."
 
 ---
 
@@ -76,19 +78,20 @@ in an incident: are both threads alive, and how deep is the queue."
 "$PY" scripts/seed.py
 ```
 
-**They see:** one line per tenant (`acme`, `globex`) with its id and API key, then five sources each: a Discourse
-`pull` source and four `push` sources (`android`, `ios-wrapper`, `twitter`, `intercom`) with their ids and
-webhook secrets. Last line: `wrote .seed.json`.
+**They see:** `wrote api keys and webhook secrets to .seed.json (mode 600)`. The file holds two tenants:
+`lumenote` with a Discourse `pull` source (`lumenote-community`) and three `push` sources (`lumenote-android`,
+`lumenote-android-beta`, `lumenote-surveys`), and `brightwave` with three `push` sources (`brightwave-support`
+on Intercom, `brightwave-x` on Twitter, `brightwave-nps` on the custom webhook).
 
-**Say:** "A source is one tenant's configured connection. Acme has two Playstore apps, so that is two source
-rows, each with its own secret. The API key and the secret are shown once, at creation; we store only a hash of
+**Say:** "A source is one tenant's configured connection. Lumenote ships a stable and a beta Android app, so
+that is two Playstore source rows, each with its own secret. The API key and the secret are shown once, at creation; we store only a hash of
 the key."
 
 **Follow-up:** "Why is the Discourse source pull and the others push?"
 **Answer:** Discourse has a public API we poll live; Playstore has no review webhook in reality, so recorded
 fixtures stand in for that poller, and the transform is the same either way (ADR-003 context table).
 
-## Step 3. The same review to acme-android twice
+## Step 3. The same review to lumenote-android twice
 
 **Command:** (the script's `push` helper signs the file with `scripts/sign.py`, then runs)
 ```
@@ -112,11 +115,11 @@ source's signature gets in."
 **Answer:** 401 and nothing is stored; the HMAC is checked on the raw bytes before we parse or write
 (`feedback_ingest/api/ingest.py`).
 
-## Step 4. The same review to acme-ios-wrapper
+## Step 4. The same review to lumenote-android-beta
 
 **Command:**
 ```
-curl -sS --fail-with-body -X POST "$BASE/v1/sources/$IOS/events" \
+curl -sS --fail-with-body -X POST "$BASE/v1/sources/$BETA/events" \
   -H "X-Signature: $sig" --data-binary "@tests/fixtures/playstore/review.json"
 ```
 then the script waits until the queue is idle.
@@ -130,40 +133,69 @@ apps can share a review id without colliding."
 **Answer:** Sources are disabled, never deleted (`PATCH` with `enabled: false`), so the old row and its keys stay;
 a disabled source refuses pushes with 409.
 
-## Step 5. Acme sees two records; globex sees none
+## Step 5. Lumenote sees two records; brightwave sees none
 
 **Command:**
 ```
-curl -sS --fail-with-body "$BASE/v1/records?kind=review" -H "X-API-Key: $ACME_KEY" |
+curl -sS --fail-with-body "$BASE/v1/records?kind=review" -H "X-API-Key: $LUMENOTE_KEY" |
   jq -c '[.[] | {source_id, external_id}]'
-curl -sS --fail-with-body "$BASE/v1/records?kind=review" -H "X-API-Key: $GLOBEX_KEY" | jq length
+curl -sS --fail-with-body "$BASE/v1/records?kind=review" -H "X-API-Key: $BRIGHTWAVE_KEY" | jq length
 ```
 
 **They see:**
 ```
 [{"source_id":"<android id>","external_id":"gp:AOqpTEST-review-0001"},
- {"source_id":"<ios id>","external_id":"gp:AOqpTEST-review-0001"}]
+ {"source_id":"<android-beta id>","external_id":"gp:AOqpTEST-review-0001"}]
 0
 ```
 
 **Say:** "Three pushes, two records: the duplicate collapsed, and the second app is its own record with the same
-external id. Globex runs the same query and gets zero, because every read is filtered by the tenant from the
+external id. Brightwave runs the same query and gets zero, because every read is filtered by the tenant from the
 API key."
 
-**Follow-up:** "What if globex asks for acme's record by id?"
+**Follow-up:** "What if brightwave asks for lumenote's record by id?"
 **Answer:** 404, not 403, so we do not even confirm it exists (`feedback_ingest/api/records.py`,
 `tests/api/test_records_api.py`).
 
-## Step 6. A malformed payload goes dead; replay runs it again
+## Step 6. The custom webhook: one batch, three records, three kinds
+
+**Command:**
+```
+curl -sS --fail-with-body -X POST "$BASE/v1/sources/$SURVEYS/events" \
+  -H "X-Signature: $sig" --data-binary "@tests/fixtures/custom/batch.json"
+curl -sS --fail-with-body "$BASE/v1/records?source_id=$SURVEYS" -H "X-API-Key: $LUMENOTE_KEY" |
+  jq -c '[.[] | {external_id, kind}]'
+curl -sS --fail-with-body "$BASE/v1/records?kind=survey" -H "X-API-Key: $LUMENOTE_KEY" | jq -c '.[].metadata'
+```
+
+**They see:** the push gets 202 with `"duplicate":false`, then
+```
+[{"external_id":"lumenote-review-0001","kind":"review"},{"external_id":"lumenote-chat-0001","kind":"conversation"},
+ {"external_id":"lumenote-nps-0001","kind":"survey"}]
+{"source_type":"custom","record_type":"SURVEY","score":8.0,"fields":{"survey":"nps-2026-q1","paying":true}}
+```
+
+**Say:** "This body is the shape Enterpret's public webhook docs describe: `{"records": [...]}` with `id`,
+`type`, `createdAt` in epoch seconds, `text` and flat typed metadata. One delivery is one raw event; the
+connector returns one record per entry, and for this connector only the kind comes from each record's `type`
+(`REVIEW`, `CONVERSATION`, `FORUM_CONVERSATION_THREAD`, `SURVEY`). The survey kind was one enum value and one
+line in the kind map. It is the same five-step add-a-source recipe as the other four connectors."
+
+**Follow-up:** "What if one record in the batch is bad?"
+**Answer:** The whole batch goes dead with the reason (an unknown `type` is an "unsupported record type"
+error), and replay re-runs it after a fix; splitting a batch into per-record events is the marked upgrade
+(`feedback_ingest/connectors/custom.py`, `tests/unit/connectors/test_custom.py`).
+
+## Step 7. A malformed payload goes dead; replay runs it again
 
 **Command:**
 ```
 curl -sS --fail-with-body -X POST "$BASE/v1/sources/$ANDROID/events" \
   -H "X-Signature: $sig" --data-binary "@tests/fixtures/playstore/malformed.json"
-curl -sS --fail-with-body "$BASE/admin/raw-events?status=dead" -H "X-API-Key: $ACME_KEY" |
+curl -sS --fail-with-body "$BASE/admin/raw-events?status=dead" -H "X-API-Key: $LUMENOTE_KEY" |
   jq -c '[.[] | {id, status, attempts, next_attempt_at}]'
-curl -sS --fail-with-body -X POST "$BASE/admin/raw-events/$DEAD_ID/replay" -H "X-API-Key: $ACME_KEY"
-curl -sS --fail-with-body "$BASE/admin/raw-events/$DEAD_ID" -H "X-API-Key: $ACME_KEY" |
+curl -sS --fail-with-body -X POST "$BASE/admin/raw-events/$DEAD_ID/replay" -H "X-API-Key: $LUMENOTE_KEY"
+curl -sS --fail-with-body "$BASE/admin/raw-events/$DEAD_ID" -H "X-API-Key: $LUMENOTE_KEY" |
   jq -c '{status, attempts, next_attempt_at, error: .error[:60]}'
 ```
 
@@ -180,12 +212,12 @@ payload. After a real connector fix, the same call brings it back."
 **Answer:** It retries with backoff (2, 4, 8, 16 seconds) and goes dead after 5 attempts
 (`feedback_ingest/services/pipeline.py`, `tests/api/test_admin_api.py`).
 
-## Step 7. Live Discourse pull
+## Step 8. Live Discourse pull
 
 **Command:**
 ```
-curl -sS --fail-with-body -X POST "$BASE/v1/sources/$FORUM/sync" -H "X-API-Key: $ACME_KEY"
-curl -sS --fail-with-body "$BASE/v1/records?kind=post&limit=3" -H "X-API-Key: $ACME_KEY" |
+curl -sS --fail-with-body -X POST "$BASE/v1/sources/$FORUM/sync" -H "X-API-Key: $LUMENOTE_KEY"
+curl -sS --fail-with-body "$BASE/v1/records?kind=post&limit=3" -H "X-API-Key: $LUMENOTE_KEY" |
   jq -c '[.[] | {external_id, title, author}]'
 ```
 
@@ -202,16 +234,16 @@ are on disk. The seed fixes the window to four days in January 2021, so the demo
 moved, so the next run starts from the same place and repeats are dropped; the sync answers 502 with the error,
 and `/health` counts it in `failing_sources`; the WARNING log line names the source (`feedback_ingest/services/pull.py`).
 
-## Step 8. 20 pushes queued, kill -9, restart
+## Step 9. 20 pushes queued, kill -9, restart
 
 **Command:**
 ```
 FI_WORKER_ENABLED=false start_server
 # 20 signed pushes of review.json, each with reviewId gp:demo-backlog-01 .. 20
-curl -sS --fail-with-body "$BASE/admin/queue" -H "X-API-Key: $ACME_KEY"
+curl -sS --fail-with-body "$BASE/admin/queue" -H "X-API-Key: $LUMENOTE_KEY"
 kill -9 "$SERVER_PID"
 start_server
-curl -sS --fail-with-body "$BASE/admin/queue" -H "X-API-Key: $ACME_KEY"
+curl -sS --fail-with-body "$BASE/admin/queue" -H "X-API-Key: $LUMENOTE_KEY"
 ```
 
 **They see:** before the kill, the queue shows `"pending":20`. After the restart, "queue as it drains" prints the
@@ -226,7 +258,7 @@ point: the backlog was never in memory."
 **Answer:** That row stays `processing` with a 30-second lease; when the lease runs out it is claimed again, and
 the upsert makes the second run safe (`feedback_ingest/adapters/sqlalchemy/raw_event_queue.py`).
 
-## Step 9. Stop the server
+## Step 10. Stop the server
 
 **Command:** the script's `stop_server` (a plain `kill` of the uvicorn process), then `echo "done"`.
 

@@ -6,6 +6,7 @@ class SourceType(StrEnum):
     PLAYSTORE = "playstore"
     TWITTER = "twitter"
     INTERCOM = "intercom"
+    CUSTOM = "custom"
 
 
 class SourceMode(StrEnum):
@@ -17,6 +18,7 @@ class FeedbackKind(StrEnum):
     REVIEW = "review"
     CONVERSATION = "conversation"
     POST = "post"
+    SURVEY = "survey"
 
 
 class EventStatus(StrEnum):

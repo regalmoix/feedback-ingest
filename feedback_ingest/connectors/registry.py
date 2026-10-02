@@ -5,6 +5,7 @@ from datetime import timedelta
 from urllib.parse import urlsplit
 
 from feedback_ingest.connectors.base import PullConnector, SourceConnector
+from feedback_ingest.connectors.custom import CustomConnector
 from feedback_ingest.connectors.discourse import DiscourseConnector
 from feedback_ingest.connectors.intercom import IntercomConnector
 from feedback_ingest.connectors.playstore import PlaystoreConnector
@@ -16,7 +17,13 @@ from feedback_ingest.utils.time import NAIVE_UTC
 _DISCOURSE: PullConnector = DiscourseConnector()
 CONNECTORS: dict[SourceType, SourceConnector] = {
     c.source_type: c
-    for c in (_DISCOURSE, PlaystoreConnector(), TwitterConnector(), IntercomConnector())
+    for c in (
+        _DISCOURSE,
+        PlaystoreConnector(),
+        TwitterConnector(),
+        IntercomConnector(),
+        CustomConnector(),
+    )
 }
 PULLERS: dict[SourceType, PullConnector] = {SourceType.DISCOURSE: _DISCOURSE}
 _MAX_WINDOW_DAYS = 31

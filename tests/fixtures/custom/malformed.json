@@ -1,0 +1,9 @@
+{
+  "records": [
+    {
+      "id": "lumenote-review-0002",
+      "type": "REVIEW",
+      "metadata": {"rating": {"array": {"n": [5]}}}
+    }
+  ]
+}

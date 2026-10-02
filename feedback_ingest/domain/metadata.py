@@ -38,7 +38,17 @@ class IntercomMetadata(FrozenModel):
     state: str | None = None
 
 
+CustomRecordType = Literal["REVIEW", "CONVERSATION", "FORUM_CONVERSATION_THREAD", "SURVEY"]
+
+
+class CustomMetadata(FrozenModel):
+    source_type: Literal[SourceType.CUSTOM] = SourceType.CUSTOM
+    record_type: CustomRecordType
+    score: float | None = None
+    fields: dict[str, str | float | bool] = {}
+
+
 SourceMetadata = Annotated[
-    DiscourseMetadata | PlaystoreMetadata | TwitterMetadata | IntercomMetadata,
+    DiscourseMetadata | PlaystoreMetadata | TwitterMetadata | IntercomMetadata | CustomMetadata,
     Field(discriminator="source_type"),
 ]

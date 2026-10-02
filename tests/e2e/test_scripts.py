@@ -26,10 +26,10 @@ def _fake_api(
 
 def test_the_tenant_is_saved_before_its_sources_are_created() -> None:
     saved: list[dict[str, Any]] = []
-    api = _fake_api(500, '{"id": "t1", "name": "acme", "api_key": "k"}')
+    api = _fake_api(500, '{"id": "t1", "name": "lumenote", "api_key": "k"}')
     with api, pytest.raises(RuntimeError, match="POST /v1/sources: 500 boom"):
-        seed_tenant(api, TOKEN, "acme", saved.append)
-    assert saved == [{"id": "t1", "name": "acme", "api_key": "k"}]
+        seed_tenant(api, TOKEN, "lumenote", saved.append)
+    assert saved == [{"id": "t1", "name": "lumenote", "api_key": "k"}]
 
 
 def test_a_2xx_that_is_not_json_names_the_status_and_the_body() -> None:
@@ -52,8 +52,8 @@ def test_seed_writes_a_private_file_and_prints_no_secrets(
     seeded = json.loads(Path(".seed.json").read_text())
     assert Path(".seed.json").stat().st_mode & 0o777 == 0o600
     out = capsys.readouterr().out
-    assert seeded["acme"]["api_key"] not in out
-    assert seeded["acme"]["sources"]["acme-android"]["webhook_secret"] not in out
+    assert seeded["lumenote"]["api_key"] not in out
+    assert seeded["lumenote"]["sources"]["lumenote-android"]["webhook_secret"] not in out
 
 
 def test_seed_and_sign_need_their_secret_from_the_environment(

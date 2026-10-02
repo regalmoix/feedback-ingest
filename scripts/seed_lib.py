@@ -10,11 +10,24 @@ if TYPE_CHECKING:
 
     type Client = httpx.Client | httpx2.Client
 
-TENANTS = ("acme", "globex")
 DISCOURSE = {
     "base_url": "https://meta.discourse.org",
     "start_after": "2021-01-01",
     "window_days": "4",
+}
+# synthetic demo tenants (a consumer app, a B2B SaaS): (type, source name, pull config)
+TENANTS: dict[str, list[tuple[str, str, dict[str, str] | None]]] = {
+    "lumenote": [
+        ("discourse", "lumenote-community", DISCOURSE),
+        ("playstore", "lumenote-android", None),
+        ("playstore", "lumenote-android-beta", None),
+        ("custom", "lumenote-surveys", None),
+    ],
+    "brightwave": [
+        ("intercom", "brightwave-support", None),
+        ("twitter", "brightwave-x", None),
+        ("custom", "brightwave-nps", None),
+    ],
 }
 
 
@@ -50,15 +63,8 @@ def seed_tenant(
 ) -> dict[str, Any]:
     tenant = create_tenant(client, bootstrap_token, name)
     save(tenant)  # the api key is kept even if a source below fails
-    wanted = [
-        ("discourse", f"{name}-forum", DISCOURSE),
-        ("playstore", f"{name}-android", None),
-        ("playstore", f"{name}-ios-wrapper", None),
-        ("twitter", f"{name}-twitter", None),
-        ("intercom", f"{name}-intercom", None),
-    ]
     tenant["sources"] = {
         source_name: create_source(client, tenant["api_key"], type_, source_name, config)
-        for type_, source_name, config in wanted
+        for type_, source_name, config in TENANTS[name]
     }
     return tenant

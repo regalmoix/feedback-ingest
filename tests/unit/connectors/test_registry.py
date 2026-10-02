@@ -6,7 +6,7 @@ from feedback_ingest.domain.models import KIND_BY_SOURCE
 
 
 def test_registry_has_one_connector_per_type_and_a_fixture_for_each() -> None:
-    assert set(SourceType) == CONNECTORS.keys() == KIND_BY_SOURCE.keys()
+    assert set(SourceType) == CONNECTORS.keys() == KIND_BY_SOURCE.keys() | {SourceType.CUSTOM}
     assert PULLERS.keys() <= CONNECTORS.keys()
     for t in SourceType:
         assert "malformed" in fixture_names(t)
