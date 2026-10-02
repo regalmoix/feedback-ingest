@@ -1,6 +1,6 @@
 # Plan: Feedback Ingestion Service (take-home round 3)
 
-> Progress (2026-10-03): Phase 0 and Phase 1 committed after three review rounds; ADR-001..003 accepted; Phase 2–5 designs written in `docs/phases/`.
+> Progress (2026-10-03): Phases 0–3 committed on `main` (Phase 1: three review rounds; Phase 2: one fix round; Phase 3: fix round in progress); ADR-001..003 accepted; Phases 4 and 5 building in parallel worktrees; Phase 6 designed.
 
 ## Context
 
