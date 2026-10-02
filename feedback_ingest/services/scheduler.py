@@ -2,7 +2,7 @@ import logging
 import threading
 from dataclasses import dataclass, field
 
-from feedback_ingest.services.pull import PullResult, PullService
+from feedback_ingest.services.pull import PullService
 
 log = logging.getLogger(__name__)
 _JOIN_SECONDS = 5  # a sync abandoned mid-run resumes from its last saved page cursor
@@ -16,9 +16,7 @@ class SchedulerService:
     interval_seconds: float
     _stop: threading.Event = field(default_factory=threading.Event, init=False, repr=False)
     _thread: threading.Thread | None = field(default=None, init=False, repr=False)
-
-    def run_once(self) -> list[PullResult]:
-        return self.pull.sync_all()
+    last_errors: dict[str, str] = field(default_factory=dict, init=False)  # source_id -> error
 
     def start(self) -> None:
         self._stop.clear()
@@ -39,6 +37,7 @@ class SchedulerService:
     def _loop(self) -> None:
         while not self._stop.wait(self.interval_seconds):
             try:
-                self.run_once()
+                results = self.pull.sync_all()
+                self.last_errors = {r.source_id: r.error for r in results if r.error}
             except Exception:
                 log.exception("scheduler tick failed")

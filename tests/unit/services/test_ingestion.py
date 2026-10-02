@@ -33,7 +33,7 @@ def test_accept_stores_a_pending_event_once(
     assert [vars(record)[k] for k in fields] == [event.id, source.tenant_id, source.id, False]
 
     again = ingestion.accept(source, payload)
-    assert (again.raw_event_id, again.duplicate) == (None, True)
+    assert (again.raw_event_id, again.duplicate) == (event.id, True)
     assert adapters.queue.counts()[EventStatus.PENDING] == 1
 
 

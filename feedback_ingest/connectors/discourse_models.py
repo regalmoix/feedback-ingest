@@ -2,7 +2,7 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from feedback_ingest.domain.models import NaiveUtc
+from feedback_ingest.utils.time import NaiveUtc
 
 
 class DiscoursePostIn(BaseModel):
@@ -40,7 +40,7 @@ class _GroupedIn(BaseModel):
 class SearchPageIn(BaseModel):
     posts: list[SearchHitIn]
     topics: list[_TopicIn] = []
-    grouped_search_result: _GroupedIn | None = None
+    grouped_search_result: _GroupedIn  # required: a missing one must not read as the last page
 
 
 class _PostStreamIn(BaseModel):

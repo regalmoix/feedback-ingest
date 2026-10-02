@@ -4,6 +4,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from feedback_ingest.domain.enums import EventStatus, FeedbackKind, SourceMode, SourceType
+from feedback_ingest.utils.time import NaiveUtc
 
 
 class RawEventView(BaseModel):
@@ -22,6 +23,7 @@ class HealthResponse(BaseModel):
     worker_alive: bool
     scheduler_enabled: bool
     scheduler_alive: bool
+    failing_sources: list[str]  # pull sources whose latest scheduled sync failed
     queue: dict[EventStatus, int]
 
 
@@ -51,7 +53,7 @@ class RecordQuery(BaseModel):
     model_config = ConfigDict(extra="forbid")
     source_id: str | None = None
     kind: FeedbackKind | None = None
-    since: datetime | None = None
+    since: NaiveUtc | None = None
     limit: int = Field(default=100, ge=1, le=500)
     include_deleted: bool = False
 

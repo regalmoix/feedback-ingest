@@ -7,14 +7,13 @@ from sqlalchemy.exc import IntegrityError
 from feedback_ingest.domain.enums import EventStatus
 
 
-def duplicate_enqueue_is_rejected(a: Adapters) -> None:
+def duplicate_enqueue_returns_the_stored_id(a: Adapters) -> None:
     seed(a)
     now = a.clock.now()
-    first = event(SOURCE_A1, "e1", now)
-    assert a.queue.enqueue(first) is True
-    assert a.queue.enqueue(first) is False
-    assert a.queue.enqueue(event(SOURCE_A1, "e1", now)) is False
-    assert a.queue.enqueue(event(SOURCE_B1, "e1", now)) is True
+    first, other_source = event(SOURCE_A1, "e1", now), event(SOURCE_B1, "e1", now)
+    assert a.queue.enqueue(first) == first.id
+    assert a.queue.enqueue(event(SOURCE_A1, "e1", now)) == first.id
+    assert a.queue.enqueue(other_source) == other_source.id
     with pytest.raises((ValueError, IntegrityError)):
         a.queue.enqueue(first.model_copy(update={"external_event_id": "e2"}))
     assert a.queue.counts(TENANT_A.id)[EventStatus.PENDING] == 1
@@ -110,7 +109,7 @@ def list_by_status_is_newest_first_then_id(a: Adapters) -> None:
 
 
 QUEUE_CASES: list[Case] = [
-    duplicate_enqueue_is_rejected,
+    duplicate_enqueue_returns_the_stored_id,
     claim_leases_due_rows_once,
     claim_respects_limit,
     expired_lease_is_reclaimed_with_a_fresh_lease,

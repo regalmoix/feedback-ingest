@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 
 from feedback_ingest.ports.clock import Clock
 from feedback_ingest.ports.queue import RawEventQueue
-from feedback_ingest.services.pipeline import PipelineService
+from feedback_ingest.services.pipeline import PipelineService, event_extra
 
 log = logging.getLogger(__name__)
 
@@ -27,21 +27,19 @@ class WorkerService:
 
     def run_once(self) -> int:
         events = self.queue.claim(self.clock.now(), self.lease_seconds, self.batch)
+        progressed = not events  # a batch where every event crashed is not progress
         for event in events:
             try:
                 self.pipeline.process(event)
+                progressed = True
             except Exception:
-                extra = {
-                    "raw_event_id": event.id,
-                    "tenant_id": event.tenant_id,
-                    "source_id": event.source_id,
-                    "attempts": event.attempts,
-                }
-                log.exception("process crashed", extra=extra)
-        self._last_ok_at = self.clock.now()
+                log.exception("process crashed", extra=event_extra(event))
+        if progressed:
+            self._last_ok_at = self.clock.now()
         return len(events)
 
     def start(self) -> None:
+        self._stop.clear()
         self._last_ok_at = self.clock.now()
         self._thread = threading.Thread(target=self._loop, name="feedback-worker", daemon=True)
         self._thread.start()

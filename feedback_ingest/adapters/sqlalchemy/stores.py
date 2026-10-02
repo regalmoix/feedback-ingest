@@ -45,6 +45,10 @@ class SqlSourceStore:
         found = self._list(SourceRow.id == source_id, SourceRow.tenant_id == tenant_id)
         return found[0] if found else None
 
+    def get_by_id(self, source_id: str) -> Source | None:
+        found = self._list(SourceRow.id == source_id)
+        return found[0] if found else None
+
     def list_for_tenant(self, tenant_id: str) -> list[Source]:
         return self._list(SourceRow.tenant_id == tenant_id)
 

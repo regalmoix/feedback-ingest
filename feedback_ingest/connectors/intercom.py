@@ -3,13 +3,14 @@ from typing import Any, ClassVar
 
 from pydantic import BaseModel, ValidationError
 
-from feedback_ingest.connectors.base import default_verify_signature, record_id
-from feedback_ingest.domain.enums import FeedbackKind, SourceType
+from feedback_ingest.connectors.base import default_verify_signature, new_record
+from feedback_ingest.domain.enums import SourceType
 from feedback_ingest.domain.errors import TransformError
 from feedback_ingest.domain.metadata import IntercomMetadata
-from feedback_ingest.domain.models import FeedbackRecord, NaiveUtc, Source
+from feedback_ingest.domain.models import FeedbackRecord, Source
 from feedback_ingest.utils.hashing import payload_hash
 from feedback_ingest.utils.html import strip_tags
+from feedback_ingest.utils.time import NaiveUtc
 
 
 class _Author(BaseModel):
@@ -78,13 +79,10 @@ class IntercomConnector:
         parts = sorted(item.conversation_parts.conversation_parts, key=lambda p: p.created_at)
         texts = [strip_tags(body or "") for body in (item.source.body, *(p.body for p in parts))]
         return [
-            FeedbackRecord(
-                id=record_id(source.id, item.id),
-                tenant_id=source.tenant_id,
-                source_id=source.id,
-                source_type=self.source_type,
-                external_id=item.id,
-                kind=FeedbackKind.CONVERSATION,
+            new_record(
+                source,
+                self,
+                item.id,
                 title=item.source.subject,
                 text="\n\n".join(t for t in texts if t),
                 author=item.source.author.name,
@@ -92,9 +90,7 @@ class IntercomConnector:
                 rating=None,
                 source_created_at=item.created_at,
                 source_updated_at=item.updated_at,
-                ingested_at=item.created_at,
                 deleted_at=None,
-                connector_version=self.version,
                 metadata=IntercomMetadata(
                     part_count=len(parts),
                     tags=tuple(tag.name for tag in item.tags.tags),

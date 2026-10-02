@@ -5,34 +5,30 @@ from itertools import batched
 from typing import Any
 from urllib.parse import urlencode
 
-from pydantic import BaseModel, TypeAdapter, ValidationError
+from pydantic import BaseModel, ValidationError
 
 from feedback_ingest.connectors.base import PullPage
 from feedback_ingest.connectors.discourse_models import SearchHitIn, SearchPageIn, TopicPostsIn
 from feedback_ingest.domain.errors import TransformError, TransientError
-from feedback_ingest.domain.models import NaiveUtc, Source
+from feedback_ingest.domain.models import Source
 from feedback_ingest.ports.http import HttpClient
 from feedback_ingest.utils.html import strip_tags
+from feedback_ingest.utils.time import NAIVE_UTC
 
-_NAIVE_UTC: TypeAdapter[NaiveUtc] = TypeAdapter(NaiveUtc)
 _OVERLAP = timedelta(seconds=60)
-_MAX_PAGES = 20
+_MAX_PAGES = 10  # Discourse answers 400 for page > 10
 _POSTS_PER_CALL = 20
 
 
 # ponytail: every poll re-scans the whole window; store last post id per topic if Discourse
 # volume grows. The cursor only advances on the final page because search order is not
 # guaranteed oldest-first; a crash mid-run re-fetches from the old cursor (dedup absorbs it).
-# ponytail: at most 20 search pages (~1000 posts) per window; a busier window raises after page 20
+# ponytail: at most 10 search pages (~500 posts) per window; a busier window raises after page 10
 # with the cursor unmoved; lower config["window_days"] or page by date if that happens.
 def pull_pages(source: Source, http: HttpClient, now: datetime) -> Iterator[PullPage]:
-    base_url = config(source, "base_url")
-    since = source.cursor or config(source, "start_after")
-    try:
-        since_at = _NAIVE_UTC.validate_python(since)
-    except ValidationError:
-        msg = f"discourse source {source.id} has an unparseable cursor {since!r}"
-        raise TransformError(msg) from None
+    base_url = source.config["base_url"]
+    since = source.cursor or source.config["start_after"]  # check_source parsed start_after
+    since_at = NAIVE_UTC.validate_python(since)
     window = timedelta(days=int(source.config.get("window_days", 7)))
     until = min(now + timedelta(days=1), since_at + window)
     query = f"after:{since_at.date()} before:{until.date()}"
@@ -41,13 +37,13 @@ def pull_pages(source: Source, http: HttpClient, now: datetime) -> Iterator[Pull
         raw = http.get_json(f"{base_url}/search.json", {"q": query, "page": str(page)})
         search = _validated(SearchPageIn, raw, "search.json")
         grouped = search.grouped_search_result
-        if grouped and grouped.error:
+        if grouped.error:
             msg = f"discourse search failed: {grouped.error}"
             raise TransformError(msg)
         newest = max(
             [hit.created_at for hit in search.posts] + ([newest] if newest else []), default=None
         )
-        final = not (grouped and grouped.more_full_page_results)
+        final = not grouped.more_full_page_results
         cursor = since
         if final:
             moved = max(newest - _OVERLAP, since_at) if newest else since_at
@@ -91,11 +87,3 @@ def _validated[M: BaseModel](model: type[M], data: dict[str, Any], what: str) ->
     except ValidationError as exc:
         msg = f"unexpected response shape from {what}: {exc.error_count()} errors"
         raise TransientError(msg) from exc
-
-
-def config(source: Source, key: str) -> str:
-    try:
-        return source.config[key]
-    except KeyError:
-        msg = f"discourse source {source.id} needs config[{key!r}]"
-        raise TransformError(msg) from None

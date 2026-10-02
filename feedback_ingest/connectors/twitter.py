@@ -3,12 +3,13 @@ from typing import Any, ClassVar
 
 from pydantic import BaseModel, ValidationError
 
-from feedback_ingest.connectors.base import default_verify_signature, record_id
-from feedback_ingest.domain.enums import FeedbackKind, SourceType
+from feedback_ingest.connectors.base import default_verify_signature, new_record
+from feedback_ingest.domain.enums import SourceType
 from feedback_ingest.domain.errors import TransformError
 from feedback_ingest.domain.metadata import TwitterMetadata
-from feedback_ingest.domain.models import FeedbackRecord, NaiveUtc, Source
+from feedback_ingest.domain.models import FeedbackRecord, Source
 from feedback_ingest.utils.hashing import payload_hash
+from feedback_ingest.utils.time import NaiveUtc
 
 
 class _Author(BaseModel):
@@ -51,13 +52,10 @@ class TwitterConnector:
             raise TransformError(msg)
         external_id = (history or [tweet.id])[0]
         return [
-            FeedbackRecord(
-                id=record_id(source.id, external_id),
-                tenant_id=source.tenant_id,
-                source_id=source.id,
-                source_type=self.source_type,
-                external_id=external_id,
-                kind=FeedbackKind.POST,
+            new_record(
+                source,
+                self,
+                external_id,
                 title=None,
                 text=tweet.text,
                 author=f"@{tweet.author.username}",
@@ -65,9 +63,7 @@ class TwitterConnector:
                 rating=None,
                 source_created_at=tweet.created_at,
                 source_updated_at=None,
-                ingested_at=tweet.created_at,
                 deleted_at=None,
-                connector_version=self.version,
                 metadata=TwitterMetadata(
                     country=tweet.country,
                     retweets=tweet.public_metrics.retweet_count,

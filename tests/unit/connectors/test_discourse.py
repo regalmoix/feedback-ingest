@@ -1,11 +1,9 @@
 from datetime import datetime
 
-import pytest
 from connector_fixtures import load, source
 
 from feedback_ingest.connectors.discourse import DiscourseConnector
 from feedback_ingest.domain.enums import FeedbackKind, SourceType
-from feedback_ingest.domain.errors import TransformError
 from feedback_ingest.domain.metadata import DiscourseMetadata
 from feedback_ingest.utils.hashing import payload_hash
 
@@ -51,9 +49,3 @@ def test_out_of_range_timestamp_falls_back_to_the_payload_hash() -> None:
     payload = load(SourceType.DISCOURSE, "post") | {"created_at": "0001-01-01T00:00:00+01:00"}
     del payload["updated_at"]
     assert DISCOURSE.external_event_id(payload) == payload_hash(payload)
-
-
-def test_missing_base_url_is_a_transform_error() -> None:
-    no_config = SOURCE.model_copy(update={"config": {}})
-    with pytest.raises(TransformError, match="base_url"):
-        DISCOURSE.transform(no_config, load(SourceType.DISCOURSE, "post"))

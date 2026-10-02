@@ -32,8 +32,8 @@ trap 'stop_server; rm -rf "$TMP"' EXIT
 
 push() {  # source_id secret file
   local sig; sig="$("$PY" scripts/sign.py "$2" "$3")"
-  show curl -sS --fail-with-body -X POST "$BASE/v1/sources/$1/events" -H "X-API-Key: $ACME_KEY" \
-    -H "X-Signature: $sig" --data-binary "@$3"
+  show curl -sS --fail-with-body -X POST "$BASE/v1/sources/$1/events" -H "X-Signature: $sig" \
+    --data-binary "@$3"
   echo
 }
 queue() { curl -sS --fail-with-body "$BASE/admin/queue" -H "X-API-Key: $ACME_KEY"; }

@@ -61,3 +61,19 @@ def test_a_crashing_process_does_not_kill_the_loop(
     worker.start()
     wait_until(lambda: len(calls) == 3)
     assert worker.alive
+
+
+def test_a_batch_that_only_crashes_is_not_progress_and_start_is_repeatable(
+    worker: WorkerService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def crash(_event: RawEvent) -> EventStatus:
+        msg = "boom"
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr(worker.pipeline, "process", crash)
+    worker.run_once()
+    assert worker._last_ok_at is None  # noqa: SLF001
+    worker.start()
+    worker.stop()
+    worker.start()  # stop() set the event; start() clears it
+    assert worker.alive

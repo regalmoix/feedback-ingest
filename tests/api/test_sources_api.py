@@ -26,7 +26,7 @@ def test_push_secret_is_generated_shown_once_and_masked_after(app_client: TestCl
     listed = app_client.get("/v1/sources", headers=MINE).json()
     assert [s["webhook_secret"] for s in listed] == ["***", "***"]
     review = fixture_body(SourceType.PLAYSTORE, "review")
-    assert push(app_client, body["id"], review, KEY_A, body["webhook_secret"]).status_code == 202
+    assert push(app_client, body["id"], review, body["webhook_secret"]).status_code == 202
 
 
 @pytest.mark.usefixtures("source_a")
@@ -56,6 +56,7 @@ def test_pull_source_missing_a_config_key_is_422_naming_it(app_client: TestClien
         ("push", {}),
         ("pull", FORUM | {"window_days": "0"}),
         ("pull", FORUM | {"base_url": "https://user:pw@forum.example.test"}),
+        ("pull", FORUM | {"base_url": "http://127.0.0.1"}),
     ],
 )
 def test_bad_discourse_config_is_422(
@@ -97,6 +98,6 @@ def test_disabled_source_refuses_pushes(
     app_client: TestClient, adapters: Adapters, source_a: Source
 ) -> None:
     app_client.patch(f"/v1/sources/{source_a.id}", json={"enabled": False}, headers=MINE)
-    response = push(app_client, source_a.id, fixture_body(SourceType.PLAYSTORE, "review"), KEY_A)
+    response = push(app_client, source_a.id, fixture_body(SourceType.PLAYSTORE, "review"))
     assert (response.status_code, response.json()) == (409, {"detail": "source is disabled"})
     assert sum(adapters.queue.counts().values()) == 0

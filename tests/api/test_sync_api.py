@@ -12,10 +12,12 @@ from helpers import (
     memory_adapters,
     seed_source,
 )
+from sqlalchemy import exc as sa_exc
 
 from feedback_ingest.adapters.memory.clock import FixedClock
 from feedback_ingest.api.deps import Adapters
 from feedback_ingest.domain.enums import SourceMode, SourceType
+from feedback_ingest.domain.errors import TransientError
 from feedback_ingest.domain.models import Source
 
 
@@ -76,3 +78,28 @@ def test_409_unless_an_enabled_pull_source(
             "detail": f"source {source_id} is not an enabled pull source",
         }
     assert sum(app_state(app_client).adapters.queue.counts().values()) == 0
+
+
+def test_502_with_the_pull_result_when_the_source_fails(
+    app_client: TestClient, forum: Source, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def down(url: str, _params: dict[str, str]) -> dict[str, object]:
+        msg = f"503 from {url}"
+        raise TransientError(msg)
+
+    monkeypatch.setattr(app_state(app_client).pull.http, "get_json", down)
+    result = _sync(app_client, forum.id)
+    assert (result["status"], result["pages"]) == (502, 0)
+    assert result["error"] == "503 from https://forum.example.test/search.json"
+
+
+def test_503_when_storage_is_down(
+    app_client: TestClient, forum: Source, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    error = sa_exc.OperationalError("INSERT", {}, Exception("disk I/O error"))
+
+    def down(*_args: object) -> str:
+        raise error
+
+    monkeypatch.setattr(app_state(app_client).adapters.queue, "enqueue", down)
+    assert _sync(app_client, forum.id) == {"status": 503, "detail": "storage unavailable"}

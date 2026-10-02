@@ -1,7 +1,8 @@
+import ipaddress
 from collections.abc import Mapping
 from urllib.parse import urlsplit
 
-from pydantic import TypeAdapter, ValidationError
+from pydantic import ValidationError
 
 from feedback_ingest.connectors.base import PullConnector, SourceConnector
 from feedback_ingest.connectors.discourse import DiscourseConnector
@@ -9,20 +10,15 @@ from feedback_ingest.connectors.intercom import IntercomConnector
 from feedback_ingest.connectors.playstore import PlaystoreConnector
 from feedback_ingest.connectors.twitter import TwitterConnector
 from feedback_ingest.domain.enums import SourceMode, SourceType
-from feedback_ingest.domain.models import NaiveUtc, Source
+from feedback_ingest.domain.models import Source
+from feedback_ingest.utils.time import NAIVE_UTC
 
-_DISCOURSE = DiscourseConnector()
-_ALL: tuple[SourceConnector, ...] = (
-    _DISCOURSE,
-    PlaystoreConnector(),
-    TwitterConnector(),
-    IntercomConnector(),
-)
-_PULL: tuple[PullConnector, ...] = (_DISCOURSE,)
-
-CONNECTORS: dict[SourceType, SourceConnector] = {c.source_type: c for c in _ALL}
-PULLERS: dict[SourceType, PullConnector] = {c.source_type: c for c in _PULL}
-_NAIVE_UTC: TypeAdapter[NaiveUtc] = TypeAdapter(NaiveUtc)
+_DISCOURSE: PullConnector = DiscourseConnector()
+CONNECTORS: dict[SourceType, SourceConnector] = {
+    c.source_type: c
+    for c in (_DISCOURSE, PlaystoreConnector(), TwitterConnector(), IntercomConnector())
+}
+PULLERS: dict[SourceType, PullConnector] = {SourceType.DISCOURSE: _DISCOURSE}
 
 
 def check_source(source: Source) -> None:
@@ -42,8 +38,11 @@ def check_source(source: Source) -> None:
 def _check_values(config: Mapping[str, str]) -> None:
     if "base_url" in config:
         url = urlsplit(config["base_url"])
-        if url.scheme not in {"http", "https"} or url.username or url.password:
+        if url.scheme not in {"http", "https"} or not url.hostname or url.username or url.password:
             msg = "config['base_url'] must be an http(s) URL without credentials"
+            raise ValueError(msg)
+        if _is_internal(url.hostname):
+            msg = "config['base_url'] must not point at an internal host"
             raise ValueError(msg)
     try:
         window_ok = int(config.get("window_days", "1")) > 0
@@ -54,7 +53,19 @@ def _check_values(config: Mapping[str, str]) -> None:
         raise ValueError(msg)
     if "start_after" in config:
         try:
-            _NAIVE_UTC.validate_python(config["start_after"])
+            NAIVE_UTC.validate_python(config["start_after"])
         except ValidationError:
             msg = f"config['start_after'] is not a datetime: {config['start_after']!r}"
             raise ValueError(msg) from None
+
+
+# ponytail: checks the literal host only, no DNS; a public name that resolves to an internal
+# address gets through. Resolve and pin the address at request time if tenants are untrusted.
+def _is_internal(host: str) -> bool:
+    if host == "localhost" or host.endswith((".local", ".internal")):
+        return True
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return ip.is_loopback or ip.is_private or ip.is_link_local or ip.is_reserved

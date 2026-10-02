@@ -1,7 +1,7 @@
 from datetime import timedelta
 
 import pytest
-from contract import SOURCE_A1, Adapters, Case, event, ist, seed
+from contract import SOURCE_A1, Adapters, Case, event, seed
 
 from feedback_ingest.domain.enums import EventStatus
 
@@ -26,7 +26,8 @@ def requeue_and_marks_are_checked(a: Adapters) -> None:
     now = a.clock.now()
     a.queue.enqueue(event(SOURCE_A1, "e1", now))
     [claimed] = a.queue.claim(now, lease_seconds=30, limit=10)
-    assert a.queue.requeue(claimed.id, now) is False
+    assert claimed.lease_until is not None
+    assert a.queue.requeue(claimed.id, claimed.lease_until) is False  # the lease is live
     stored = a.queue.get(claimed.id)
     assert stored is not None
     assert stored.status == EventStatus.PROCESSING
@@ -35,6 +36,16 @@ def requeue_and_marks_are_checked(a: Adapters) -> None:
     assert a.queue.mark_failed(ghost, "x", now) is False
     assert a.queue.mark_dead(ghost, "x") is False
     assert a.queue.requeue("missing", now) is False
+    expired = claimed.lease_until + timedelta(seconds=1)  # the worker crashed
+    assert a.queue.requeue(claimed.id, expired) is True
+    stored = a.queue.get(claimed.id)
+    assert stored is not None
+    assert (stored.status, stored.attempts, stored.next_attempt_at) == (
+        EventStatus.PENDING,
+        0,
+        expired,
+    )
+    assert a.queue.mark_processed(claimed) is False
 
 
 def requeued_row_is_fenced_from_the_first_worker(a: Adapters) -> None:
@@ -62,27 +73,9 @@ def claim_rejects_non_positive_limit_and_lease(a: Adapters) -> None:
             a.queue.claim(now, lease_seconds=lease_seconds, limit=limit)
 
 
-def aware_datetimes_are_normalised(a: Adapters) -> None:
-    seed(a)
-    now = a.clock.now()
-    retry = now + timedelta(seconds=60)
-    a.queue.enqueue(event(SOURCE_A1, "e1", now))
-    [claimed] = a.queue.claim(ist(now), lease_seconds=30, limit=10)
-    assert claimed.lease_until == now + timedelta(seconds=30)
-    assert a.queue.mark_failed(claimed, "boom", ist(retry))
-    assert a.queue.claim(ist(retry - timedelta(seconds=1)), lease_seconds=30, limit=10) == []
-    [again] = a.queue.claim(ist(retry), lease_seconds=30, limit=10)
-    assert a.queue.mark_dead(again, "dead")
-    assert a.queue.requeue(again.id, ist(retry))
-    stored = a.queue.get(again.id)
-    assert stored is not None
-    assert stored.next_attempt_at == retry
-
-
 FENCING_CASES: list[Case] = [
     stale_worker_cannot_finish,
     requeue_and_marks_are_checked,
     requeued_row_is_fenced_from_the_first_worker,
     claim_rejects_non_positive_limit_and_lease,
-    aware_datetimes_are_normalised,
 ]

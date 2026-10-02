@@ -1,11 +1,12 @@
 import logging
+from collections import Counter
 from dataclasses import dataclass
 from datetime import timedelta
 
 from pydantic import ValidationError
 
 from feedback_ingest.connectors.registry import CONNECTORS
-from feedback_ingest.domain.enums import EventStatus
+from feedback_ingest.domain.enums import EventStatus, UpsertOutcome
 from feedback_ingest.domain.errors import TransformError, TransientError
 from feedback_ingest.domain.models import RawEvent
 from feedback_ingest.ports.clock import Clock
@@ -14,6 +15,15 @@ from feedback_ingest.ports.stores import FeedbackStore, SourceStore
 
 log = logging.getLogger(__name__)
 _MAX_ERROR = 500
+
+
+def event_extra(event: RawEvent) -> dict[str, object]:
+    return {
+        "raw_event_id": event.id,
+        "tenant_id": event.tenant_id,
+        "source_id": event.source_id,
+        "attempts": event.attempts,
+    }
 
 
 @dataclass
@@ -26,19 +36,14 @@ class PipelineService:
     backoff_cap_seconds: int
 
     def process(self, event: RawEvent) -> EventStatus:
-        extra: dict[str, object] = {
-            "raw_event_id": event.id,
-            "tenant_id": event.tenant_id,
-            "source_id": event.source_id,
-            "attempts": event.attempts,
-        }
+        extra = event_extra(event)
         # a crash outside this handler leaves the lease to expire; each re-claim bumps attempts
         if event.attempts > self.max_attempts:
-            log.warning("dead: attempt limit exceeded", extra=extra)
-            error = "attempt limit exceeded"
+            error = f"attempt limit exceeded; last error: {event.error}"[:_MAX_ERROR]
+            log.warning("dead: %s", error, extra=extra)
             return _finish(self.queue.mark_dead(event, error), EventStatus.DEAD, extra)
         try:
-            count = self._apply(event)
+            outcomes = self._apply(event)
         except (ValidationError, TransformError) as exc:
             error = _describe(exc)
             log.warning("dead: %s", error, extra=extra)
@@ -53,19 +58,20 @@ class PipelineService:
             return self._retry(event, exc, extra)
         status = _finish(self.queue.mark_processed(event), EventStatus.PROCESSED, extra)
         if status == EventStatus.PROCESSED:
-            log.info("processed into %d records", count, extra=extra)
+            counts = [outcomes[outcome] for outcome in UpsertOutcome]
+            log.info("processed: inserted=%d, updated=%d, skipped_older=%d", *counts, extra=extra)
         return status
 
-    def _apply(self, event: RawEvent) -> int:
+    def _apply(self, event: RawEvent) -> Counter[UpsertOutcome]:
         source = self.sources.get(event.source_id, tenant_id=event.tenant_id)
         if source is None:
             msg = "source not found"
             raise TransformError(msg)
         records = CONNECTORS[source.type].transform(source, dict(event.payload))
         now = self.clock.now()
-        for record in records:
-            self.feedback.upsert(record.model_copy(update={"ingested_at": now}))
-        return len(records)
+        return Counter(
+            self.feedback.upsert(r.model_copy(update={"ingested_at": now})) for r in records
+        )
 
     def _retry(self, event: RawEvent, exc: Exception, extra: dict[str, object]) -> EventStatus:
         error = f"{type(exc).__name__}: {exc}"[:_MAX_ERROR]

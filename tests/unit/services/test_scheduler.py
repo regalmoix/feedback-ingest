@@ -28,11 +28,6 @@ def scheduler(adapters: Adapters) -> Iterator[SchedulerService]:
     scheduler.stop()
 
 
-def test_run_once_syncs_every_pull_source(scheduler: SchedulerService) -> None:
-    [result] = scheduler.run_once()
-    assert (result.source_id, result.accepted, result.error) == ("src-forum", 4, None)
-
-
 def test_start_and_stop_the_thread(adapters: Adapters, scheduler: SchedulerService) -> None:
     scheduler.start()
     assert scheduler.alive
@@ -74,3 +69,14 @@ def test_stop_warns_when_a_sync_outlives_the_join(
     scheduler.stop()
     release.set()
     assert "scheduler still syncing on stop" in caplog.text
+
+
+def test_a_tick_records_which_sources_failed(
+    scheduler: SchedulerService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    results = [[PullResult(source_id="src-forum", error="503 from x")], []]
+    monkeypatch.setattr(scheduler.pull, "sync_all", lambda: results[0])
+    scheduler.start()
+    wait_until(lambda: scheduler.last_errors == {"src-forum": "503 from x"})
+    monkeypatch.setattr(scheduler.pull, "sync_all", lambda: results[1])
+    wait_until(lambda: scheduler.last_errors == {})

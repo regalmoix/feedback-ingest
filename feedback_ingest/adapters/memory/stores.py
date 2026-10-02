@@ -3,7 +3,6 @@ from datetime import datetime
 from feedback_ingest.domain.enums import FeedbackKind, SourceMode, UpsertOutcome
 from feedback_ingest.domain.errors import NotFoundError, check_limit
 from feedback_ingest.domain.models import FeedbackRecord, Source, Tenant
-from feedback_ingest.utils.time import to_naive_utc
 
 
 class MemoryTenantStore:
@@ -34,6 +33,9 @@ class MemorySourceStore:
     def get(self, source_id: str, tenant_id: str) -> Source | None:
         source = self._sources.get(source_id)
         return source if source and source.tenant_id == tenant_id else None
+
+    def get_by_id(self, source_id: str) -> Source | None:
+        return self._sources.get(source_id)
 
     def list_for_tenant(self, tenant_id: str) -> list[Source]:
         return sorted(
@@ -106,7 +108,7 @@ class MemoryFeedbackStore:
             if r.tenant_id == tenant_id
             and (source_id is None or r.source_id == source_id)
             and (kind is None or r.kind == kind)
-            and (since is None or r.source_created_at >= to_naive_utc(since))
+            and (since is None or r.source_created_at >= since)
             and (include_deleted or r.deleted_at is None)
         ]
         return sorted(matches, key=lambda r: (r.source_created_at, r.id))[: check_limit(limit)]

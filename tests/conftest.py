@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
-from helpers import KEY_A, KEY_B, POLL_SECONDS, memory_adapters, seed_source
+from helpers import KEY_A, KEY_B, POLL_SECONDS, client_for, memory_adapters, seed_source
 from sqlalchemy import Engine
 
 from feedback_ingest.adapters.memory.clock import FixedClock
@@ -13,7 +13,6 @@ from feedback_ingest.adapters.sqlalchemy.tables import Base
 from feedback_ingest.api.deps import Adapters
 from feedback_ingest.config import Settings
 from feedback_ingest.domain.models import Source
-from feedback_ingest.main import create_app
 
 
 @pytest.fixture
@@ -36,8 +35,7 @@ def adapters(clock: FixedClock) -> Adapters:
 
 @pytest.fixture
 def app_client(adapters: Adapters) -> Iterator[TestClient]:
-    settings = Settings(worker_enabled=False, scheduler_enabled=False)
-    with TestClient(create_app(settings, adapters=adapters)) as client:
+    with client_for(adapters) as client:
         yield client
 
 

@@ -9,7 +9,6 @@ from contract import (
     TENANT_B,
     Adapters,
     Case,
-    ist,
     record,
     seed,
 )
@@ -38,21 +37,21 @@ def tenants_are_isolated(a: Adapters) -> None:
     assert a.feedback.list_for_tenant(TENANT_B.id, source_id=SOURCE_A1.id) == []
     assert a.sources.get(SOURCE_A1.id, TENANT_B.id) is None
     assert a.sources.get(SOURCE_A1.id, TENANT_A.id) == SOURCE_A1
+    assert a.sources.get_by_id(SOURCE_A1.id) == SOURCE_A1
+    assert a.sources.get_by_id("missing") is None
 
 
 def filters_and_lookups_match(a: Adapters) -> None:
     seed(a)
     now = a.clock.now()
     later = now + timedelta(hours=1)
-    tweet = {"source_type": SourceType.TWITTER, "kind": FeedbackKind.POST}
     meta = TwitterMetadata(country=None, retweets=0)
     a.feedback.upsert(record(SOURCE_A1, "r1", now))
-    a.feedback.upsert(record(SOURCE_A2, "r2", later, **tweet, metadata=meta))
+    a.feedback.upsert(record(SOURCE_A2, "r2", later, source_type=SourceType.TWITTER, metadata=meta))
     by = a.feedback.list_for_tenant
     assert [r.external_id for r in by(TENANT_A.id, source_id=SOURCE_A2.id)] == ["r2"]
     assert [r.external_id for r in by(TENANT_A.id, kind=FeedbackKind.REVIEW)] == ["r1"]
     assert [r.external_id for r in by(TENANT_A.id, since=later)] == ["r2"]
-    assert [r.external_id for r in by(TENANT_A.id, since=ist(later))] == ["r2"]
     assert [r.external_id for r in by(TENANT_A.id, limit=1)] == ["r1"]
     assert a.tenants.get_by_api_key_hash("hash-b") == TENANT_B
     assert a.tenants.get_by_api_key_hash("nope") is None

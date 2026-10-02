@@ -2,8 +2,7 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
-from helpers import app_state, wait_until
-from pydantic import ValidationError
+from helpers import app_state, client_for, wait_until
 from sqlalchemy import text
 
 from feedback_ingest.adapters.http.httpx_client import HttpxClient
@@ -14,8 +13,6 @@ from feedback_ingest.config import Settings
 from feedback_ingest.domain.models import RawEvent
 from feedback_ingest.main import create_app
 
-WORKER_ONLY = Settings(worker_enabled=True, scheduler_enabled=False)
-
 
 def test_ok_without_auth_when_the_worker_is_disabled(app_client: TestClient) -> None:
     response = app_client.get("/health")
@@ -23,11 +20,12 @@ def test_ok_without_auth_when_the_worker_is_disabled(app_client: TestClient) -> 
     body = response.json()
     assert body["status"] == "ok"
     assert (body["worker_enabled"], body["worker_alive"]) == (False, False)
+    assert (body["scheduler_enabled"], body["scheduler_alive"]) == (False, False)
     assert body["queue"]["pending"] == 0
 
 
 def test_degraded_when_the_enabled_worker_thread_is_dead(adapters: Adapters) -> None:
-    with TestClient(create_app(WORKER_ONLY, adapters=adapters)) as client:
+    with client_for(adapters, worker_enabled=True) as client:
         assert client.get("/health").json()["worker_alive"] is True
         app_state(client).worker.stop()
         response = client.get("/health")
@@ -43,8 +41,7 @@ def test_degraded_without_a_completed_pass_in_the_window_then_recovers(
         raise RuntimeError(msg)
 
     monkeypatch.setattr(adapters.queue, "claim", broken)
-    settings = Settings(worker_enabled=True, scheduler_enabled=False, worker_poll_seconds=0.05)
-    with TestClient(create_app(settings, adapters=adapters)) as client:
+    with client_for(adapters, worker_enabled=True, worker_poll_seconds=0.05) as client:
         assert client.get("/health").status_code == 200
         clock.advance(11)
         response = client.get("/health")
@@ -54,8 +51,7 @@ def test_degraded_without_a_completed_pass_in_the_window_then_recovers(
 
 
 def test_degraded_when_the_enabled_scheduler_thread_is_dead(adapters: Adapters) -> None:
-    settings = Settings(worker_enabled=False, scheduler_enabled=True)
-    with TestClient(create_app(settings, adapters=adapters)) as client:
+    with client_for(adapters, scheduler_enabled=True) as client:
         assert client.get("/health").json()["scheduler_alive"] is True
         app_state(client).scheduler.stop()
         response = client.get("/health")
@@ -65,21 +61,23 @@ def test_degraded_when_the_enabled_scheduler_thread_is_dead(adapters: Adapters) 
     assert (body["scheduler_enabled"], body["scheduler_alive"]) == (True, False)
 
 
-def test_scheduler_disabled_is_not_started(app_client: TestClient) -> None:
-    body = app_client.get("/health").json()
-    assert (body["scheduler_enabled"], body["scheduler_alive"]) == (False, False)
+def test_degraded_listing_sources_whose_last_scheduled_sync_failed(
+    app_client: TestClient,
+) -> None:
+    app_state(app_client).scheduler.last_errors = {"src-forum": "503 from x"}
+    response = app_client.get("/health")
+    assert response.status_code == 503
+    assert (response.json()["status"], response.json()["failing_sources"]) == (
+        "degraded",
+        ["src-forum"],
+    )
 
 
 def test_lifespan_exit_stops_the_worker(adapters: Adapters) -> None:
-    with TestClient(create_app(WORKER_ONLY, adapters=adapters)) as client:
+    with client_for(adapters, worker_enabled=True) as client:
         worker = app_state(client).worker
         assert worker.alive
     assert not worker.alive
-
-
-def test_non_positive_worker_settings_are_rejected() -> None:
-    with pytest.raises(ValidationError):
-        Settings(lease_seconds=0)
 
 
 def _sql_settings(tmp_path: Path) -> Settings:

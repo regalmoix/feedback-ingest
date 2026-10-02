@@ -16,7 +16,7 @@ def test_events_accepted_before_a_restart_are_processed_after_it(settings: Setti
         adapters = app_state(client).adapters
         source = seed_source(adapters, "tenant-a", KEY_A)
         for body in bodies:
-            assert push(client, source.id, body, KEY_A).status_code == 202
+            assert push(client, source.id, body).status_code == 202
         assert adapters.queue.counts()[EventStatus.PENDING] == 3
 
     with TestClient(create_app(settings)) as client:

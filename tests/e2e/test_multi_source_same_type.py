@@ -13,7 +13,7 @@ def test_two_playstore_apps_with_the_same_review_give_two_records(settings: Sett
         key = create_tenant(client, settings.bootstrap_token, "acme")["api_key"]
         apps = [create_source(client, key, "playstore", name) for name in ("android", "ios")]
         for app in apps:
-            assert push(client, app["id"], body, key, app["webhook_secret"]).status_code == 202
+            assert push(client, app["id"], body, app["webhook_secret"]).status_code == 202
 
         def records() -> list[dict[str, str]]:
             found: list[dict[str, str]] = client.get(

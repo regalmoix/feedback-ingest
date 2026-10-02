@@ -11,7 +11,7 @@ def test_the_same_webhook_twice_gives_one_record(settings: Settings) -> None:
     with TestClient(create_app(settings)) as client:
         adapters = app_state(client).adapters
         source = seed_source(adapters, "tenant-a", KEY_A)
-        assert [push(client, source.id, body, KEY_A).status_code for _ in range(2)] == [202, 202]
+        assert [push(client, source.id, body).status_code for _ in range(2)] == [202, 202]
         wait_until(lambda: adapters.queue.counts()[EventStatus.PROCESSED] == 1)
         records = adapters.feedback.list_for_tenant(source.tenant_id)
         assert sum(adapters.queue.counts().values()) == 1

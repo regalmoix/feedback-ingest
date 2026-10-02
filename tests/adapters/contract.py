@@ -1,10 +1,10 @@
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta, timezone
+from datetime import datetime
 from uuid import uuid4
 
 from feedback_ingest.adapters.memory.clock import FixedClock
-from feedback_ingest.domain.enums import FeedbackKind, SourceMode, SourceType
+from feedback_ingest.domain.enums import SourceMode, SourceType
 from feedback_ingest.domain.metadata import PlaystoreMetadata
 from feedback_ingest.domain.models import FeedbackRecord, RawEvent, Source, Tenant
 from feedback_ingest.ports.queue import RawEventQueue
@@ -50,26 +50,25 @@ def seed(a: Adapters) -> None:
 
 
 def record(src: Source, external_id: str, created: datetime, **changes: object) -> FeedbackRecord:
-    base = FeedbackRecord(
-        id=uuid4().hex,
-        tenant_id=src.tenant_id,
-        source_id=src.id,
-        source_type=src.type,
-        external_id=external_id,
-        kind=FeedbackKind.REVIEW,
-        title=None,
-        text="great app",
-        author="someone",
-        language="en",
-        rating=5,
-        source_created_at=created,
-        source_updated_at=None,
-        ingested_at=created,
-        deleted_at=None,
-        connector_version=1,
-        metadata=PlaystoreMetadata(app_version="1.0", device="pixel", android_os_version=34),
-    )
-    return FeedbackRecord.model_validate(base.model_dump() | changes)
+    base = {
+        "id": uuid4().hex,
+        "tenant_id": src.tenant_id,
+        "source_id": src.id,
+        "source_type": src.type,
+        "external_id": external_id,
+        "title": None,
+        "text": "great app",
+        "author": "someone",
+        "language": "en",
+        "rating": 5,
+        "source_created_at": created,
+        "source_updated_at": None,
+        "ingested_at": created,
+        "deleted_at": None,
+        "connector_version": 1,
+        "metadata": PlaystoreMetadata(app_version="1.0", device="pixel", android_os_version=34),
+    }
+    return FeedbackRecord.model_validate(base | changes)
 
 
 def event(src: Source, external_event_id: str, next_attempt_at: datetime) -> RawEvent:
@@ -82,10 +81,6 @@ def event(src: Source, external_event_id: str, next_attempt_at: datetime) -> Raw
         received_at=next_attempt_at,
         next_attempt_at=next_attempt_at,
     )
-
-
-def ist(naive_utc: datetime) -> datetime:
-    return naive_utc.replace(tzinfo=UTC).astimezone(timezone(timedelta(hours=5, minutes=30)))
 
 
 Case = Callable[[Adapters], None]

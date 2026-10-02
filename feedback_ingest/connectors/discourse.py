@@ -4,10 +4,10 @@ from typing import Any, ClassVar
 
 from pydantic import ValidationError
 
-from feedback_ingest.connectors.base import PullPage, default_verify_signature, record_id
+from feedback_ingest.connectors.base import PullPage, default_verify_signature, new_record
 from feedback_ingest.connectors.discourse_models import DiscoursePostIn
-from feedback_ingest.connectors.discourse_pull import config, pull_pages
-from feedback_ingest.domain.enums import FeedbackKind, SourceType
+from feedback_ingest.connectors.discourse_pull import pull_pages
+from feedback_ingest.domain.enums import SourceType
 from feedback_ingest.domain.metadata import DiscourseMetadata
 from feedback_ingest.domain.models import FeedbackRecord, Source
 from feedback_ingest.ports.http import HttpClient
@@ -30,15 +30,12 @@ class DiscourseConnector:
 
     def transform(self, source: Source, payload: Mapping[str, Any]) -> list[FeedbackRecord]:
         post = DiscoursePostIn.model_validate(payload)
-        url = f"{config(source, 'base_url')}/t/{post.topic_slug}/{post.topic_id}/{post.post_number}"
+        url = f"{source.config['base_url']}/t/{post.topic_slug}/{post.topic_id}/{post.post_number}"
         return [
-            FeedbackRecord(
-                id=record_id(source.id, str(post.id)),
-                tenant_id=source.tenant_id,
-                source_id=source.id,
-                source_type=self.source_type,
-                external_id=str(post.id),
-                kind=FeedbackKind.POST,
+            new_record(
+                source,
+                self,
+                str(post.id),
                 title=post.topic_title,
                 text=strip_tags(post.cooked),
                 author=post.name or post.username,
@@ -46,9 +43,7 @@ class DiscourseConnector:
                 rating=None,
                 source_created_at=post.created_at,
                 source_updated_at=post.updated_at,
-                ingested_at=post.created_at,
                 deleted_at=post.deleted_at,
-                connector_version=self.version,
                 metadata=DiscourseMetadata(
                     topic_id=post.topic_id,
                     post_number=post.post_number,

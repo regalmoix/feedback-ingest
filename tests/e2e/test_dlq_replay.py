@@ -14,7 +14,7 @@ def test_replaying_a_malformed_payload_runs_it_again_and_it_goes_dead_again(
         queue = app_state(client).adapters.queue
         source = seed_source(app_state(client).adapters, "tenant-a", KEY_A)
         body = fixture_body(SourceType.PLAYSTORE, "malformed")
-        event_id = push(client, source.id, body, KEY_A).json()["raw_event_id"]
+        event_id = push(client, source.id, body).json()["raw_event_id"]
 
         def event() -> RawEvent:
             found = queue.get(event_id)

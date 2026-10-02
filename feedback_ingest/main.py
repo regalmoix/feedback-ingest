@@ -1,7 +1,6 @@
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, nullcontext
-from typing import override
 
 from fastapi import FastAPI
 
@@ -20,24 +19,13 @@ _LOG = logging.getLogger("feedback_ingest")
 _LOG_KEYS = ("raw_event_id", "tenant_id", "source_id", "attempts")
 
 
-class _DefaultLogKeys(logging.Filter):
-    @override
-    def filter(self, record: logging.LogRecord) -> bool:
-        for key in _LOG_KEYS:
-            if not hasattr(record, key):
-                setattr(record, key, "-")
-        return True
-
-
 def create_app(settings: Settings | None = None, adapters: Adapters | None = None) -> FastAPI:
     s = settings or Settings()
     if not _LOG.handlers:
         handler = logging.StreamHandler()
-        handler.addFilter(_DefaultLogKeys())
         keys = " ".join(f"{key}=%({key})s" for key in _LOG_KEYS)
-        handler.setFormatter(
-            logging.Formatter(f"%(asctime)s %(levelname)s %(name)s %(message)s {keys}")
-        )
+        fmt = f"%(asctime)s %(levelname)s %(name)s %(message)s {keys}"
+        handler.setFormatter(logging.Formatter(fmt, defaults=dict.fromkeys(_LOG_KEYS, "-")))
         _LOG.addHandler(handler)
         _LOG.setLevel(logging.INFO)
 

@@ -3,7 +3,6 @@ from datetime import datetime, timedelta
 from feedback_ingest.domain.enums import EventStatus
 from feedback_ingest.domain.errors import check_limit
 from feedback_ingest.domain.models import RawEvent
-from feedback_ingest.utils.time import to_naive_utc
 
 _RETRYABLE = (EventStatus.PENDING, EventStatus.FAILED)
 
@@ -12,21 +11,21 @@ class MemoryRawEventQueue:
     def __init__(self) -> None:
         self._events: dict[str, RawEvent] = {}
 
-    def enqueue(self, event: RawEvent) -> bool:
+    def enqueue(self, event: RawEvent) -> str:
         key = (event.source_id, event.external_event_id)
-        if any((e.source_id, e.external_event_id) == key for e in self._events.values()):
-            return False
+        for stored in self._events.values():
+            if (stored.source_id, stored.external_event_id) == key:
+                return stored.id
         if event.id in self._events:
             msg = f"duplicate raw event id {event.id}"
             raise ValueError(msg)
         self._events[event.id] = event
-        return True
+        return event.id
 
     def claim(self, now: datetime, lease_seconds: int, limit: int) -> list[RawEvent]:
         if limit < 1 or lease_seconds < 1:
             msg = "limit and lease_seconds must be >= 1"
             raise ValueError(msg)
-        now = to_naive_utc(now)
         due = sorted(
             (e for e in self._events.values() if _is_claimable(e, now)),
             key=lambda e: e.next_attempt_at,
@@ -49,7 +48,7 @@ class MemoryRawEventQueue:
             event,
             status=EventStatus.FAILED,
             error=error,
-            next_attempt_at=to_naive_utc(next_attempt_at),
+            next_attempt_at=next_attempt_at,
         )
 
     def mark_dead(self, event: RawEvent, error: str) -> bool:
@@ -57,13 +56,15 @@ class MemoryRawEventQueue:
 
     def requeue(self, event_id: str, now: datetime) -> bool:
         event = self._events.get(event_id)
-        if event is None or event.status == EventStatus.PROCESSING:
-            return False
+        if event is None or (
+            event.status == EventStatus.PROCESSING and not _is_claimable(event, now)
+        ):
+            return False  # a live lease: a worker owns it
         self._update(
             event_id,
             status=EventStatus.PENDING,
             attempts=0,
-            next_attempt_at=to_naive_utc(now),
+            next_attempt_at=now,
             lease_until=None,
             error=None,
         )

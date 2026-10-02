@@ -1,6 +1,6 @@
 import pytest
 from fastapi.testclient import TestClient
-from helpers import KEY_A, MINE, THEIRS, app_state, fixture_body, push
+from helpers import MINE, THEIRS, app_state, fixture_body, push
 
 from feedback_ingest.api.deps import Adapters
 from feedback_ingest.domain.enums import SourceType
@@ -13,9 +13,9 @@ REVIEW, POST, DELETED = "gp:AOqpTEST-review-0001", "9001", "9002"
 def ids(app_client: TestClient, adapters: Adapters, source_a: Source) -> dict[str, str]:
     forum = source_a.model_copy(update={"id": "src-forum", "type": SourceType.DISCOURSE})
     adapters.sources.add(forum)
-    push(app_client, source_a.id, fixture_body(SourceType.PLAYSTORE, "review"), KEY_A)
+    push(app_client, source_a.id, fixture_body(SourceType.PLAYSTORE, "review"))
     for name in ("post", "post_deleted"):
-        push(app_client, forum.id, fixture_body(SourceType.DISCOURSE, name), KEY_A)
+        push(app_client, forum.id, fixture_body(SourceType.DISCOURSE, name))
     app_state(app_client).worker.run_once()
     stored = adapters.feedback.list_for_tenant(source_a.tenant_id, include_deleted=True)
     return {r.external_id: r.id for r in stored}

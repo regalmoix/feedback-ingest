@@ -12,15 +12,18 @@ log = logging.getLogger(__name__)
 _Handler = Callable[[Request, Exception], Awaitable[JSONResponse]]
 
 
-def _respond(status: HTTPStatus, detail: str | None = None) -> _Handler:
+def _respond(status: HTTPStatus) -> _Handler:
     async def handle(_request: Request, exc: Exception) -> JSONResponse:
-        return JSONResponse({"detail": detail or str(exc)}, status_code=status)
+        return JSONResponse({"detail": str(exc)}, status_code=status)
 
     return handle
 
 
 async def _storage_unavailable(request: Request, exc: Exception) -> JSONResponse:
-    log.error("storage unavailable: %s %s", request.method, request.url.path, exc_info=exc)
+    extra = {"source_id": request.path_params.get("source_id", "-")}
+    log.error(
+        "storage unavailable: %s %s", request.method, request.url.path, exc_info=exc, extra=extra
+    )
     return JSONResponse(
         {"detail": "storage unavailable"}, status_code=HTTPStatus.SERVICE_UNAVAILABLE
     )

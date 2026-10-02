@@ -4,11 +4,12 @@ from typing import Any, ClassVar
 from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
 from pydantic.alias_generators import to_camel
 
-from feedback_ingest.connectors.base import default_verify_signature, record_id
-from feedback_ingest.domain.enums import FeedbackKind, SourceType
+from feedback_ingest.connectors.base import default_verify_signature, new_record
+from feedback_ingest.domain.enums import SourceType
 from feedback_ingest.domain.metadata import PlaystoreMetadata
-from feedback_ingest.domain.models import FeedbackRecord, NaiveUtc, Source
+from feedback_ingest.domain.models import FeedbackRecord, Source
 from feedback_ingest.utils.hashing import payload_hash
+from feedback_ingest.utils.time import NaiveUtc
 
 
 class _In(BaseModel):
@@ -68,13 +69,10 @@ class PlaystoreConnector:
         comment = review.comments[0].user_comment
         modified = comment.last_modified.seconds
         return [
-            FeedbackRecord(
-                id=record_id(source.id, review.review_id),
-                tenant_id=source.tenant_id,
-                source_id=source.id,
-                source_type=self.source_type,
-                external_id=review.review_id,
-                kind=FeedbackKind.REVIEW,
+            new_record(
+                source,
+                self,
+                review.review_id,
                 title=None,
                 text=comment.text,
                 author=review.author_name,
@@ -82,9 +80,7 @@ class PlaystoreConnector:
                 rating=comment.star_rating,
                 source_created_at=modified,
                 source_updated_at=modified,
-                ingested_at=modified,
                 deleted_at=None,
-                connector_version=self.version,
                 metadata=PlaystoreMetadata(
                     app_version=comment.app_version_name,
                     device=comment.device,

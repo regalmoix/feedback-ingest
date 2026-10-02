@@ -12,8 +12,11 @@ router = APIRouter()
 def health(ctx: Ctx, response: Response) -> HealthResponse:
     enabled, alive = ctx.settings.worker_enabled, ctx.worker.alive
     scheduler_enabled = ctx.settings.scheduler_enabled
-    degraded = (enabled and not ctx.worker.healthy) or (
-        scheduler_enabled and not ctx.scheduler.alive
+    failing = sorted(ctx.scheduler.last_errors)
+    degraded = (
+        (enabled and not ctx.worker.healthy)
+        or (scheduler_enabled and not ctx.scheduler.alive)
+        or bool(failing)
     )
     if degraded:
         response.status_code = HTTPStatus.SERVICE_UNAVAILABLE
@@ -23,5 +26,6 @@ def health(ctx: Ctx, response: Response) -> HealthResponse:
         worker_alive=alive,
         scheduler_enabled=scheduler_enabled,
         scheduler_alive=ctx.scheduler.alive,
+        failing_sources=failing,
         queue=ctx.adapters.queue.counts(),
     )

@@ -1,4 +1,7 @@
 from datetime import UTC, datetime
+from typing import Annotated
+
+from pydantic import AfterValidator, TypeAdapter
 
 
 def to_naive_utc(value: datetime) -> datetime:
@@ -8,6 +11,10 @@ def to_naive_utc(value: datetime) -> datetime:
         return value.astimezone(UTC).replace(tzinfo=None)
     except OverflowError as exc:
         raise ValueError(str(exc)) from exc
+
+
+NaiveUtc = Annotated[datetime, AfterValidator(to_naive_utc)]
+NAIVE_UTC: TypeAdapter[NaiveUtc] = TypeAdapter(NaiveUtc)
 
 
 class SystemClock:

@@ -7,7 +7,6 @@ from feedback_ingest.adapters.sqlalchemy.tables import FeedbackRecordRow
 from feedback_ingest.domain.enums import FeedbackKind, UpsertOutcome
 from feedback_ingest.domain.errors import check_limit
 from feedback_ingest.domain.models import FeedbackRecord
-from feedback_ingest.utils.time import to_naive_utc
 
 
 class SqlFeedbackStore:
@@ -61,7 +60,7 @@ class SqlFeedbackStore:
         if kind is not None:
             query = query.where(FeedbackRecordRow.kind == kind)
         if since is not None:
-            query = query.where(FeedbackRecordRow.source_created_at >= to_naive_utc(since))
+            query = query.where(FeedbackRecordRow.source_created_at >= since)
         if not include_deleted:
             query = query.where(FeedbackRecordRow.deleted_at.is_(None))
         query = query.order_by(FeedbackRecordRow.source_created_at, FeedbackRecordRow.id)

@@ -2,13 +2,11 @@ from collections.abc import Mapping
 from datetime import datetime
 from typing import Annotated, Any, Self
 
-from pydantic import AfterValidator, BaseModel, ConfigDict, Field, SecretStr, model_validator
+from pydantic import Field, SecretStr, model_validator
 
 from feedback_ingest.domain.enums import EventStatus, FeedbackKind, SourceMode, SourceType
-from feedback_ingest.domain.metadata import SourceMetadata
-from feedback_ingest.utils.time import to_naive_utc
-
-NaiveUtc = Annotated[datetime, AfterValidator(to_naive_utc)]
+from feedback_ingest.domain.metadata import FrozenModel, SourceMetadata
+from feedback_ingest.utils.time import NaiveUtc
 
 KIND_BY_SOURCE: dict[SourceType, FeedbackKind] = {
     SourceType.PLAYSTORE: FeedbackKind.REVIEW,
@@ -18,17 +16,13 @@ KIND_BY_SOURCE: dict[SourceType, FeedbackKind] = {
 }
 
 
-class _Model(BaseModel):
-    model_config = ConfigDict(frozen=True)
-
-
-class Tenant(_Model):
+class Tenant(FrozenModel):
     id: str
     name: str
     api_key_hash: str
 
 
-class Source(_Model):
+class Source(FrozenModel):
     id: str
     tenant_id: str
     type: SourceType
@@ -48,7 +42,7 @@ class Source(_Model):
         return self
 
 
-class RawEvent(_Model):
+class RawEvent(FrozenModel):
     id: str
     tenant_id: str
     source_id: str
@@ -62,7 +56,7 @@ class RawEvent(_Model):
     error: str | None = None
 
 
-class FeedbackRecord(_Model):
+class FeedbackRecord(FrozenModel):
     id: str
     tenant_id: str
     source_id: str
@@ -81,13 +75,17 @@ class FeedbackRecord(_Model):
     connector_version: int = Field(ge=1)
     metadata: SourceMetadata
 
+    @model_validator(mode="before")
+    @classmethod
+    def _kind_from_source_type(cls, data: object) -> object:
+        if isinstance(data, dict) and "source_type" in data:
+            return data | {"kind": KIND_BY_SOURCE[SourceType(data["source_type"])]}
+        return data
+
     @model_validator(mode="after")
     def _source_type_agrees(self) -> Self:
         if self.metadata.source_type != self.source_type:
             msg = f"metadata is for {self.metadata.source_type}, record is {self.source_type}"
-            raise ValueError(msg)
-        if self.kind != KIND_BY_SOURCE[self.source_type]:
-            msg = f"{self.source_type} records are {KIND_BY_SOURCE[self.source_type]}"
             raise ValueError(msg)
         return self
 

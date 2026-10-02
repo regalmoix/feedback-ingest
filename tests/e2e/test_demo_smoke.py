@@ -1,10 +1,7 @@
 import pytest
-from fastapi.testclient import TestClient
-from helpers import memory_adapters
+from helpers import client_for, memory_adapters
 
 from feedback_ingest.adapters.memory.clock import FixedClock
-from feedback_ingest.config import Settings
-from feedback_ingest.main import create_app
 from scripts.seed_lib import create_source, create_tenant, seed
 
 TOKEN = "bootstrap-test"  # noqa: S105  synthetic test token
@@ -17,11 +14,8 @@ EXPECTED = {
 }
 
 
-SETTINGS = Settings(worker_enabled=False, scheduler_enabled=False, bootstrap_token=TOKEN)
-
-
 def test_seed_creates_two_tenants_with_isolated_sources(clock: FixedClock) -> None:
-    with TestClient(create_app(SETTINGS, adapters=memory_adapters(clock))) as client:
+    with client_for(memory_adapters(clock), bootstrap_token=TOKEN) as client:
         seeded = seed(client, TOKEN)
         assert list(seeded) == ["acme", "globex"]
         for name, tenant in seeded.items():
@@ -40,7 +34,7 @@ def test_seed_creates_two_tenants_with_isolated_sources(clock: FixedClock) -> No
 
 
 def test_seed_raises_with_the_server_detail_on_a_non_2xx(clock: FixedClock) -> None:
-    with TestClient(create_app(SETTINGS, adapters=memory_adapters(clock))) as client:
+    with client_for(memory_adapters(clock), bootstrap_token=TOKEN) as client:
         with pytest.raises(RuntimeError, match=r"POST /admin/tenants: 401 .*X-Bootstrap-Token"):
             create_tenant(client, "wrong", "acme")
         with pytest.raises(RuntimeError, match=r"POST /v1/sources: 401 .*X-API-Key"):

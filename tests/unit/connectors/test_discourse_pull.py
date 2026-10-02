@@ -51,13 +51,14 @@ def test_a_quiet_window_advances_the_cursor_to_the_window_end() -> None:
     assert http.calls == [f"{BASE}/search.json after:2026-02-01 before:2026-02-08"]
 
 
-def test_page_guard_stops_a_server_that_ignores_page_and_says_so() -> None:
+def test_page_guard_stops_before_the_page_discourse_rejects() -> None:
     same = routes([[1], [1]])[f"{BASE}/search.json", "1"]
-    found = routes([[1]]) | {(f"{BASE}/search.json", str(p)): same for p in range(1, 30)}
+    found = routes([[1]]) | {(f"{BASE}/search.json", str(p)): same for p in range(1, 11)}
+    found[f"{BASE}/search.json", "11"] = TransformError("400 from search.json")
     pages = PULLER.pull(pull_source(), StubHttp(found), NOW)
-    cursors = [next(pages).cursor for _ in range(20)]
+    cursors = [next(pages).cursor for _ in range(10)]
     assert set(cursors) == {"2026-02-01"}
-    with pytest.raises(TransformError, match="window exceeds 20 pages"):
+    with pytest.raises(TransformError, match="window exceeds 10 pages"):
         next(pages)
 
 

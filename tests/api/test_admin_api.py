@@ -2,23 +2,21 @@ from collections.abc import Iterator
 
 import pytest
 from fastapi.testclient import TestClient
-from helpers import KEY_A, KEY_B, app_state, fixture_body, push
+from helpers import KEY_A, KEY_B, app_state, client_for, fixture_body, push
 
 from feedback_ingest.adapters.memory.clock import FixedClock
 from feedback_ingest.api.deps import Adapters
-from feedback_ingest.config import Settings
 from feedback_ingest.connectors.registry import CONNECTORS
 from feedback_ingest.domain.enums import EventStatus, SourceType
 from feedback_ingest.domain.errors import TransientError
 from feedback_ingest.domain.models import FeedbackRecord, Source
-from feedback_ingest.main import create_app
 
 MALFORMED = fixture_body(SourceType.PLAYSTORE, "malformed")
 REVIEW = fixture_body(SourceType.PLAYSTORE, "review")
 
 
-def _dead_event(client: TestClient, source: Source, api_key: str) -> str:
-    event_id: str = push(client, source.id, MALFORMED, api_key).json()["raw_event_id"]
+def _dead_event(client: TestClient, source: Source) -> str:
+    event_id: str = push(client, source.id, MALFORMED).json()["raw_event_id"]
     app_state(client).worker.run_once()
     return event_id
 
@@ -27,7 +25,7 @@ def _dead_event(client: TestClient, source: Source, api_key: str) -> str:
 def test_lists_dead_events_for_the_callers_tenant_only(
     app_client: TestClient, source_a: Source
 ) -> None:
-    event_id = _dead_event(app_client, source_a, KEY_A)
+    event_id = _dead_event(app_client, source_a)
     mine = app_client.get("/admin/raw-events", headers={"X-API-Key": KEY_A}).json()
     theirs = app_client.get("/admin/raw-events?status=dead", headers={"X-API-Key": KEY_B}).json()
     assert [e["id"] for e in mine] == [event_id]
@@ -40,7 +38,7 @@ def test_lists_dead_events_for_the_callers_tenant_only(
 def test_get_raw_event_includes_payload_and_is_tenant_checked(
     app_client: TestClient, source_a: Source
 ) -> None:
-    event_id = _dead_event(app_client, source_a, KEY_A)
+    event_id = _dead_event(app_client, source_a)
     url = f"/admin/raw-events/{event_id}"
     detail = app_client.get(url, headers={"X-API-Key": KEY_A}).json()
     assert detail["payload"]["reviewId"] == "gp:AOqpTEST-review-0002"
@@ -51,7 +49,7 @@ def test_get_raw_event_includes_payload_and_is_tenant_checked(
 def test_replay_of_unknown_or_foreign_event_is_404(
     app_client: TestClient, source_a: Source
 ) -> None:
-    event_id = _dead_event(app_client, source_a, KEY_A)
+    event_id = _dead_event(app_client, source_a)
     for path, key in (("missing", KEY_A), (event_id, KEY_B)):
         response = app_client.post(f"/admin/raw-events/{path}/replay", headers={"X-API-Key": key})
         assert response.status_code == 404
@@ -60,7 +58,7 @@ def test_replay_of_unknown_or_foreign_event_is_404(
 def test_replay_of_a_processing_event_is_409(
     app_client: TestClient, adapters: Adapters, source_a: Source
 ) -> None:
-    event_id = push(app_client, source_a.id, REVIEW, KEY_A).json()["raw_event_id"]
+    event_id = push(app_client, source_a.id, REVIEW).json()["raw_event_id"]
     adapters.queue.claim(adapters.clock.now(), 30, 10)
     response = app_client.post(f"/admin/raw-events/{event_id}/replay", headers={"X-API-Key": KEY_A})
     assert response.status_code == 409
@@ -68,8 +66,7 @@ def test_replay_of_a_processing_event_is_409(
 
 @pytest.fixture
 def flaky_client(adapters: Adapters) -> Iterator[TestClient]:
-    settings = Settings(worker_enabled=False, scheduler_enabled=False, max_attempts=2)
-    with TestClient(create_app(settings, adapters=adapters)) as client:
+    with client_for(adapters, max_attempts=2) as client:
         yield client
 
 
@@ -86,7 +83,7 @@ def test_transient_failures_go_dead_then_replay_processes_after_the_fix(
 
     monkeypatch.setattr(CONNECTORS[SourceType.PLAYSTORE], "transform", flaky)
     worker = app_state(flaky_client).worker
-    event_id = push(flaky_client, source_a.id, REVIEW, KEY_A).json()["raw_event_id"]
+    event_id = push(flaky_client, source_a.id, REVIEW).json()["raw_event_id"]
     worker.run_once()
     assert adapters.queue.counts()[EventStatus.FAILED] == 1
     clock.advance(2)
@@ -105,7 +102,7 @@ def test_transient_failures_go_dead_then_replay_processes_after_the_fix(
 
 @pytest.mark.usefixtures("source_b")
 def test_queue_counts_are_tenant_scoped(app_client: TestClient, source_a: Source) -> None:
-    push(app_client, source_a.id, REVIEW, KEY_A)
+    push(app_client, source_a.id, REVIEW)
     for key, pending in ((KEY_A, 1), (KEY_B, 0)):
         assert (
             app_client.get("/admin/queue", headers={"X-API-Key": key}).json()["pending"] == pending

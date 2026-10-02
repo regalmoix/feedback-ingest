@@ -32,9 +32,10 @@ def test_query_in_url_is_kept_when_params_are_given() -> None:
 
 
 @pytest.mark.parametrize("status", [408, 429, 500, 503])
-def test_retryable_statuses_are_transient(status: int) -> None:
-    with pytest.raises(TransientError, match=f"{status}.*slow down"):
+def test_retryable_statuses_are_transient_and_keep_the_body_out(status: int) -> None:
+    with pytest.raises(TransientError, match=f"{status} from") as raised:
         _client(status, {"detail": "slow down"}).get_json("https://example.test", {})
+    assert "slow down" not in str(raised.value)
 
 
 def test_client_errors_and_non_objects_are_transform_errors() -> None:

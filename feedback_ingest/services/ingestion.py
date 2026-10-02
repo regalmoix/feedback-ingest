@@ -14,7 +14,7 @@ log = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class AcceptResult:
-    raw_event_id: str | None  # None on a duplicate: the queue port cannot look up the stored id
+    raw_event_id: str  # the stored row's id, also on a duplicate
     duplicate: bool
 
 
@@ -34,13 +34,13 @@ class IngestionService:
             received_at=now,
             next_attempt_at=now,
         )
-        duplicate = not self.queue.enqueue(event)
-        result = AcceptResult(raw_event_id=None if duplicate else event.id, duplicate=duplicate)
+        stored_id = self.queue.enqueue(event)
+        result = AcceptResult(raw_event_id=stored_id, duplicate=stored_id != event.id)
         extra = {
-            "raw_event_id": result.raw_event_id or "-",
+            "raw_event_id": stored_id,
             "tenant_id": source.tenant_id,
             "source_id": source.id,
-            "duplicate": duplicate,
+            "duplicate": result.duplicate,
         }
-        log.info("accepted (duplicate=%s)", duplicate, extra=extra)
+        log.info("accepted (duplicate=%s)", result.duplicate, extra=extra)
         return result

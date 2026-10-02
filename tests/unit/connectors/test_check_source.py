@@ -3,7 +3,6 @@ from connector_fixtures import source
 
 from feedback_ingest.connectors.registry import PULLERS, check_source
 from feedback_ingest.domain.enums import SourceMode, SourceType
-from feedback_ingest.domain.models import Source
 
 
 @pytest.mark.parametrize("source_type", sorted(set(SourceType) - PULLERS.keys()))
@@ -42,6 +41,12 @@ def test_push_does_not_need_pull_only_keys() -> None:
         ("base_url", "forum.example.test"),
         ("base_url", "ftp://forum.example.test"),
         ("base_url", "https://user:pw@forum.example.test"),
+        ("base_url", "http://127.0.0.1"),
+        ("base_url", "http://[::1]:8000"),
+        ("base_url", "http://169.254.169.254/latest"),
+        ("base_url", "http://10.0.0.5"),
+        ("base_url", "https://localhost"),
+        ("base_url", "https://metadata.google.internal"),
         ("start_after", "soon"),
     ],
 )
@@ -49,11 +54,3 @@ def test_bad_config_values_are_rejected(key: str, value: str) -> None:
     pull = source(SourceType.DISCOURSE, SourceMode.PULL)
     with pytest.raises(ValueError, match=key):
         check_source(pull.model_copy(update={"config": {**pull.config, key: value}}))
-
-
-@pytest.mark.parametrize("secret", [None, ""])
-def test_push_needs_a_secret(secret: str | None) -> None:
-    push = source(SourceType.PLAYSTORE)
-    check_source(push)
-    with pytest.raises(ValueError, match="webhook_secret"):
-        Source.model_validate(push.model_dump() | {"webhook_secret": secret})

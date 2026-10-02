@@ -7,7 +7,6 @@ from feedback_ingest.adapters.sqlalchemy.tables import RawEventRow
 from feedback_ingest.domain.enums import EventStatus
 from feedback_ingest.domain.errors import check_limit
 from feedback_ingest.domain.models import RawEvent
-from feedback_ingest.utils.time import to_naive_utc
 
 _RETRYABLE = (EventStatus.PENDING, EventStatus.FAILED)
 
@@ -17,13 +16,14 @@ class SqlRawEventQueue:
         self._write = sessionmaker(engine, expire_on_commit=False)
         self._read = sessionmaker(engine.execution_options(read_only=True), expire_on_commit=False)
 
-    def enqueue(self, event: RawEvent) -> bool:
+    def enqueue(self, event: RawEvent) -> str:
         with self._write.begin() as session:
             key = {"source_id": event.source_id, "external_event_id": event.external_event_id}
-            if session.scalar(select(RawEventRow.id).filter_by(**key)) is not None:
-                return False
+            stored = session.scalar(select(RawEventRow.id).filter_by(**key))
+            if stored is not None:
+                return stored
             session.add(RawEventRow(**event.model_dump()))
-        return True
+        return event.id
 
     # ponytail: claimable predicate repeated on the outer UPDATE keeps it race-safe on SQLite and
     # Postgres READ COMMITTED; add FOR UPDATE SKIP LOCKED on Postgres for many workers
@@ -31,7 +31,6 @@ class SqlRawEventQueue:
         if limit < 1 or lease_seconds < 1:
             msg = "limit and lease_seconds must be >= 1"
             raise ValueError(msg)
-        now = to_naive_utc(now)
         claimable = or_(
             and_(RawEventRow.status.in_(_RETRYABLE), RawEventRow.next_attempt_at <= now),
             and_(RawEventRow.status == EventStatus.PROCESSING, RawEventRow.lease_until < now),
@@ -61,7 +60,7 @@ class SqlRawEventQueue:
             event,
             status=EventStatus.FAILED,
             error=error,
-            next_attempt_at=to_naive_utc(next_attempt_at),
+            next_attempt_at=next_attempt_at,
         )
 
     def mark_dead(self, event: RawEvent, error: str) -> bool:
@@ -70,10 +69,10 @@ class SqlRawEventQueue:
     def requeue(self, event_id: str, now: datetime) -> bool:
         return self._set(
             RawEventRow.id == event_id,
-            RawEventRow.status != EventStatus.PROCESSING,
+            or_(RawEventRow.status != EventStatus.PROCESSING, RawEventRow.lease_until < now),
             status=EventStatus.PENDING,
             attempts=0,
-            next_attempt_at=to_naive_utc(now),
+            next_attempt_at=now,
             lease_until=None,
             error=None,
         )

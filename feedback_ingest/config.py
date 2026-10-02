@@ -12,6 +12,6 @@ class Settings(BaseSettings):
     claim_batch: PositiveInt = 10
     max_attempts: PositiveInt = 5
     backoff_cap_seconds: PositiveInt = 300
-    pull_interval_seconds: int = 300
+    pull_interval_seconds: PositiveFloat = 300
     scheduler_enabled: bool = True
     bootstrap_token: str = "change-me"  # noqa: S105  documented default; startup warns while unchanged
