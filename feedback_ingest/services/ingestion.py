@@ -1,3 +1,4 @@
+import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -7,6 +8,8 @@ from feedback_ingest.connectors.registry import CONNECTORS
 from feedback_ingest.domain.models import RawEvent, Source
 from feedback_ingest.ports.clock import Clock
 from feedback_ingest.ports.queue import RawEventQueue
+
+log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -31,6 +34,13 @@ class IngestionService:
             received_at=now,
             next_attempt_at=now,
         )
-        if self.queue.enqueue(event):
-            return AcceptResult(raw_event_id=event.id, duplicate=False)
-        return AcceptResult(raw_event_id=None, duplicate=True)
+        duplicate = not self.queue.enqueue(event)
+        result = AcceptResult(raw_event_id=None if duplicate else event.id, duplicate=duplicate)
+        extra = {
+            "raw_event_id": result.raw_event_id or "-",
+            "tenant_id": source.tenant_id,
+            "source_id": source.id,
+            "duplicate": duplicate,
+        }
+        log.info("accepted (duplicate=%s)", duplicate, extra=extra)
+        return result

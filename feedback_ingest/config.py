@@ -1,3 +1,4 @@
+from pydantic import PositiveFloat, PositiveInt
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -6,9 +7,9 @@ class Settings(BaseSettings):
 
     database_url: str = "sqlite:///./feedback.db"
     worker_enabled: bool = True
-    worker_poll_seconds: float = 1.0
-    lease_seconds: int = 30
-    claim_batch: int = 10
-    max_attempts: int = 5
-    backoff_cap_seconds: int = 300
+    worker_poll_seconds: PositiveFloat = 1.0
+    lease_seconds: PositiveInt = 30
+    claim_batch: PositiveInt = 10
+    max_attempts: PositiveInt = 5
+    backoff_cap_seconds: PositiveInt = 300
     pull_interval_seconds: int = 300

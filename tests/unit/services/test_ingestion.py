@@ -1,5 +1,6 @@
 import json
 
+import pytest
 from api.conftest import KEY_A, fixture_body, memory_adapters, seed_source
 
 from feedback_ingest.adapters.memory.clock import FixedClock
@@ -9,7 +10,9 @@ from feedback_ingest.services.ingestion import IngestionService
 from feedback_ingest.utils.hashing import payload_hash
 
 
-def test_accept_stores_a_pending_event_once(clock: FixedClock) -> None:
+def test_accept_stores_a_pending_event_once(
+    clock: FixedClock, caplog: pytest.LogCaptureFixture
+) -> None:
     adapters = memory_adapters(clock)
     source = seed_source(adapters, "tenant-a", KEY_A)
     payload = json.loads(fixture_body(SourceType.PLAYSTORE, "review"))
@@ -25,6 +28,9 @@ def test_accept_stores_a_pending_event_once(clock: FixedClock) -> None:
     assert event.payload == payload
     assert event.received_at == event.next_attempt_at == clock.now()
     assert event.status == EventStatus.PENDING
+    [record] = [r for r in caplog.records if r.getMessage().startswith("accepted")]
+    fields = ("raw_event_id", "tenant_id", "source_id", "duplicate")
+    assert [vars(record)[k] for k in fields] == [event.id, source.tenant_id, source.id, False]
 
     again = ingestion.accept(source, payload)
     assert (again.raw_event_id, again.duplicate) == (None, True)

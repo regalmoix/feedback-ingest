@@ -11,7 +11,7 @@ router = APIRouter()
 @router.get("/health")
 def health(ctx: Ctx, response: Response) -> HealthResponse:
     enabled, alive = ctx.settings.worker_enabled, ctx.worker.alive
-    degraded = enabled and not alive
+    degraded = enabled and not ctx.worker.healthy
     if degraded:
         response.status_code = HTTPStatus.SERVICE_UNAVAILABLE
     return HealthResponse(

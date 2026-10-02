@@ -5,7 +5,7 @@ from sqlalchemy.pool import ConnectionPoolEntry
 
 
 def make_engine(database_url: str) -> Engine:
-    engine = create_engine(database_url)
+    engine = create_engine(database_url, hide_parameters=True)
     if engine.dialect.name == "sqlite":
 
         @event.listens_for(engine, "connect")

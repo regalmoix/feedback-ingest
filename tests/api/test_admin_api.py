@@ -101,3 +101,18 @@ def test_transient_failures_go_dead_then_replay_processes_after_the_fix(
     counts = flaky_client.get("/admin/queue", headers=headers).json()
     assert counts == {"pending": 0, "processing": 0, "processed": 1, "failed": 0, "dead": 0}
     assert len(adapters.feedback.list_for_tenant(source_a.tenant_id)) == 1
+
+
+@pytest.mark.usefixtures("source_b")
+def test_queue_counts_are_tenant_scoped(app_client: TestClient, source_a: Source) -> None:
+    push(app_client, source_a.id, REVIEW, KEY_A)
+    for key, pending in ((KEY_A, 1), (KEY_B, 0)):
+        assert (
+            app_client.get("/admin/queue", headers={"X-API-Key": key}).json()["pending"] == pending
+        )
+
+
+@pytest.mark.usefixtures("source_a")
+def test_list_limit_above_500_is_422(app_client: TestClient) -> None:
+    response = app_client.get("/admin/raw-events?limit=501", headers={"X-API-Key": KEY_A})
+    assert response.status_code == 422

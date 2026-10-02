@@ -46,6 +46,7 @@ Jargon used below:
 from collections.abc import Iterator, Mapping
 from datetime import datetime
 from typing import Any, ClassVar, Protocol
+from uuid import NAMESPACE_URL, uuid5
 
 from pydantic import BaseModel, ConfigDict
 
@@ -66,12 +67,18 @@ def default_verify_signature(secret: str, body: bytes, headers: Mapping[str, str
     return signing.verify(secret, body, headers.get("X-Signature", ""))
 
 
+def record_id(source_id: str, external_id: str) -> str:
+    """Deterministic record id: the same item in the same source always gets the same id."""
+    return uuid5(NAMESPACE_URL, f"{source_id}:{external_id}").hex
+
+
 class SourceConnector(Protocol):
     source_type: ClassVar[SourceType]
     version: ClassVar[int]  # bump when transform output changes; stamped on every record
+    required_config: ClassVar[tuple[str, ...]]  # config keys a pull Source must have
 
-    def external_event_id(self, payload: dict[str, Any]) -> str: ...
-    def transform(self, source: Source, payload: dict[str, Any]) -> list[FeedbackRecord]: ...
+    def external_event_id(self, payload: Mapping[str, Any]) -> str: ...
+    def transform(self, source: Source, payload: Mapping[str, Any]) -> list[FeedbackRecord]: ...
     def verify_signature(self, secret: str, body: bytes, headers: Mapping[str, str]) -> bool: ...
 
 
@@ -97,17 +104,24 @@ CONNECTORS: dict[SourceType, SourceConnector] = {c.source_type: c for c in _ALL}
 PULLERS: dict[SourceType, PullConnector] = {c.source_type: c for c in _PULL}
 ```
 
-The keys come from each connector's own `source_type`, so a key cannot drift from its value. mypy checks each object against the Protocol at the tuple annotation. A missing method or a missing `version` is a type error on that line.
+Callers index the dicts directly (`CONNECTORS[source.type]`, `PULLERS[source.type]`); there is no `connector_for` or `puller_for` helper. The keys come from each connector's own `source_type`, so a key cannot drift from its value. mypy checks each object against the Protocol at the tuple annotation. A missing method or a missing `version` is a type error on that line.
 
 Configuration-time check, run when a Source is created (the API turns it into a 422):
 
 ```python
 def check_source(source: Source) -> None:
-    if source.mode is SourceMode.PULL and source.type not in PULLERS:
+    if source.mode is not SourceMode.PULL:
+        return
+    if source.type not in PULLERS:
         raise ValueError(f"{source.type} cannot pull")
-    if source.mode is SourceMode.PUSH and source.webhook_secret is None:
-        raise ValueError("a push source needs a webhook_secret")
+    for key in PULLERS[source.type].required_config:
+        if key not in source.config:
+            raise ValueError(f"{source.type} pull source needs config[{key!r}]")
+    if "start_after" in source.config:
+        ...  # must parse as a NaiveUtc datetime, else ValueError
 ```
+
+A push source without a `webhook_secret` is rejected by the `Source` model itself, so `check_source` does not repeat that check.
 
 ### The nine rulings
 
@@ -132,7 +146,7 @@ def check_source(source: Source) -> None:
    - If the process crashes between the commit and the cursor save, the page is fetched again. Rule 2 drops the repeats.
    - A page's cursor must be safe to resume from: everything older than it is in this page or an earlier one. With oldest-first pages, that is the page's newest timestamp minus a small overlap. If a source only sorts newest-first, the connector holds the cursor back and yields it on the final page.
 
-5. **Registries: `CONNECTORS` and `PULLERS`, built from tuples of instances, as above.** A test asserts `set(SourceType) == CONNECTORS.keys()`, that no two connectors claim one type, that `PULLERS.keys() <= CONNECTORS.keys()`, and that every type has at least one fixture. `check_source` rejects a pull-mode Source whose type has no puller. There is no `isinstance` discovery.
+5. **Registries: `CONNECTORS` and `PULLERS`, built from tuples of instances, as above.** A test asserts `set(SourceType) == CONNECTORS.keys()`, that no two connectors claim one type, that `PULLERS.keys() <= CONNECTORS.keys()`, and that every type has at least one fixture. `check_source` rejects a pull-mode Source whose type has no puller, that lacks a key in the puller's `required_config`, or whose `start_after` does not parse. There is no `isinstance` discovery.
 
 6. **Input models: every connector validates first.** `transform` starts with `PlaystoreReviewIn.model_validate(payload)` (or `DiscoursePostIn`, `TweetIn`, `IntercomEventIn`), then maps plain typed fields. Input models use `extra="ignore"`. Why: under `mypy --strict`, `payload["review"]["text"]` is `Any`, so it passes the type check without checking anything. A `ValidationError` is a permanent failure. The worker catches `ValidationError` next to `TransformError` and marks the event dead. That is one `except` clause in the worker, not one per connector, and it also catches a bad `FeedbackRecord` or metadata model.
 
@@ -141,7 +155,7 @@ def check_source(source: Source) -> None:
 8. **Webhook routing, end to end:**
    1. `POST /v1/sources/{source_id}/events` arrives with `X-API-Key`.
    2. We hash the key and call `TenantStore.get_by_api_key_hash`. No tenant gives 401.
-   3. `SourceStore.get(source_id, tenant.id)`. A source owned by another tenant looks exactly like a missing one: 404. A source in pull mode gives 409.
+   3. `SourceStore.get(source_id, tenant.id)`. A source owned by another tenant looks exactly like a missing one: 404. A pull-mode source is accepted too: a pull connector also implements `transform`, so its webhooks go through the same path (it still needs a `webhook_secret`, or step 4 fails).
    4. `CONNECTORS[source.type].verify_signature(secret, raw_body_bytes, headers)` runs on the raw bytes, before JSON parsing. A failure gives 401.
    5. We parse the JSON, compute `external_event_id`, and call `RawEventQueue.enqueue`. New or duplicate, the reply is 202.
    6. Later, the worker claims the row, loads the Source, calls `transform`, upserts each record, and marks the event processed. A `ValidationError` or `TransformError` marks it dead. A `TransientError` marks it failed and schedules a retry.
@@ -152,7 +166,7 @@ def check_source(source: Source) -> None:
 ### Small consequences for the Phase 1 models
 
 - `Source.webhook_secret` becomes `SecretStr | None` (ruling 7).
-- `transform` stays free of clocks and random ids, so the same input always gives the same output. The worker stamps `id` and `ingested_at` with `model_copy(update=...)`. The contract test compares records with those two fields excluded.
+- `transform` stays free of clocks and random ids, so the same input always gives the same output. The connector sets `id` itself with `record_id(source.id, external_id)`, a `uuid5`, so it is deterministic. The worker stamps only `ingested_at`, with `model_copy(update=...)`. The contract test compares whole records.
 
 ## Where the council agrees
 
@@ -220,7 +234,7 @@ Adding Zendesk is one file plus one metadata model plus one registry entry plus 
 
 1. Add `SourceType.ZENDESK`. The completeness test fails right away.
 2. Add `ZendeskMetadata` (with `source_type: Literal["zendesk"]`) to `domain/metadata.py` and to the `SourceMetadata` union.
-3. Write `connectors/zendesk.py` with a `ZendeskTicketIn` input model, `external_event_id` (`f"{ticket id}:{updated_at}"`), `transform`, and a `verify_signature` override for Zendesk's timestamp-plus-body scheme. Add `pull` only if Zendesk will be polled.
+3. Write `connectors/zendesk.py` with a `ZendeskTicketIn` input model, `required_config` (empty unless it pulls), `external_event_id` (`f"{ticket id}:{updated_at}"`), `transform`, and a `verify_signature` override for Zendesk's timestamp-plus-body scheme. Add `pull` only if Zendesk will be polled.
 4. Add `ZendeskConnector()` to `_ALL`, and to `_PULL` if it pulls.
 5. Put a recorded, synthetic payload in `tests/fixtures/zendesk/`, plus a malformed one. Run the contract test, and add one golden test for Zendesk's odd cases.
 

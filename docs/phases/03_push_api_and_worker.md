@@ -1,6 +1,6 @@
 # Phase 3 — Push API, pipeline, worker
 
-Status: designed 2026-10-03. Depends on Phases 1–2, ADR-001 and ADR-003. First phase with a runnable server.
+Status: implemented 2026-10-03 (commit e245efe, merged ee1ec69), review fixes applied. Depends on Phases 1–2, ADR-001 and ADR-003. First phase with a runnable server.
 
 ## What this phase builds, in one paragraph
 
@@ -21,7 +21,8 @@ or a replay.**
 ## Settings (`feedback_ingest/config.py`, pydantic-settings, env prefix `FI_`)
 `database_url = "sqlite:///./feedback.db"`, `worker_enabled = True`, `worker_poll_seconds = 1.0`,
 `lease_seconds = 30`, `claim_batch = 10`, `max_attempts = 5`, `backoff_cap_seconds = 300`,
-`pull_interval_seconds = 300` (used in Phase 4).
+`pull_interval_seconds = 300` (used in Phase 4). The five worker settings are `PositiveFloat`/`PositiveInt`,
+so `FI_LEASE_SECONDS=0` fails at startup instead of at the first claim.
 
 ## App wiring (`feedback_ingest/main.py`)
 - `create_app(settings: Settings | None = None) -> FastAPI`. Lifespan: `make_engine`, `Base.metadata.create_all`,
@@ -31,7 +32,8 @@ or a replay.**
   optional `Adapters` dataclass (tenants, sources, feedback, queue, http, clock) to override the SQL ones.
 - `app = create_app()` at module bottom for `uvicorn feedback_ingest.main:app`.
 - Exception handlers (`api/errors.py`): `NotFoundError → 404`, `UnauthorizedError → 401`,
-  `sqlalchemy.exc.OperationalError → 503 {"detail": "storage unavailable"}` (DB down ⇒ never 202).
+  `sqlalchemy.exc.{OperationalError,InterfaceError,TimeoutError} → 503 {"detail": "storage unavailable"}`
+  (DB down ⇒ never 202), logged at ERROR with method, path and traceback.
   Re-add `UnauthorizedError` to `domain/errors.py` in this phase.
 
 ## Services (all sync, constructed with ports only)
@@ -52,11 +54,20 @@ or a replay.**
   - `except Exception` (TransientError, OperationalError, anything unexpected) → if `event.attempts >= max_attempts`
     → dead, else `mark_failed(event, error, next_attempt_at = now + min(2**attempts, cap))`.
     Unexpected exceptions are logged at ERROR with the traceback; known transient ones at WARNING.
+    Storage errors (`OperationalError`) stay on the ERROR branch on purpose: they are rarer than
+    `TransientError` and worth a traceback, and services do not import sqlalchemy.
+  - Any `mark_*` returning False means a newer claim owns the row: log `lease lost` at WARNING, skip the
+    "processed" line, return `PROCESSING`.
+  - `ValidationError` text is summarised as `loc: msg` pairs without input values, so customer text never
+    reaches the log or the `error` column (the engine also uses `hide_parameters=True`).
   - All log lines carry `raw_event_id`, `tenant_id`, `source_id`, `attempts` as structured `extra=`.
   - `# ponytail: retries unknown exceptions too; classify more exceptions as permanent once we see them in prod`.
 
 `services/worker.py` — `WorkerService(queue: RawEventQueue, pipeline: PipelineService, clock: Clock, poll_seconds: float, lease_seconds: int, batch: int)`
-- `run_once() -> int`: `events = queue.claim(clock.now(), lease_seconds, batch)`; `process` each; return count.
+- `run_once() -> int`: `events = queue.claim(clock.now(), lease_seconds, batch)`; `process` each (a crash in
+  one is logged as `process crashed` and the rest of the batch still runs); records `last_ok_at`; return count.
+- `healthy` = alive and `clock.now() - last_ok_at <= max(3 * poll_seconds, 10 s)`. `stop()` warns if the
+  thread outlives `join(lease_seconds)`; its batch is reclaimed after the lease.
 - `start()` spawns a daemon `threading.Thread` running `run_once` in a loop, sleeping `poll_seconds` when a batch
   was empty, until `stop()` sets the `threading.Event`. `alive` property = thread is alive.
 - `# ponytail: one thread, one process; uvicorn --workers N would start N of these, which is safe because the claim is atomic, but set FI_WORKER_ENABLED=false on all but one if you want a single consumer`.
@@ -72,14 +83,14 @@ or a replay.**
 1. Tenant from API key (401), source for that tenant (404). The source may be push or pull; a pull connector
    also implements `transform`, so the webhook path works for any source.
 2. `body = await request.body()`? No — sync endpoint: declare `body: bytes = Body(...)` via `request.body()` in
-   a sync-compatible way: use `async def` ONLY for this endpoint and run the sync work inline (it is a lookup +
-   insert; acceptable) — simpler: make this endpoint `async def` and `await request.body()`, then call sync
-   services directly (SQLite insert is sub-millisecond). Document with `# ponytail: sync DB call inside async handler; move to run_in_threadpool if p99 matters`.
+   a sync-compatible way: make this endpoint `async def`, `await request.body()`, then run the insert with
+   `await run_in_threadpool(ctx.ingestion.accept, source, payload)` so the event loop never blocks on the DB.
 3. `CONNECTORS[source.type].verify_signature(source.webhook_secret.get_secret_value(), body, request.headers)` →
    False → 401. Missing secret on the source → 401 as well.
 4. `payload = json.loads(body)` must be a JSON object → else 400.
 5. `result = ingestion.accept(source, payload)` → `202 {"raw_event_id": …, "duplicate": bool}`.
-   Response model `AcceptResponse` (Pydantic).
+   The handler returns the `AcceptResult` dataclass directly; `accept` logs one `accepted` INFO line with
+   `raw_event_id`, `tenant_id`, `source_id`, `duplicate`.
 
 `admin.py` (tenant-scoped by API key; "admin" means operator endpoints, not a separate auth tier)
 - `GET /admin/raw-events?status=dead&limit=50` → list of `RawEventView(id, source_id, status, attempts, error, received_at, next_attempt_at)`.
@@ -88,7 +99,8 @@ or a replay.**
 - `GET /admin/queue` → `counts(tenant_id=tenant.id)` per status.
 
 `health.py` — `GET /health` (no auth) → `{"status": "ok", "worker_alive": bool, "queue": counts(tenant_id=None)}`;
-returns 503 with `status: "degraded"` when the worker thread is enabled but not alive.
+returns 503 with `status: "degraded"` when the worker is enabled but not `healthy` (thread dead, or no
+completed pass within the window, e.g. every claim failing).
 
 ## Logging
 stdlib `logging`; `main.py` configures a single stream handler with a format that prints the `extra` keys
@@ -130,6 +142,21 @@ tests/api/{conftest,test_push_api,test_admin_api,test_health}.py
 tests/unit/services/{test_pipeline,test_worker,test_ingestion}.py
 tests/e2e/{conftest,test_push_to_query,test_restart_resume,test_dlq_replay}.py
 ```
+
+## Deviations recorded
+- `httpx2` is a dev dependency: Starlette's `TestClient` needs it.
+- `tests/api` and `tests/e2e` are packages (`__init__.py`) so mypy accepts more than one `conftest.py`.
+- `AcceptResult.raw_event_id` is `None` on a duplicate: the queue port cannot look up the stored id.
+- `Adapters` and `AppState` live in `api/deps.py`, not `main.py`.
+- Services are plain dataclasses.
+- Pull-mode sources are accepted on the webhook too, per ADR-003 as amended (signature still required, so a
+  pull source without a secret answers 401).
+- `ReplayResponse` dropped: replay returns `{"status": "pending"}` as a plain dict.
+
+## Deferred trims (Phase 6)
+- Inline `_sql_adapters` and `_app_state` into `create_app` in `main.py`.
+- Move the shared test fixtures into a root conftest or helpers module.
+- Then delete `tests/api/__init__.py` and `tests/e2e/__init__.py`.
 
 ## How to explain this phase in the interview
 "The webhook does three checks and one write: whose tenant, which source, is the signature right, then insert

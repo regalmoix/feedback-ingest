@@ -26,7 +26,7 @@ class PipelineService:
     backoff_cap_seconds: int
 
     def process(self, event: RawEvent) -> EventStatus:
-        extra = {
+        extra: dict[str, object] = {
             "raw_event_id": event.id,
             "tenant_id": event.tenant_id,
             "source_id": event.source_id,
@@ -35,21 +35,21 @@ class PipelineService:
         try:
             count = self._apply(event)
         except (ValidationError, TransformError) as exc:
-            log.warning("dead: %s", exc, extra=extra)
-            self.queue.mark_dead(event, str(exc)[:_MAX_ERROR])
-            return EventStatus.DEAD
+            error = _describe(exc)
+            log.warning("dead: %s", error, extra=extra)
+            return _finish(self.queue.mark_dead(event, error), EventStatus.DEAD, extra)
         except TransientError as exc:
             log.warning("transient failure: %s", exc, extra=extra)
-            return self._retry(event, exc)
+            return self._retry(event, exc, extra)
         # ponytail: retries unknown exceptions too; classify more exceptions as permanent once we
         # see them in prod
         except Exception as exc:
             log.exception("unexpected failure", extra=extra)
-            return self._retry(event, exc)
-        if not self.queue.mark_processed(event):
-            log.warning("lease lost; a newer claim owns this event", extra=extra)
-        log.info("processed into %d records", count, extra=extra)
-        return EventStatus.PROCESSED
+            return self._retry(event, exc, extra)
+        status = _finish(self.queue.mark_processed(event), EventStatus.PROCESSED, extra)
+        if status == EventStatus.PROCESSED:
+            log.info("processed into %d records", count, extra=extra)
+        return status
 
     def _apply(self, event: RawEvent) -> int:
         source = self.sources.get(event.source_id, tenant_id=event.tenant_id)
@@ -62,11 +62,24 @@ class PipelineService:
             self.feedback.upsert(record.model_copy(update={"ingested_at": now}))
         return len(records)
 
-    def _retry(self, event: RawEvent, exc: Exception) -> EventStatus:
+    def _retry(self, event: RawEvent, exc: Exception, extra: dict[str, object]) -> EventStatus:
         error = f"{type(exc).__name__}: {exc}"[:_MAX_ERROR]
         if event.attempts >= self.max_attempts:
-            self.queue.mark_dead(event, error)
-            return EventStatus.DEAD
+            return _finish(self.queue.mark_dead(event, error), EventStatus.DEAD, extra)
         delay = min(2**event.attempts, self.backoff_cap_seconds)
-        self.queue.mark_failed(event, error, self.clock.now() + timedelta(seconds=delay))
-        return EventStatus.FAILED
+        next_at = self.clock.now() + timedelta(seconds=delay)
+        return _finish(self.queue.mark_failed(event, error, next_at), EventStatus.FAILED, extra)
+
+
+def _describe(exc: ValidationError | TransformError) -> str:
+    if isinstance(exc, TransformError):
+        return str(exc)[:_MAX_ERROR]
+    errors = exc.errors(include_url=False, include_input=False)  # no customer text in the error
+    return "; ".join(f"{'.'.join(map(str, e['loc']))}: {e['msg']}" for e in errors)[:_MAX_ERROR]
+
+
+def _finish(ok: bool, status: EventStatus, extra: dict[str, object]) -> EventStatus:
+    if ok:
+        return status
+    log.warning("lease lost; a newer claim owns this event", extra=extra)
+    return EventStatus.PROCESSING

@@ -6,11 +6,6 @@ from pydantic import BaseModel
 from feedback_ingest.domain.enums import EventStatus
 
 
-class AcceptResponse(BaseModel):
-    raw_event_id: str | None
-    duplicate: bool
-
-
 class RawEventView(BaseModel):
     id: str
     source_id: str
@@ -19,10 +14,6 @@ class RawEventView(BaseModel):
     error: str | None
     received_at: datetime
     next_attempt_at: datetime
-
-
-class ReplayResponse(BaseModel):
-    status: EventStatus
 
 
 class HealthResponse(BaseModel):

@@ -58,7 +58,7 @@ def test_a_crashing_process_does_not_kill_the_loop(
         raise RuntimeError(msg)
 
     monkeypatch.setattr(worker.pipeline, "process", crash)
-    worker.batch = 1
+    worker.batch = 3  # one crash must not strand the rest of its batch
     worker.start()
     wait_until(lambda: len(calls) == 3)
     assert worker.alive

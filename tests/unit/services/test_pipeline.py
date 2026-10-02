@@ -51,8 +51,8 @@ def test_happy_path_upserts_records_stamped_with_the_clock(
     assert record.external_id == "gp:AOqpTEST-review-0001"
 
 
-def test_malformed_payload_is_dead_on_the_first_attempt(
-    adapters: Adapters, pipeline: PipelineService
+def test_malformed_payload_is_dead_on_the_first_attempt_without_customer_text(
+    adapters: Adapters, pipeline: PipelineService, caplog: pytest.LogCaptureFixture
 ) -> None:
     source = seed_source(adapters, "tenant-a", KEY_A)
     event = _claimed(adapters, source, fixture_body(SourceType.PLAYSTORE, "malformed"))
@@ -61,6 +61,9 @@ def test_malformed_payload_is_dead_on_the_first_attempt(
     assert stored.attempts == 1
     assert stored.error
     assert "comments" in stored.error
+    text = "no rating and no timestamp"  # the payload's review text
+    assert text not in stored.error
+    assert text not in caplog.text
 
 
 @pytest.mark.parametrize("error", [TransientError, RuntimeError])
