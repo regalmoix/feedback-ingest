@@ -18,5 +18,6 @@ def health(ctx: Ctx, response: Response) -> HealthResponse:
         status="degraded" if degraded else "ok",
         worker_enabled=enabled,
         worker_alive=alive,
+        scheduler_alive=ctx.scheduler.alive,
         queue=ctx.adapters.queue.counts(),
     )

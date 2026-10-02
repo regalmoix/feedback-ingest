@@ -1,0 +1,35 @@
+{
+  "posts": [
+    {
+      "id": 9101,
+      "topic_id": 601,
+      "created_at": "2026-02-02T08:00:00.000Z",
+      "topic_title_headline": "Export to <span class=\"search-highlight\">CSV</span> drops the last row"
+    },
+    {
+      "id": 9102,
+      "topic_id": 601,
+      "created_at": "2026-02-02T09:30:00.000Z",
+      "topic_title_headline": "Export to <span class=\"search-highlight\">CSV</span> drops the last row"
+    },
+    {
+      "id": 9201,
+      "topic_id": 602,
+      "created_at": "2026-02-02T11:00:00.000Z",
+      "topic_title_headline": "Sidebar flickers on resize"
+    }
+  ],
+  "topics": [
+    {
+      "id": 601,
+      "title": "Export to CSV drops the last row"
+    },
+    {
+      "id": 602,
+      "title": "Sidebar flickers on resize"
+    }
+  ],
+  "grouped_search_result": {
+    "more_full_page_results": true
+  }
+}

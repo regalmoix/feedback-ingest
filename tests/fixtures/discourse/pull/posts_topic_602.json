@@ -1,0 +1,32 @@
+{
+  "post_stream": {
+    "posts": [
+      {
+        "id": 9201,
+        "name": null,
+        "username": "drew_test",
+        "created_at": "2026-02-02T11:00:00.000Z",
+        "updated_at": "2026-02-02T11:00:00.000Z",
+        "cooked": "<p>The sidebar flickers when I resize the window.</p>",
+        "post_number": 1,
+        "topic_id": 602,
+        "topic_slug": "sidebar-flickers-on-resize",
+        "like_count": 1,
+        "deleted_at": null
+      },
+      {
+        "id": 9202,
+        "name": "Blair Sample",
+        "username": "blair_sample",
+        "created_at": "2026-02-03T07:45:00.000Z",
+        "updated_at": "2026-02-03T07:45:00.000Z",
+        "cooked": "<p>Happens in Firefox &amp; Safari too.</p>",
+        "post_number": 2,
+        "topic_id": 602,
+        "topic_slug": "sidebar-flickers-on-resize",
+        "like_count": 2,
+        "deleted_at": null
+      }
+    ]
+  }
+}

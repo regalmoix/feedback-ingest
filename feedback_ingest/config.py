@@ -12,3 +12,4 @@ class Settings(BaseSettings):
     max_attempts: int = 5
     backoff_cap_seconds: int = 300
     pull_interval_seconds: int = 300
+    scheduler_enabled: bool = True
