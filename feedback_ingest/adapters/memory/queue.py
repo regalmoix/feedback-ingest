@@ -80,7 +80,9 @@ class MemoryRawEventQueue:
             for e in self._events.values()
             if e.status == status and (tenant_id is None or e.tenant_id == tenant_id)
         ]
-        return sorted(matches, key=lambda e: (e.received_at, e.id))[: check_limit(limit)]
+        matches.sort(key=lambda e: e.id)
+        matches.sort(key=lambda e: e.received_at, reverse=True)  # stable: newest first, then id
+        return matches[: check_limit(limit)]
 
     def counts(self, tenant_id: str | None = None) -> dict[EventStatus, int]:
         result = dict.fromkeys(EventStatus, 0)

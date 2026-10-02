@@ -93,3 +93,19 @@ def test_error_text_is_truncated_to_500_chars(
     assert stored is not None
     assert stored.error is not None
     assert len(stored.error) == 500
+
+
+def test_event_past_the_attempt_cap_is_dead_without_transforming(
+    adapters: Adapters, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _fail_with(monkeypatch, AssertionError("connector must not run"))
+    claimed = _claimed(adapters, "review")
+    for _ in range(5):  # crashes outside the handler: lease expires, claim bumps attempts
+        assert isinstance(adapters.clock, FixedClock)
+        adapters.clock.advance(LEASE + 1)
+        [claimed] = adapters.queue.claim(adapters.clock.now(), LEASE, 1)
+    assert claimed.attempts == 6
+    assert _pipeline(adapters).process(claimed) == EventStatus.DEAD
+    stored = adapters.queue.get(claimed.id)
+    assert stored is not None
+    assert (stored.status, stored.error) == (EventStatus.DEAD, "attempt limit exceeded")

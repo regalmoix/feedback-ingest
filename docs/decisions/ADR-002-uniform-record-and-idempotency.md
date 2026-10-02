@@ -97,8 +97,8 @@ WHERE COALESCE(excluded.source_updated_at, excluded.source_created_at)
 
 ### Replay
 
-- Replay uses the same upsert without the `WHERE`. It bypasses the timestamp guard on purpose.
-- Why: after a transformer fix, the stored row has the same timestamp as the payload. With the guard on, the corrected row would never be written.
+- Replay re-processes the stored raw event through the same upsert. An equal version is accepted by the upsert (`>=`), so a fixed connector's output overwrites the record.
+- Why this is enough: after a transformer fix, the stored row has the same timestamp as the payload, and the tie goes to the later write.
 - Replay processes raw events in `raw_events.id` order. Delete events are raw events too, so tombstones are applied again and deleted items do not come back.
 
 ### Deletes

@@ -98,6 +98,17 @@ def counts_group_by_status_per_tenant(a: Adapters) -> None:
     assert [e.id for e in a.queue.list_by_status(EventStatus.DEAD, tenant_id="other")] == []
 
 
+def list_by_status_is_newest_first_then_id(a: Adapters) -> None:
+    seed(a)
+    now = a.clock.now()
+    old = event(SOURCE_A1, "e1", now)
+    tied = [event(SOURCE_A1, name, now + timedelta(minutes=1)) for name in ("e2", "e3")]
+    for e in (old, *tied):
+        a.queue.enqueue(e)
+    expected = [*sorted(e.id for e in tied), old.id]
+    assert [e.id for e in a.queue.list_by_status(EventStatus.PENDING)] == expected
+
+
 QUEUE_CASES: list[Case] = [
     duplicate_enqueue_is_rejected,
     claim_leases_due_rows_once,
@@ -105,4 +116,5 @@ QUEUE_CASES: list[Case] = [
     expired_lease_is_reclaimed_with_a_fresh_lease,
     failed_waits_dead_stays_requeue_revives,
     counts_group_by_status_per_tenant,
+    list_by_status_is_newest_first_then_id,
 ]

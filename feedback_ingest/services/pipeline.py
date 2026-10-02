@@ -32,6 +32,11 @@ class PipelineService:
             "source_id": event.source_id,
             "attempts": event.attempts,
         }
+        # a crash outside this handler leaves the lease to expire; each re-claim bumps attempts
+        if event.attempts > self.max_attempts:
+            log.warning("dead: attempt limit exceeded", extra=extra)
+            error = "attempt limit exceeded"
+            return _finish(self.queue.mark_dead(event, error), EventStatus.DEAD, extra)
         try:
             count = self._apply(event)
         except (ValidationError, TransformError) as exc:

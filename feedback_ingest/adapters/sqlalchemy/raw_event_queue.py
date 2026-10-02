@@ -89,7 +89,8 @@ class SqlRawEventQueue:
         query = select(RawEventRow).where(RawEventRow.status == status)
         if tenant_id is not None:
             query = query.where(RawEventRow.tenant_id == tenant_id)
-        query = query.order_by(RawEventRow.received_at, RawEventRow.id).limit(check_limit(limit))
+        newest_first = (RawEventRow.received_at.desc(), RawEventRow.id)
+        query = query.order_by(*newest_first).limit(check_limit(limit))
         with self._read.begin() as session:
             return [
                 RawEvent.model_validate(r, from_attributes=True) for r in session.scalars(query)
