@@ -1,16 +1,14 @@
 from collections.abc import Mapping
 from typing import Any, ClassVar
-from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
 from pydantic.alias_generators import to_camel
 
-from feedback_ingest.connectors.base import default_verify_signature
+from feedback_ingest.connectors.base import default_verify_signature, record_id
 from feedback_ingest.domain.enums import FeedbackKind, SourceType
 from feedback_ingest.domain.metadata import PlaystoreMetadata
-from feedback_ingest.domain.models import FeedbackRecord, Source
+from feedback_ingest.domain.models import FeedbackRecord, NaiveUtc, Source
 from feedback_ingest.utils.hashing import payload_hash
-from feedback_ingest.utils.time import from_epoch
 
 
 class _In(BaseModel):
@@ -18,7 +16,7 @@ class _In(BaseModel):
 
 
 class _Timestamp(_In):
-    seconds: int
+    seconds: NaiveUtc
 
 
 class _UserComment(_In):
@@ -38,7 +36,7 @@ class _Comment(_In):
 class PlaystoreReviewIn(_In):
     review_id: str
     author_name: str | None = None
-    comments: list[_Comment] = Field(min_length=1)
+    comments: list[_Comment]
 
     @field_validator("comments", mode="before")
     @classmethod
@@ -51,21 +49,27 @@ class PlaystoreReviewIn(_In):
 class PlaystoreConnector:
     source_type: ClassVar[SourceType] = SourceType.PLAYSTORE
     version: ClassVar[int] = 1
+    required_config: ClassVar[tuple[str, ...]] = ()
 
-    def external_event_id(self, payload: dict[str, Any]) -> str:
+    def external_event_id(self, payload: Mapping[str, Any]) -> str:
         try:
             review = PlaystoreReviewIn.model_validate(payload)
         except ValidationError:
-            return payload_hash(payload)
-        return f"{review.review_id}:{review.comments[0].user_comment.last_modified.seconds}"
+            return payload_hash(dict(payload))
+        if not review.comments:
+            return payload_hash(dict(payload))
+        modified = review.comments[0].user_comment.last_modified.seconds
+        return f"{review.review_id}:{modified.isoformat()}"
 
-    def transform(self, source: Source, payload: dict[str, Any]) -> list[FeedbackRecord]:
+    def transform(self, source: Source, payload: Mapping[str, Any]) -> list[FeedbackRecord]:
         review = PlaystoreReviewIn.model_validate(payload)
+        if not review.comments:
+            return []
         comment = review.comments[0].user_comment
-        modified = from_epoch(comment.last_modified.seconds)
+        modified = comment.last_modified.seconds
         return [
             FeedbackRecord(
-                id=uuid4().hex,
+                id=record_id(source.id, review.review_id),
                 tenant_id=source.tenant_id,
                 source_id=source.id,
                 source_type=self.source_type,

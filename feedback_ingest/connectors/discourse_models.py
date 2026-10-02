@@ -1,13 +1,11 @@
-from pydantic import BaseModel, ConfigDict
+from typing import Any
+
+from pydantic import BaseModel
 
 from feedback_ingest.domain.models import NaiveUtc
 
 
-class _In(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-
-
-class DiscoursePostIn(_In):
+class DiscoursePostIn(BaseModel):
     id: int
     topic_id: int
     post_number: int
@@ -22,8 +20,32 @@ class DiscoursePostIn(_In):
     like_count: int = 0
 
 
-class SearchHitIn(_In):
+class SearchHitIn(BaseModel):
     id: int
     topic_id: int
     created_at: NaiveUtc
     topic_title_headline: str | None = None
+
+
+class _TopicIn(BaseModel):
+    id: int
+    title: str
+
+
+class _GroupedIn(BaseModel):
+    more_full_page_results: bool | None = None
+    error: str | None = None
+
+
+class SearchPageIn(BaseModel):
+    posts: list[SearchHitIn]
+    topics: list[_TopicIn] = []
+    grouped_search_result: _GroupedIn | None = None
+
+
+class _PostStreamIn(BaseModel):
+    posts: list[dict[str, Any]]
+
+
+class TopicPostsIn(BaseModel):
+    post_stream: _PostStreamIn

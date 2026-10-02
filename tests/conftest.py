@@ -9,7 +9,7 @@ from feedback_ingest.adapters.memory.clock import FixedClock
 from feedback_ingest.adapters.sqlalchemy.db import make_engine
 from feedback_ingest.adapters.sqlalchemy.tables import Base
 
-T0 = datetime(2026, 1, 1, 12, 0)  # noqa: DTZ001  naive UTC is the storage convention
+T0 = datetime(2026, 1, 1, 12, 0)
 
 
 @pytest.fixture

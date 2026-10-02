@@ -1,6 +1,6 @@
 # Phase 2 — Connectors and transform
 
-Status: designed 2026-10-03. Depends on Phase 1 and ADR-003 (ADR-003 is authoritative where they differ). Still no HTTP endpoints.
+Status: implemented 2026-10-03 (commit 6264b45), review in progress. Depends on Phase 1 and ADR-003 (ADR-003 is authoritative where they differ). Still no HTTP endpoints.
 
 ## What this phase builds, in one paragraph
 
@@ -65,9 +65,11 @@ _ALL: tuple[SourceConnector, ...] = (DiscourseConnector(), PlaystoreConnector(),
 CONNECTORS: dict[SourceType, SourceConnector] = {c.source_type: c for c in _ALL}
 _PULL: tuple[PullConnector, ...] = (DiscourseConnector(),)
 PULLERS: dict[SourceType, PullConnector] = {c.source_type: c for c in _PULL}
-def connector_for(source: Source) -> SourceConnector  # KeyError-free: raises TransformError if unknown
-def puller_for(source: Source) -> PullConnector       # raises ConfigError if source.mode is pull but no puller
+def check_source(source: Source) -> None  # ValueError: pull mode without a puller, or bad pull config
 ```
+Callers index the dicts directly: `CONNECTORS[source.type]`, `PULLERS[source.type]`. `check_source` runs at
+Source creation and also checks the puller's `required_config` keys (Discourse: `base_url`, `start_after`)
+and that `start_after` parses as a datetime.
 No `runtime_checkable`/`isinstance`: the pull-capable instances are listed explicitly, which keeps mypy honest.
 Tests assert `set(SourceType) == set(CONNECTORS)` and `set(PULLERS) <= set(CONNECTORS)`.
 
@@ -82,7 +84,7 @@ is invented data (no real names, handles, emails, or ids).
   deleted_at: datetime | None`, `like_count: int = 0`. `cooked` is HTML; `text` is the stripped text via
   `utils/html.strip_tags` (stdlib `html.parser`).
 - `external_id = str(id)`; `external_event_id = f"{id}:{(updated_at or created_at).isoformat()}"`.
-- `metadata = DiscourseMetadata(topic_id, post_number, like_count, topic_title, url)` where
+- `metadata = DiscourseMetadata(topic_id, post_number, like_count, url)` where
   `url = f"{source.config['base_url']}/t/{topic_slug}/{topic_id}/{post_number}"`.
 - `title = topic_title`, `author = name or username`, `language = None`, `rating = None`.
 - `deleted_at` present → record with `deleted_at` set (tombstone fixture: `discourse/post_deleted.json`).
@@ -113,7 +115,7 @@ is invented data (no real names, handles, emails, or ids).
 - `external_id = edit_history_tweet_ids[0] if edit_history_tweet_ids else id` so an edit updates the original
   record instead of creating a second one; `external_event_id = f"{id}:{created_at.isoformat()}"` (each edit
   has a new id, so each edit is a new raw event).
-- `author = @username`, `language = lang`, `metadata = TwitterMetadata(country, retweets, likes, handle)`.
+- `author = @username`, `language = lang`, `metadata = TwitterMetadata(country, retweets, likes)`.
   (ADR note: real Twitter webhooks need a CRC challenge handshake; fixtures stand in.)
 
 ### Intercom (`connectors/intercom.py`) — push (fixtures), `kind=conversation`
@@ -126,11 +128,12 @@ is invented data (no real names, handles, emails, or ids).
 - `external_id = item.id`; `external_event_id = f"{item.id}:{item.updated_at}"`.
 - `text` = source body + each part body, HTML stripped, joined by blank lines in time order; `title = subject`;
   `author = source.author.name`; `source_created_at/updated_at` from epochs.
-- `metadata = IntercomMetadata(conversation_id, part_count, tags, state)`.
+- `metadata = IntercomMetadata(part_count, tags, state)`.
 
 Metadata models in `domain/metadata.py` get adjusted to match: Playstore `(app_version, device,
-android_os_version)`, Twitter `(country, retweets, likes, handle)`, Intercom `(conversation_id, part_count,
-tags, state)`, Discourse unchanged. Phase 1 may have shipped slightly different field lists; this phase is
+android_os_version)`, Twitter `(country, retweets, likes)`, Intercom `(part_count, tags, state)`, Discourse
+`(topic_id, post_number, like_count, url)`. No metadata field repeats a record column (title, author,
+external_id). Phase 1 may have shipped slightly different field lists; this phase is
 allowed to edit `domain/metadata.py` to the lists above.
 
 ## Utils added
@@ -167,3 +170,23 @@ maps each source type to its connector, so nothing else in the system knows whic
 connector can also pull, page by page, and each page carries the cursor to store once that page is safely
 written. Adding Zendesk is one file, one metadata model, one registry entry and one fixture; the contract test
 fails until all four are there."
+
+## Deviations recorded at implementation (code wins over the text above)
+- Pull cursor: non-final pages return the starting cursor; only the final page moves it to newest `created_at`
+  minus 60 s, because Discourse search order is not guaranteed oldest-first and a per-page cursor could skip
+  posts after a crash (ADR-003 rule 4). Marked `# ponytail:`.
+- Search window uses `before:{now + 1 day}` because Discourse's `before:` excludes that date. To be confirmed by
+  the Phase 4 live test.
+- The topic title lives only in `record.title` (posts.json has no title, so it may be null);
+  `PlaystoreMetadata.android_os_version` is an int (API level); developer replies in Playstore `comments` are dropped, the first `userComment` is used.
+- `check_source` raises `ValueError` (there is no `ConfigError`). The push-secret check is not in
+  `check_source` because the `Source` model already rejects a push source without a secret.
+- There is no `connector_for`/`puller_for`; the registry completeness test guarantees `CONNECTORS[t]` exists.
+- `external_event_id` validates with the input model and falls back to `payload_hash` on `ValidationError`, so
+  it never raises. Missing `base_url`/`start_after` config raises `TransformError` (event goes dead).
+- Twitter edits set `source_updated_at=None`; the edit's later `created_at` decides the winning version, and
+  the store keeps the original creation time. Twitter delete tombstones are not built (no delete fixture shape).
+- `HttpxClient` passes `params=params or None` because httpx drops a query string already in the URL when
+  `params` is given, even empty; `posts.json?post_ids[]=…` relies on this.
+- Empty `text` is allowed: an image-only post or a rating with no words is still feedback.
+- Connector files split into `discourse.py` + `discourse_models.py`; registry tests live in `test_registry.py`.

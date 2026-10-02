@@ -14,7 +14,6 @@ class DiscourseMetadata(_Metadata):
     topic_id: int
     post_number: int
     like_count: int
-    topic_title: str | None
     url: str
 
 
@@ -30,12 +29,10 @@ class TwitterMetadata(_Metadata):
     country: str | None
     retweets: int
     likes: int = 0
-    handle: str
 
 
 class IntercomMetadata(_Metadata):
     source_type: Literal[SourceType.INTERCOM] = SourceType.INTERCOM
-    conversation_id: str
     part_count: int
     tags: tuple[str, ...]
     state: str | None = None

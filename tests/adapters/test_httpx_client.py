@@ -25,6 +25,12 @@ def test_query_in_url_is_kept_when_params_are_empty() -> None:
     assert client.get_json(url, {}) == {"u": url}
 
 
+def test_query_in_url_is_kept_when_params_are_given() -> None:
+    client = HttpxClient(httpx.MockTransport(lambda r: httpx.Response(200, json={"u": str(r.url)})))
+    url = "https://example.test/t?ids%5B%5D=1"
+    assert client.get_json(url, {"page": "2"}) == {"u": f"{url}&page=2"}
+
+
 @pytest.mark.parametrize("status", [408, 429, 500, 503])
 def test_retryable_statuses_are_transient(status: int) -> None:
     with pytest.raises(TransientError, match=f"{status}.*slow down"):

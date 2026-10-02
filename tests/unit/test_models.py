@@ -9,7 +9,7 @@ from feedback_ingest.domain.metadata import IntercomMetadata, SourceMetadata, Tw
 from feedback_ingest.domain.models import FeedbackRecord, RawEvent, Source
 
 _METADATA: TypeAdapter[SourceMetadata] = TypeAdapter(SourceMetadata)
-_NOW = datetime(2026, 1, 1, 12, 0)  # noqa: DTZ001  naive UTC is the storage convention
+_NOW = datetime(2026, 1, 1, 12, 0)
 _RECORD: dict[str, Any] = {
     "id": "r1",
     "tenant_id": "t1",
@@ -27,7 +27,7 @@ _RECORD: dict[str, Any] = {
     "ingested_at": _NOW,
     "deleted_at": None,
     "connector_version": 1,
-    "metadata": {"source_type": "twitter", "country": None, "retweets": 0, "handle": "@a"},
+    "metadata": {"source_type": "twitter", "country": None, "retweets": 0},
 }
 _SOURCE: dict[str, Any] = {
     "id": "s1",
@@ -55,7 +55,7 @@ def test_aware_datetimes_become_naive_utc() -> None:
 
 
 def test_metadata_round_trips_through_json() -> None:
-    metadata = IntercomMetadata(conversation_id="c1", part_count=2, tags=("bug", "ui"))
+    metadata = IntercomMetadata(part_count=2, tags=("bug", "ui"))
     assert _METADATA.validate_json(_METADATA.dump_json(metadata)) == metadata
 
 
@@ -66,10 +66,8 @@ def test_every_source_type_has_a_metadata_model() -> None:
 
 
 def test_metadata_ignores_unknown_keys_and_rejects_unknown_source() -> None:
-    stored = {"source_type": "twitter", "country": None, "retweets": 1, "handle": "@a", "new": 1}
-    assert _METADATA.validate_python(stored) == TwitterMetadata(
-        country=None, retweets=1, handle="@a"
-    )
+    stored = {"source_type": "twitter", "country": None, "retweets": 1, "new": 1}
+    assert _METADATA.validate_python(stored) == TwitterMetadata(country=None, retweets=1)
     with pytest.raises(ValidationError):
         _METADATA.validate_python({"source_type": "myspace"})
 

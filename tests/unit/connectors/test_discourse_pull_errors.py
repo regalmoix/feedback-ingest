@@ -1,0 +1,53 @@
+from urllib.parse import urlencode
+
+import pytest
+from discourse_stub import BASE, NOW, StubHttp, post, pull_source, routes
+
+from feedback_ingest.connectors.discourse import DiscourseConnector
+from feedback_ingest.domain.errors import TransformError, TransientError
+
+PULLER = DiscourseConnector()
+SEARCH_1 = (f"{BASE}/search.json", "1")
+
+
+def _posts_route(topic_id: int, ids: list[int]) -> tuple[str, str]:
+    return f"{BASE}/t/{topic_id}/posts.json?{urlencode([('post_ids[]', i) for i in ids])}", ""
+
+
+def test_transient_error_on_page_two_keeps_page_one() -> None:
+    found = routes([list(range(1, 51)), [51]])
+    found[f"{BASE}/search.json", "2"] = TransientError("503 from search.json")
+    pages = PULLER.pull(pull_source(cursor="2026-02-01T00:30:00"), StubHttp(found), NOW)
+    first = next(pages)
+    assert len(first.payloads) == 50
+    assert first.cursor == "2026-02-01T00:30:00"
+    with pytest.raises(TransientError):
+        next(pages)
+
+
+def test_a_post_omitted_by_posts_json_stops_the_pull() -> None:
+    found = routes([[1, 3]])
+    found[_posts_route(10, [1, 3])] = {"post_stream": {"posts": [post(1)]}}
+    with pytest.raises(TransientError, match=r"topic 10 omitted posts \[3\]"):
+        list(PULLER.pull(pull_source(), StubHttp(found), NOW))
+
+
+@pytest.mark.parametrize(
+    "route",
+    [SEARCH_1, _posts_route(10, [1])],
+)
+def test_unexpected_response_shape_is_transient(route: tuple[str, str]) -> None:
+    found = routes([[1]]) | {route: {"unexpected": True}}
+    with pytest.raises(TransientError, match="unexpected response shape"):
+        list(PULLER.pull(pull_source(), StubHttp(found), NOW))
+
+
+def test_search_error_is_a_transform_error() -> None:
+    found = routes([[1]]) | {SEARCH_1: {"posts": [], "grouped_search_result": {"error": "boom"}}}
+    with pytest.raises(TransformError, match="boom"):
+        list(PULLER.pull(pull_source(), StubHttp(found), NOW))
+
+
+def test_unparseable_cursor_is_a_transform_error() -> None:
+    with pytest.raises(TransformError, match="cursor"):
+        list(PULLER.pull(pull_source(cursor="yesterday"), StubHttp(routes([[1]])), NOW))

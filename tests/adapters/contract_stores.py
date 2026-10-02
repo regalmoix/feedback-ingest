@@ -45,7 +45,7 @@ def filters_and_lookups_match(a: Adapters) -> None:
     now = a.clock.now()
     later = now + timedelta(hours=1)
     tweet = {"source_type": SourceType.TWITTER, "kind": FeedbackKind.POST}
-    meta = TwitterMetadata(country=None, retweets=0, handle="@a")
+    meta = TwitterMetadata(country=None, retweets=0)
     a.feedback.upsert(record(SOURCE_A1, "r1", now))
     a.feedback.upsert(record(SOURCE_A2, "r2", later, **tweet, metadata=meta))
     by = a.feedback.list_for_tenant

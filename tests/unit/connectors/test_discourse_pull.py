@@ -1,96 +1,57 @@
-from datetime import datetime, timedelta
-from typing import Any
-from urllib.parse import urlencode
-
-import pytest
-from connector_fixtures import source
+from discourse_stub import BASE, NOW, StubHttp, pull_source, routes
 
 from feedback_ingest.connectors.discourse import DiscourseConnector
-from feedback_ingest.domain.enums import SourceMode, SourceType
-from feedback_ingest.domain.errors import TransientError
 
-BASE = "https://forum.example.test"
-NOW = datetime(2026, 3, 1, 12, 0)  # noqa: DTZ001  naive UTC is the storage convention
-START = datetime(2026, 2, 1)  # noqa: DTZ001  naive UTC is the storage convention
-TITLES = {10: '<span class="search-highlight">Dark</span> mode', 20: "Login loop"}
-Route = dict[str, Any] | Exception
-
-
-class StubHttp:
-    def __init__(self, routes: dict[tuple[str, str], Route]) -> None:
-        self.routes = routes
-        self.queries: list[str] = []
-
-    def get_json(self, url: str, params: dict[str, str]) -> dict[str, Any]:
-        self.queries.append(params.get("q", ""))
-        found = self.routes[url, params.get("page", "")]
-        if isinstance(found, Exception):
-            raise found
-        return found
-
-
-def _created(post_id: int) -> datetime:
-    return START + (timedelta(minutes=post_id) if post_id <= 50 else timedelta(days=1))
-
-
-def _topic(post_id: int) -> int:
-    return 10 if post_id % 2 else 20
-
-
-def _post(post_id: int) -> dict[str, Any]:
-    return {
-        "id": post_id,
-        "topic_id": _topic(post_id),
-        "post_number": post_id,
-        "username": f"user_{post_id}",
-        "created_at": _created(post_id).isoformat(),
-        "cooked": f"<p>post {post_id}</p>",
-        "topic_slug": f"topic-{_topic(post_id)}",
-    }
-
-
-def _routes(page_ids: list[list[int]]) -> dict[tuple[str, str], Route]:
-    routes: dict[tuple[str, str], Route] = {}
-    for page, ids in enumerate(page_ids, start=1):
-        hits = [
-            {"id": i, "topic_id": _topic(i), "created_at": _created(i).isoformat()}
-            | {"topic_title_headline": TITLES[_topic(i)]}
-            for i in ids
-        ]
-        routes[f"{BASE}/search.json", str(page)] = {"posts": hits}
-        for topic_id in (10, 20):
-            topic_ids = [i for i in ids if _topic(i) == topic_id]
-            query = urlencode([("post_ids[]", i) for i in topic_ids])
-            posts = [_post(i) for i in topic_ids]
-            routes[f"{BASE}/t/{topic_id}/posts.json?{query}", ""] = {
-                "post_stream": {"posts": posts}
-            }
-    return routes
+PULLER = DiscourseConnector()
 
 
 def test_pages_carry_titles_and_the_cursor_moves_on_the_final_page() -> None:
-    http = StubHttp(_routes([list(range(1, 51)), [51]]))
-    puller = DiscourseConnector()
-    src = source(SourceType.DISCOURSE, SourceMode.PULL)
-    first, last = puller.pull(src, http, NOW)
+    http = StubHttp(routes([list(range(1, 51)), [51]]))
+    src = pull_source()
+    first, last = PULLER.pull(src, http, NOW)
     assert len(first.payloads) == 50
     assert {p["topic_title"] for p in first.payloads} == {"Dark mode", "Login loop"}
     assert first.cursor == "2026-02-01"
     assert last.cursor == "2026-02-01T23:59:00"
-    assert http.queries[0] == "after:2026-02-01 before:2026-03-02"
-    records = [r for p in first.payloads for r in puller.transform(src, p)]
+    assert http.calls[0] == f"{BASE}/search.json after:2026-02-01 before:2026-03-02"
+    records = [r for p in first.payloads for r in PULLER.transform(src, p)]
     assert sorted(int(r.external_id) for r in records) == list(range(1, 51))
     assert {r.title for r in records} == {"Dark mode", "Login loop"}
 
 
-def test_transient_error_on_page_two_keeps_page_one() -> None:
-    routes = _routes([list(range(1, 51))])
-    routes[f"{BASE}/search.json", "2"] = TransientError("503 from search.json")
-    src = source(SourceType.DISCOURSE, SourceMode.PULL)
-    resumed = src.model_copy(update={"cursor": "2026-02-01T00:30:00"})
-    pages = DiscourseConnector().pull(resumed, StubHttp(routes), NOW)
-    first = next(pages)
-    assert len(first.payloads) == 50
-    assert first.cursor == "2026-02-01T00:30:00"
-    with pytest.raises(TransientError):
-        next(pages)
+def test_posts_are_requested_twenty_ids_at_a_time() -> None:
+    http = StubHttp(routes([list(range(1, 51))]))
+    list(PULLER.pull(pull_source(), http, NOW))
+    post_calls = [call for call in http.calls if "posts.json" in call]
+    assert [call.count("post_ids") for call in post_calls] == [20, 5, 20, 5]
+
+
+def test_titles_come_from_search_topics_when_there_is_no_headline() -> None:
+    [page] = PULLER.pull(pull_source(), StubHttp(routes([[1, 2]], topics=True)), NOW)
+    assert {p["topic_title"] for p in page.payloads} == {"Dark mode", "Login loop"}
+
+
+def test_newest_timestamp_is_carried_to_an_empty_final_page() -> None:
+    _, last = PULLER.pull(pull_source(), StubHttp(routes([list(range(1, 51)), []])), NOW)
+    assert last.cursor == "2026-02-01T00:49:00"
+
+
+def test_short_pages_flagged_as_having_more_are_all_fetched() -> None:
+    pages = list(PULLER.pull(pull_source(), StubHttp(routes([list(range(1, 21)), [21]])), NOW))
+    assert [len(page.payloads) for page in pages] == [20, 1]
+
+
+def test_a_quiet_window_advances_the_cursor_to_the_window_end() -> None:
+    http = StubHttp(routes([[]]))
+    [page] = PULLER.pull(pull_source(window_days=7), http, NOW)
+    assert page.payloads == []
+    assert page.cursor == "2026-02-08T00:00:00"
+    assert http.calls == [f"{BASE}/search.json after:2026-02-01 before:2026-02-08"]
+
+
+def test_page_guard_stops_a_server_that_ignores_page() -> None:
+    same = routes([[1], [1]])[f"{BASE}/search.json", "1"]
+    found = routes([[1]]) | {(f"{BASE}/search.json", str(p)): same for p in range(1, 30)}
+    pages = list(PULLER.pull(pull_source(), StubHttp(found), NOW))
+    assert len(pages) == 20
+    assert {page.cursor for page in pages} == {"2026-02-01"}

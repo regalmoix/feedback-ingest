@@ -10,7 +10,7 @@ from feedback_ingest.utils.time import to_naive_utc
 
 NaiveUtc = Annotated[datetime, AfterValidator(to_naive_utc)]
 
-KIND_BY_SOURCE = {
+KIND_BY_SOURCE: dict[SourceType, FeedbackKind] = {
     SourceType.PLAYSTORE: FeedbackKind.REVIEW,
     SourceType.INTERCOM: FeedbackKind.CONVERSATION,
     SourceType.TWITTER: FeedbackKind.POST,

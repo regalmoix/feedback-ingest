@@ -1,6 +1,7 @@
 from collections.abc import Iterator, Mapping
 from datetime import datetime
 from typing import Any, ClassVar, Protocol
+from uuid import NAMESPACE_URL, uuid5
 
 from pydantic import BaseModel, ConfigDict
 
@@ -20,12 +21,17 @@ def default_verify_signature(secret: str, body: bytes, headers: Mapping[str, str
     return signing.verify(secret, body, headers.get("X-Signature", ""))
 
 
+def record_id(source_id: str, external_id: str) -> str:
+    return uuid5(NAMESPACE_URL, f"{source_id}:{external_id}").hex
+
+
 class SourceConnector(Protocol):
     source_type: ClassVar[SourceType]
     version: ClassVar[int]
+    required_config: ClassVar[tuple[str, ...]]
 
-    def external_event_id(self, payload: dict[str, Any]) -> str: ...
-    def transform(self, source: Source, payload: dict[str, Any]) -> list[FeedbackRecord]: ...
+    def external_event_id(self, payload: Mapping[str, Any]) -> str: ...
+    def transform(self, source: Source, payload: Mapping[str, Any]) -> list[FeedbackRecord]: ...
     def verify_signature(self, secret: str, body: bytes, headers: Mapping[str, str]) -> bool: ...
 
 
