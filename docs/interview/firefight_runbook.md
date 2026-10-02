@@ -1,0 +1,268 @@
+# Firefight runbook
+
+Two runbooks for live incidents. Each step has one command and tells you what a good result and a bad result look like. Work top to bottom and stop at the first step that shows the cause.
+
+Before you start:
+- The server runs at `http://127.0.0.1:8000`. Replace the placeholders once, then copy the commands as they are.
+- `API_KEY` is the client's tenant key. Every `/admin` and `/v1` call is scoped to that tenant, so you only ever see this client's data.
+- `/health` needs no key and covers all tenants.
+- **(P4)** marks the scheduler and the sync endpoint, from Phase 4. They were merged to `main` on 2026-10-03 and are still in review.
+- Words like lease, dead letter, replay and cursor are in `docs/interview/glossary.md`. `docs/interview/failure_scenarios.md` explains each failure in more depth.
+
+```
+export API_KEY='<tenant api key>' SOURCE_ID='<source id>' EVENT_ID='<raw event id>'
+```
+
+---
+
+## Runbook 1: "Our Playstore reviews have been missing since yesterday"
+
+First, one thing to keep in mind. Playstore is a **push** source here: the client's side posts each review to `POST /v1/sources/{source_id}/events`. Google Play has no review webhook, so in this project fixture files stand in for that sender. A review that is missing was lost in one of three places:
+1. It never reached us, or we refused it (401, 404, 400 or 503 at the door).
+2. We saved it, but the worker has not finished it (pending, failed or dead).
+3. It was processed, but the client is looking in the wrong place (another source, or the wrong date filter).
+
+### Step 1. Is the service alive?
+
+```
+curl -s -w '\nHTTP %{http_code}\n' http://127.0.0.1:8000/health
+```
+
+| Good | Bad, and what it means |
+|---|---|
+| `HTTP 200`, `"status": "ok"`, `"worker_alive": true`, and small `pending` and `failed` numbers. | `HTTP 503` with `"status": "degraded"`: the worker thread is dead (`"worker_alive": false`), or it has not finished a pass in about 10 seconds. Restart the server. Saved work drains from disk, and in-flight rows come back after the 30-second lease. |
+| | `HTTP 503` with `"detail": "storage unavailable"`: the database is down. Every webhook is getting 503 too. The sender should retry, so fix the database first. |
+| | No reply at all: the server is down. Every delivery since then has failed at the sender's end. |
+
+### Step 2. What does this client's queue look like?
+
+```
+curl -s http://127.0.0.1:8000/admin/queue -H "X-API-Key: $API_KEY"
+```
+
+| Good | Bad, and what it means |
+|---|---|
+| `pending`, `processing` and `failed` are 0 or small. `dead` has not grown since yesterday. | `pending` is large and not shrinking: the worker is stuck or slow. Go back to step 1. |
+| | `failed` above 0: something flaky, like a database lock. These retry on their own, 4 times, with a wait of 2, 4, 8, then 16 seconds. Read their `error` in step 3, using `status=failed`. |
+| | `dead` has grown: go to step 3. |
+| | Every count looks normal, and `processed` has not grown since yesterday: the reviews never reached us. Go to step 5, checks C, D and E. |
+
+401 here means the API key is wrong. Get the right key before going further.
+
+### Step 3. List the dead events for this source
+
+```
+curl -s "http://127.0.0.1:8000/admin/raw-events?status=dead&limit=500" -H "X-API-Key: $API_KEY" | jq --arg s "$SOURCE_ID" '[.[] | select(.source_id == $s) | {id, attempts, error, received_at}]'
+```
+
+The list has no source filter yet, so `jq` does the filtering. It comes back oldest first, with at most 500 rows.
+
+| Good | Bad, and what it means |
+|---|---|
+| `[]`: nothing for this source is dead. | Many rows since yesterday, all with the same error, like `reviewId: Field required`: the sender changed its payload shape, or our transform has a bug. Go to step 5, check B. |
+| | Errors like `OperationalError: …` after `attempts: 5`: a flaky cause that outlasted the retries. If that cause is gone now, go to step 5, check A. |
+| | `source not found`: the source row is gone or belongs to someone else. Escalate. |
+
+### Step 4. Look at one raw event
+
+Copy one `id` from step 3 into `EVENT_ID`.
+
+```
+curl -s "http://127.0.0.1:8000/admin/raw-events/$EVENT_ID" -H "X-API-Key: $API_KEY" | jq '{status, attempts, error, received_at, external_event_id, payload}'
+```
+
+| Good | Bad, and what it means |
+|---|---|
+| The payload has the same shape as `tests/fixtures/playstore/review.json`: `reviewId`, then `comments[0].userComment` with `text`, `lastModified.seconds` and `starRating`. | A field is renamed or missing: it is a schema change. Step 5, check B. |
+| | `comments` holds only a developer reply: the transform skips developer replies, so the event is `processed` with 0 records. That is correct behaviour. Tell the client. |
+| | `404` with `raw event … not found`: wrong id, or it belongs to another tenant. |
+
+This shows the client's real review text. Do not paste it into tickets or chat.
+
+### Step 5. Decide what to do
+
+Match what you found to one row.
+
+| You found | Do this |
+|---|---|
+| **A.** Dead events, and the cause is fixed now (the database is back, or a bug was patched). | Replay them. See step 6. |
+| **B.** Dead events with a shape or validation error. | Fix the input model in `feedback_ingest/connectors/playstore.py`. Add the new payload as a fixture next to `tests/fixtures/playstore/review.json`. Bump `version` in the connector. Run `uv run pytest`. Restart the server. Then replay (step 6). |
+| **C.** Nothing arrived: `processed` did not grow, and nothing is dead. | Read the server's access log for this source's URL. `401`: wrong API key or wrong signature (check E). `404`: wrong source id in the sender's URL, or another tenant's id. `400`: the body is not a JSON object. `503`: our database was down, and the sender should retry. Our own app logs do not record 401s, so the access log is the place to look. |
+| **D.** Is the source there, and is it the one the client thinks? | Run the source check below. A disabled push source **still** accepts webhooks today (a known gap), so `enabled: false` does not explain missing Playstore reviews. It does stop pulling for a pull source. |
+| **E.** The client says "we are sending" but you see 401s. | Run the signature probe below. It tells you whether the secret the client uses matches ours, and it stores nothing. |
+| **F.** It is a pull source, not Playstore. | Run a manual sync (P4), then see Runbook 2. For a push source like Playstore, sync answers 404 "push-only". |
+
+Access log lines for this source (use whatever file uvicorn writes to):
+
+```
+grep "/v1/sources/$SOURCE_ID/events" server.log | tail -20
+```
+
+Source check:
+
+```
+curl -s "http://127.0.0.1:8000/v1/sources/$SOURCE_ID" -H "X-API-Key: $API_KEY" | jq '{name, type, mode, enabled, cursor}'
+```
+
+Good: `type` is `playstore`, `mode` is `push`, and the `name` is the app the client means. A client with two Android apps has two sources, and their reviews are separate. Bad: `404` means this tenant does not own that source id.
+
+Signature probe. The body `[]` is valid JSON but not an object, so a request with a correct signature gets 400 and nothing is written. Write the probe body and sign it with the secret the client says it uses:
+
+```
+printf '[]' > probe.json && SIG=$(.venv/bin/python scripts/sign.py '<client secret>' probe.json)
+```
+
+```
+curl -s -w '\nHTTP %{http_code}\n' -X POST "http://127.0.0.1:8000/v1/sources/$SOURCE_ID/events" -H "X-API-Key: $API_KEY" -H "X-Signature: $SIG" --data-binary @probe.json
+```
+
+Good: `HTTP 400` with `body must be a JSON object`, so the secret matches. Bad: `HTTP 401` with `bad or missing signature`, so the client's secret is not ours. There is no rotation endpoint today, so either the client goes back to the secret it got when the source was created, or an operator updates `sources.webhook_secret` by hand.
+
+### Step 6. Replay
+
+One event:
+
+```
+curl -s -X POST "http://127.0.0.1:8000/admin/raw-events/$EVENT_ID/replay" -H "X-API-Key: $API_KEY"
+```
+
+Good: `{"status": "pending"}`. The worker picks it up within about a second. Bad: `409` means the event is being processed right now, so wait and try again. `404` means a wrong id.
+
+Every dead event for this source:
+
+```
+curl -s "http://127.0.0.1:8000/admin/raw-events?status=dead&limit=500" -H "X-API-Key: $API_KEY" | jq -r --arg s "$SOURCE_ID" '.[] | select(.source_id == $s) | .id' | while read -r id; do curl -s -X POST "http://127.0.0.1:8000/admin/raw-events/$id/replay" -H "X-API-Key: $API_KEY"; echo; done
+```
+
+Replay is safe to repeat, because the upsert is keyed on `(source_id, external_id)`. If a bug made **wrong** records, not dead ones, replay the `processed` events too, using `status=processed` in the same loop. Remember the list is oldest first and capped at 500, so on a busy source it may not reach yesterday's events.
+
+### Step 7. Check that it worked
+
+```
+curl -s "http://127.0.0.1:8000/v1/records?source_id=$SOURCE_ID&kind=review&since=<yesterday, e.g. 2026-10-02T00:00:00>&limit=500" -H "X-API-Key: $API_KEY" | jq 'length, (.[-1] | {external_id, source_created_at, ingested_at, connector_version})'
+```
+
+Good: the count matches what the client expects. The newest record has a recent `ingested_at`. After a fix, `connector_version` shows the new version. Run step 2 again: `pending` and `failed` are back to 0, and `dead` has not grown.
+
+Bad: still 0. Be aware that `since` filters on when the review was **written**, as the source reports it, not when it reached us. A review written three days ago and delivered today does not match `since=yesterday`. Try again without `since` before you escalate.
+
+### Step 8. Tell the client
+
+Send the first message within 15 minutes, even if you do not know the cause yet. Send an update every hour until it is fixed.
+
+| Field | What to write |
+|---|---|
+| Subject | Playstore reviews delayed for `<app name>`: `<investigating / fixed>` |
+| What you saw | "Reviews from `<app name>` stopped appearing from `<first missing time, UTC>`." |
+| What we found | "`<one plain sentence: e.g. the review format changed and our importer rejected the new format>`." |
+| Data | "No reviews were lost. We keep every review we receive, and we have re-run them." Or, if they never reached us: "Reviews sent between `<start, UTC>` and `<end, UTC>` were refused. Please re-send them; repeats are safe and will not create duplicates." |
+| Status now | "`<n>` reviews restored as of `<time, UTC>`." Or: "The fix is in progress; next update by `<time, UTC>`." |
+| Next | "`<what we will do next, e.g. add an alert so we notice within minutes>`." |
+
+Only say "no data was lost" if step 7 proves it.
+
+### Step 9. Post-incident note
+
+Write this within one working day. Keep it blameless: describe what happened, not who did it.
+
+| Heading | What goes in it |
+|---|---|
+| Summary | One sentence: what broke, for whom, and for how long (start and end, UTC). |
+| Timeline | Detected, client told, cause found, fixed, verified. One line each, with the time. |
+| What broke | The technical cause, e.g. "the Playstore payload renamed `reviewId`; every event failed validation and went to the dead list". |
+| Blast radius | Which tenants and sources, how many raw events, how many records were late or missing. Was any data lost? (Usually no, if it reached `raw_events`.) |
+| Fix | What changed (connector file, version bump), and how many events were replayed. |
+| Prevention | What would have caught it sooner: an alert on dead count per source, an alert on "no new records for N hours", a fixture from the new payload, a contract test. |
+| Follow-ups | Each with an owner and a date. |
+
+---
+
+## Runbook 2: "Discourse pull stopped advancing"
+
+Discourse is a **pull** source. The scheduler (P4) runs every pull source once every 300 seconds (`FI_PULL_INTERVAL_SECONDS`). Each run reads the source's **cursor**, searches one window of `window_days` days (default 7) starting there, and saves the cursor again **only when the run reaches its final page**. Four things can stop it moving:
+- a **429** or other error part-way through,
+- the **20-page cap**: a window holding more than about 1000 posts never reaches its final page,
+- a **bad cursor or config**,
+- the scheduler itself is not running, or the source is disabled.
+
+### Step 1. Is the scheduler running?
+
+```
+curl -s http://127.0.0.1:8000/health | jq '{status, scheduler_alive, worker_alive}'
+```
+
+Good: `"scheduler_alive": true`. Bad: `false` means the scheduler is gone. Health still says `"status": "ok"` in that case (a known gap), so check this field directly. Restart the server. Its first tick runs 300 seconds after start, so use step 3 to sync now.
+
+### Step 2. Where is the cursor, and is the source on?
+
+```
+curl -s "http://127.0.0.1:8000/v1/sources/$SOURCE_ID" -H "X-API-Key: $API_KEY" | jq '{enabled, cursor, config}'
+```
+
+| Good | Bad, and what it means |
+|---|---|
+| `enabled: true`, and `cursor` is close to now (within a day). | `enabled: false`: the scheduler skips disabled sources. Turn it back on with the command below. |
+| | `cursor` is days or weeks old: it is stuck. Go to step 3. |
+| | `cursor` is `null`: it has never finished a run. It starts from `config.start_after`. |
+| | `config.base_url` is wrong: every call fails. Step 3 shows the error. |
+
+```
+curl -s -X PATCH "http://127.0.0.1:8000/v1/sources/$SOURCE_ID" -H "X-API-Key: $API_KEY" -H "Content-Type: application/json" -d '{"enabled": true}'
+```
+
+### Step 3. Run one sync by hand and read the result (P4)
+
+```
+curl -s -X POST "http://127.0.0.1:8000/v1/sources/$SOURCE_ID/sync" -H "X-API-Key: $API_KEY" | jq .
+```
+
+The reply has `pages`, `accepted` (new), `duplicates`, `cursor` and `error`. Run it twice and compare the `cursor`.
+
+| What you see | What it means | What to do |
+|---|---|---|
+| `error: null`, `cursor` moved forward | Healthy. It was only behind. | Run it a few more times, or wait for the scheduler. Each run moves at most `window_days`. |
+| `error: null`, `cursor` close to now, `accepted: 0` | Caught up, with no new posts. Some `duplicates` are normal, because of the 60-second overlap. | Nothing. Note that the pull searches by **creation** date, so an edit to an old post is not picked up. That is expected, not a stall. |
+| `error` has `429` or `5xx`, or a timeout | Discourse is rate-limiting us or is down. The pages before the error are saved, but the cursor did not move. | Wait. The scheduler retries every tick and does not back off. If it keeps happening, raise `FI_PULL_INTERVAL_SECONDS` and restart. Check that only **one** process is pulling: under `uvicorn --workers N`, every process runs its own scheduler. |
+| `error: null`, `pages: 20`, `cursor` unchanged | The 20-page cap. The window is too busy to reach its final page, so the cursor never moves. Every run re-reads the same pages, and they all come back as duplicates. | Make the window smaller (command below). |
+| `error` has `unparseable cursor` | The saved cursor is not a date. | Set the cursor by hand (command below). |
+| `error` has `omitted posts` | Discourse search listed a post that the topic call did not return, often a post deleted a moment ago. It retries, and usually clears when Discourse's search catches up. | Wait a few ticks. If it stays stuck on the same topic, escalate. Moving the cursor past it by hand skips those posts. |
+| `error` has `404 from` or another 4xx | The `base_url` is wrong, or the forum is private. | Fix `config.base_url` by hand in the database. |
+| HTTP `404` with `push-only` | This source is not a pull source. | Use Runbook 1. |
+
+Shrink the window. The API cannot change config yet, so edit the database. The server reads sources fresh on every run, so no restart is needed:
+
+```
+sqlite3 feedback.db "UPDATE sources SET config = json_set(config, '\$.window_days', '1') WHERE id = '<source id>';"
+```
+
+Set the cursor by hand. The format is an ISO date and time in UTC, with no timezone. Moving it **back** is always safe, because repeats are dropped. Moving it **forward** skips posts:
+
+```
+sqlite3 feedback.db "UPDATE sources SET cursor = '2026-10-01T00:00:00' WHERE id = '<source id>';"
+```
+
+### Step 4. Read the pull log lines for this source
+
+```
+grep "source_id=$SOURCE_ID" server.log | grep -E "pulled|pull stopped|pull failed" | tail -20
+```
+
+Good: `pulled N pages: X new, Y duplicates` once per tick. Bad: `pull stopped, will resume next tick` (a flaky error, like a 429) or `pull failed` (anything else, with a traceback) on every tick.
+
+### Step 5. Check that records arrive
+
+A moving cursor only means raw events were saved. The worker still has to turn them into records, so check both.
+
+```
+curl -s http://127.0.0.1:8000/admin/queue -H "X-API-Key: $API_KEY"
+```
+
+```
+curl -s "http://127.0.0.1:8000/v1/records?source_id=$SOURCE_ID&kind=post&since=<cursor date from step 2>&limit=5" -H "X-API-Key: $API_KEY" | jq '[.[] | {external_id, title, source_created_at}]'
+```
+
+Good: `pending` drains to 0, and new posts appear. Bad: `dead` grows for this source. Go to Runbook 1, step 3, and treat it the same way.
+
+### Step 6. Tell the client, and write the note
+
+Use the same templates as Runbook 1, steps 8 and 9. For a pull source the data line is usually: "No posts were lost. We read the forum again from where we stopped, and repeats are dropped." That is true because the cursor only moves after rows are saved. It stops being true if someone moved the cursor **forward** by hand, so say that if it happened.
