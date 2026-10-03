@@ -6,7 +6,7 @@ Plain words for every term you may need at the whiteboard. Each term has three l
 - **Where:** where it lives in this repo.
 - **Why:** why it matters here.
 
-Everything below is built and merged to `main`: Phases 1 to 5, the Fleet 2 hardening (including bulk replay), and the custom connector. Anything not built says so. Paths are under `feedback_ingest/` unless they start with `tests/` or `docs/`.
+Everything below is built and merged to `main`: Phases 1 to 5, the Fleet 2 hardening (including bulk replay; Fleet 2 is defined in section 6), and the custom connector. Anything not built says so. Paths are under `feedback_ingest/` unless they start with `tests/` or `docs/`.
 
 The terms are in teaching order, so each one only uses words defined above it.
 
@@ -35,7 +35,7 @@ The terms are in teaching order, so each one only uses words defined above it.
 ### Connector
 - **What:** The code for one source type: it checks a payload, works out its ids, turns it into feedback records, and for Discourse also fetches pages.
 - **Where:** One file per source in `connectors/` (`discourse.py`, `playstore.py`, `twitter.py`, `intercom.py`, `custom.py`, plus `discourse_pull.py` for paging), all listed in `connectors/registry.py`: `CONNECTORS` is built from a tuple of connectors and maps every type to its connector, and `PULLERS` holds the ones that can pull.
-- **Why:** It is the extensibility story. Adding Zendesk takes five steps: a `SourceType` enum value and its `KIND_BY_SOURCE` entry; a metadata model in the `SourceMetadata` union; a connector file with its input model; a registry entry (the tuple inside `CONNECTORS`, and `PULLERS` if it pulls); and fixtures, including `malformed.json`. The registry and metadata tests fail until all five exist. No route, worker or table changes. The `custom` connector, which takes Enterpret's public webhook shape, was added exactly this way.
+- **Why:** It is the extensibility story. Adding Zendesk takes five steps: (1) a `SourceType` value and its `KIND_BY_SOURCE` entry in `domain/enums.py`; (2) a metadata model in the `SourceMetadata` union in `domain/metadata.py`; (3) a connector file with its input model in `connectors/`; (4) its entry in `CONNECTORS` (and `PULLERS` if it pulls) in `connectors/registry.py`; (5) fixtures under `tests/fixtures/<type>/`. The contract test fails until all five exist. No route, worker or table changes. The `custom` connector, which takes Enterpret's public webhook shape, was added exactly this way.
 
 ### Connector version
 - **What:** A whole number on each connector, bumped whenever its transform output changes, and stamped on every record it builds.
@@ -72,7 +72,7 @@ The terms are in teaching order, so each one only uses words defined above it.
 ### Inbox / durable log (and why not "outbox")
 - **What:** Durable means "on disk, survives a crash"; the inbox is the table where every incoming payload lands before we reply.
 - **Where:** The `raw_events` table, used through the `RawEventQueue` port (`ports/queue.py`, adapter `adapters/sqlalchemy/raw_event_queue.py`).
-- **Why:** Push and pull both write here and one worker reads it; we never call it an outbox, because an outbox holds messages we will send out, and this table holds what came in.
+- **Why:** Push and pull both write here and one worker reads it. Queue vs inbox: the table is the durable log; the port is its queue view; we never call it an outbox, because an outbox holds messages we will send out, and this table holds what came in.
 
 ### HMAC signature
 - **What:** A short code made from the request body and a shared secret; only someone who knows the secret can make it, so it proves the sender and that the body was not changed.
@@ -118,7 +118,7 @@ The terms are in teaching order, so each one only uses words defined above it.
 
 ### Fence
 - **What:** A worker finishing a row passes back the event it claimed, and the finish only applies if the row is still `processing` with that same `attempts` and `lease_until`.
-- **Where:** `mark_processed`, `mark_failed` and `mark_dead` in both queue adapters, which return False when refused; `_finish` in `services/pipeline.py` then logs `lease lost`.
+- **Where:** `mark_processed`, `mark_failed` and `mark_dead` in both queue adapters, which return False when refused; `_mark_outcome` in `services/pipeline.py` then logs `lease lost`.
 - **Why:** A slow worker whose lease ran out cannot overwrite the result of the worker that took the row after it.
 
 ### Backoff
@@ -129,11 +129,16 @@ The terms are in teaching order, so each one only uses words defined above it.
 ### Dead letter
 - **What:** A raw event that failed for a reason retrying cannot fix, parked with status `dead` and its error message.
 - **Where:** `EventStatus.DEAD` and `mark_dead`; `services/pipeline.py` sends validation and transform errors there on the first try, and also exhausted retries and `attempt limit exceeded`; `GET /admin/raw-events?status=dead` in `api/admin.py` lists them, newest first.
-- **Why:** A poison payload stops being retried but is never thrown away, so it can be fixed and replayed.
+- **Why:** A poison payload stops being retried but is never thrown away, so it can be fixed and replayed. The "dead list", "dead-letter list" and "events with status dead" are the same thing.
+
+### PermanentError (was TransformError)
+- **What:** The exception for a failure that retrying cannot fix (a payload or config that will never work); its partner `TransientError` means "might work later".
+- **Where:** `domain/errors.py`. Connectors and the HTTP adapter raise it; `services/pipeline.py` sends it (and a Pydantic `ValidationError`) to dead on the first try; `services/pull.py` stops a pull on it and keeps the cursor.
+- **Why:** The old name described where it was raised, not what it means; "permanent" says why the event goes dead at once.
 
 ### Replay
 - **What:** Running stored raw payloads through the transform again, usually after fixing a bug.
-- **Where:** `requeue(event_id, now)` puts a row back to pending and resets attempts; `POST /admin/raw-events/{id}/replay` in `api/admin.py` does that for one event, and answers 409 only while a worker holds a live lease (a `processing` row whose lease expired can be replayed). Bulk replay is built too: `POST /admin/raw-events/replay?status=&source_id=&limit=` requeues the calling tenant's matching rows (status `dead`, `failed` or `processed`, default `dead`; at most 500, newest first) and answers `{"requeued": n}`. Replay by time window is not built.
+- **Where:** `replay(event_id, now)` puts a row back to pending and resets attempts; `POST /admin/raw-events/{id}/replay` in `api/admin.py` does that for one event, and answers 409 only while a worker holds a live lease (a `processing` row whose lease expired can be replayed). Bulk replay is built too: `POST /admin/raw-events/replay?status=&source_id=&limit=` resets the calling tenant's matching rows (status `dead`, `failed` or `processed`, default `dead`; at most 500, newest first) and answers `{"replayed": n}`. Replay by time window is not built.
 - **Why:** Raw is kept, so a bug never means lost data. Replay runs the same upsert and the same version guard, where an equal timestamp is accepted (ADR-002), so a fixed row is still written. The upsert never clears `deleted_at`, so deleted items stay deleted. That is why replay order does not matter.
 
 ### uvicorn workers
@@ -150,12 +155,12 @@ The terms are in teaching order, so each one only uses words defined above it.
 
 ### Upsert
 - **What:** Insert a row, or update it if it already exists.
-- **Where:** `upsert` in `adapters/sqlalchemy/feedback_store.py`, which returns `inserted`, `updated` or `skipped_older`.
+- **Where:** `upsert` in `adapters/sqlalchemy/feedback_store.py` (and the memory twin), which returns `inserted`, `updated` or `skipped_older`; both call one pure `merge(existing, incoming)` in `domain/models.py` for the update rule.
 - **Why:** An update only wins if the incoming "last changed" time (update time, or create time if missing) is newer or equal (the version guard, below); the code today reads then writes inside one `BEGIN IMMEDIATE` transaction, and its `ponytail:` note says to switch to `INSERT ... ON CONFLICT` when Postgres needs many writers.
 
 ### Version guard
 - **What:** The rule that an older version of a record never overwrites a newer one. The version is the source's update time, or its create time if there is no update time.
-- **Where:** `upsert` in `adapters/sqlalchemy/feedback_store.py` (and the memory twin): older is `skipped_older`, equal or newer overwrites. Replay goes through the same guard.
+- **Where:** `merge` in `domain/models.py`, called by `upsert` in both feedback stores: older is `skipped_older`, equal or newer overwrites. Replay goes through the same guard.
 - **Why:** Webhooks and polls arrive out of order, so order cannot decide the winner. Enterpret's engineering blog describes the same idea: version-based rejection of stale updates.
 
 ### Idempotency vs de-duplication
@@ -204,3 +209,20 @@ The terms are in teaching order, so each one only uses words defined above it.
 - **What:** Start a transaction and take the write lock right away, not at the first write.
 - **Where:** A `begin` listener in `adapters/sqlalchemy/db.py`; connections marked `read_only` use a plain `BEGIN` instead.
 - **Why:** A transaction that reads and then writes can fail when it tries to upgrade its lock, so taking it up front avoids that, and reads never wait on a writer (a test checks this).
+
+## 6. How it was built
+
+### Council
+- **What:** A five-advisor pressure test of one decision with real stakes: five agents argue it independently, and the verdict becomes an ADR.
+- **Where:** `docs/decisions/` (ADRs plus the full council transcripts); the method is [AGENT_WORKFLOW.md](../../AGENT_WORKFLOW.md) § 5.
+- **Why:** Storage, the record model and the connector contract each went through one, so every big choice has its alternatives and dissent written down.
+
+### Fleet 2
+- **What:** The second whole-repo review round, commit `cbb788c`.
+- **Where:** The commit itself, and the "Fleet 2" notes at the top of the phase docs and in the ADRs.
+- **Why:** Many docs say "changed in Fleet 2": that is where the security hardening, type tightening and bulk replay landed.
+
+### `# ponytail:` marker
+- **What:** A comment naming a deliberate shortcut, its ceiling (when it stops working) and its upgrade.
+- **Where:** In the code (`grep -rn "ponytail:" feedback_ingest`), harvested into [debt_ledger.md](debt_ledger.md).
+- **Why:** It turns "what would you do next?" into a list you can point at, one row per shortcut.

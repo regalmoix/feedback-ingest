@@ -84,7 +84,7 @@ There is no `raw_event_id` column: every input payload stays in `raw_events` und
 
 ### Update rule (the upsert)
 
-The adapter reads the existing row and then inserts or updates, inside one `BEGIN IMMEDIATE` transaction so no other writer can interleave (a single `INSERT ... ON CONFLICT ... DO UPDATE ... WHERE` is the Postgres-scale upgrade, noted in a `ponytail:` comment). The rule it applies:
+The adapter reads the existing row and then inserts or updates, inside one `BEGIN IMMEDIATE` transaction so no other writer can interleave. The rule is the COALESCE rule below, applied in Python today (`merge(existing, incoming)` in `domain/models.py`, which both feedback stores call) inside `BEGIN IMMEDIATE`; the SQL `ON CONFLICT … WHERE` form shown here is the Postgres upgrade (extensions recipe 2, and a `ponytail:` comment in `feedback_store.py`). The rule:
 
 ```sql
 WHERE COALESCE(excluded.source_updated_at, excluded.source_created_at)
@@ -144,7 +144,7 @@ General rule: every write must be a full snapshot of the item.
 ### `raw_events` duplicates
 
 - `UNIQUE(source_id, external_event_id)`. `external_event_id` is the item id plus its last-changed time, for example `"{post id}:{updated_at}"` (Intercom adds a short hash of the item). When the payload does not validate, or for a custom batch, it is the sha256 of the payload as canonical JSON (`json.dumps(sort_keys=True)`).
-- A duplicate `(source_id, external_event_id)` is detected inside the same write transaction and the insert is skipped; the caller still gets `202` with `duplicate: true`. A duplicate webhook is stored once and processed once. A duplicate of a dead row is not requeued: a WARNING says to replay it.
+- A duplicate `(source_id, external_event_id)` is detected inside the same write transaction and the insert is skipped; the caller still gets `202` with `duplicate: true`. A duplicate webhook is stored once and processed once. A duplicate of a dead row is left dead: a WARNING says to replay it.
 - This key is the only place dedupe uses a payload hash. It exists because a delivery has no natural id, while a feedback item always has one.
 - The webhook URL carries the source id. Its signature is checked against `source.webhook_secret` before anything is written to `raw_events`. Only push sources accept webhooks.
 - The pull cursor moves forward only after the raw rows are committed. The overlap window then re-sends a few items, and the rule above absorbs them.

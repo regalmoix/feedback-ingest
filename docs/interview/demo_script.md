@@ -70,8 +70,9 @@ in an incident: are both threads alive, how many pull sources failed their last 
 the queue."
 
 **Follow-up:** "What makes health go red?"
-**Answer:** Only our own threads. A dead worker or scheduler thread, or no completed worker pass in about 10
-seconds, gives 503 and `"status":"degraded"`. A failing pull source does not: it raises the `failing_sources`
+**Answer:** Our own threads, or our storage. A dead worker or scheduler thread, or no completed worker pass in
+about 10 seconds, gives 503 and `"status":"degraded"`; storage down also gives 503 ("storage unavailable"),
+because health reads the queue counts. A failing pull source does not: it raises the `failing_sources`
 count (a number, no ids) and the status stays 200, because restarting us would not fix someone else's API
 (`feedback_ingest/api/health.py`, `tests/api/test_health.py`).
 
@@ -94,6 +95,9 @@ creation; we store only a hash of the key. Creating a tenant takes the bootstrap
 **Follow-up:** "Why is the Discourse source pull and the others push?"
 **Answer:** Discourse has a public API we poll live; Playstore has no review webhook in reality, so recorded
 fixtures stand in for that poller, and the transform is the same either way (ADR-003 context table).
+
+If someone opens `scripts/seed_lib.py`: `httpx2` is imported under `TYPE_CHECKING` only. Tests drive the seed
+through the httpx2 `TestClient`, the real seed uses httpx, and the `Client` alias types both.
 
 ## Step 3. The same review to lumenote-android twice
 
@@ -212,7 +216,8 @@ starts `comments.0.userComment.lastModified: Field required`.
 
 **Say:** "The payload is missing its timestamp and rating, so its input model rejects it. That is permanent, so
 it goes dead on the first try, with the field name and no customer text. Replay puts it back to pending and
-resets attempts; it dies again because the payload really is bad. That proves replay re-runs the stored
+resets attempts to 0, and the next claim bumps them to 1, which is why it shows `attempts` 1 again; it dies
+again because the payload really is bad. That proves replay re-runs the stored
 payload. After a real connector fix, the same call brings it back."
 
 **Follow-up:** "What about a flaky failure, like a locked database?"
@@ -235,7 +240,10 @@ real forum posts with their topic titles and authors.
 **Say:** "Polling is just another producer. The connector fetches pages from the real forum, and every payload
 goes through the same accept call as a webhook. The bookmark, the cursor, moves only on the final page of a
 window, and only after that page's rows are on disk. Here the window end is in the past, so the cursor jumps to
-it: `2021-01-05`. The seed fixes the window to four days in January 2021, so the demo is repeatable."
+it: `2021-01-05`. Nothing new can land in a past window, so jumping to its end is safe; a live window instead
+stops 60 seconds short of the newest post, so a post committed late is read again and dropped as a repeat.
+`before:` takes a date, not a time, so for a live window the end is tomorrow's date, which keeps today's posts
+in the search. The seed fixes the window to four days in January 2021, so the demo is repeatable."
 
 **Follow-up:** "What if Discourse rate-limits us halfway?"
 **Answer:** The 429 becomes a transient error and the pull stops. Rows already saved stay saved, and the cursor
@@ -264,6 +272,10 @@ curl -sS --fail-with-body "$BASE/admin/queue" -H "X-API-Key: $LUMENOTE_KEY"
 
 **They see:** before the kill, the queue shows `"pending":20`. After the restart, "queue as it drains" prints the
 counts three times, ending with `"pending":0` and `processed` up by 20.
+
+Two things that look odd in the output: the `FI_WORKER_ENABLED=false` prefix applies to that one
+`start_server` call only, so the restart after `kill -9` has the worker on; and the 20 pushes still echo their
+`$ curl` lines although their replies go to `/dev/null`, because `show` prints the command to stderr.
 
 **Say:** "I restart with the worker off, so the backlog is certainly there. Twenty webhooks get 202 and sit as
 pending rows. Then `kill -9`: no shutdown, no flush. The new process finds the rows on disk and drains them. The

@@ -1,5 +1,7 @@
 # Phase 2: Connectors and transform
 
+Status: historical design record.
+
 Status: implemented and review-fixed 2026-10-03 (commits 6264b45, d8648f1). Depends on Phase 1 and ADR-003 (ADR-003 is authoritative where they differ). Still no HTTP endpoints.
 
 **Update after Fleet 2 (commit cbb788c) and the tailoring pass (b8f6e2b).** The code wins over this LLD. What changed here:
@@ -63,7 +65,7 @@ Rules every connector obeys (these are the contract test):
   the raw_events unique key and be silently dropped, so the record would never update.
 - `transform` returns a list: empty for payloads that are not feedback (ping, bot message), one record normally,
   several when one payload holds several items, and a record with `deleted_at` set for a deletion.
-- `transform` lets Pydantic's `ValidationError` propagate for malformed payloads and raises `TransformError` for
+- `transform` lets Pydantic's `ValidationError` propagate for malformed payloads and raises `PermanentError` for
   any other permanent problem; the worker (Phase 3) catches both in one `except` and marks the event dead. It
   never raises anything else on bad data.
 - `transform` is deterministic: same input, same output. Connectors are clock-free: `ingested_at` is a required
@@ -109,11 +111,11 @@ is invented data (no real names, handles, emails, or ids).
 - `title = topic_title`, `author = name or username`, `language = None`, `rating = None`.
 - `deleted_at` present → record with `deleted_at` set (tombstone fixture: `discourse/post_deleted.json`).
 - `pull(source, http, clock, deadline)` lives in `connectors/discourse_pull.py` (`pull_pages`); the connector delegates to it.
-  - `since = source.cursor or config["start_after"]`, parsed as `NaiveUtc` (unparseable → `TransformError`).
+  - `since = source.cursor or config["start_after"]`, parsed as `NaiveUtc` (unparseable → `PermanentError`).
     The window is bounded: `until = min(now + 1 day, since + window_days)`, `window_days` from config,
     default 7. Query: `search.json?q=after:{since_date} before:{until_date}&page=N`.
   - A page is the last one when `grouped_search_result.more_full_page_results` is not true. A
-    `grouped_search_result.error` raises `TransformError("discourse search reported an error")`; the upstream
+    `grouped_search_result.error` raises `PermanentError("discourse search reported an error")`; the upstream
     text goes only to a WARNING log line with `tenant_id` and `source_id`.
   - Post ids are grouped by `topic_id` and fetched from `{base_url}/t/{topic_id}/posts.json?post_ids[]=…` in
     chunks of 20. If `posts.json` leaves out any requested post, that is a `TransientError` (retry later). An
@@ -125,7 +127,7 @@ is invented data (no real names, handles, emails, or ids).
     search order is not guaranteed oldest-first, so a per-page cursor could skip posts after a crash
     (ADR-003 rule 4). The 60-second overlap re-fetches boundary posts; idempotency absorbs them.
   - At most 10 search pages per poll (Discourse answers 400 for page 11), so about 500 posts per day is the
-    hard limit. A window that hits the cap raises `TransformError` and the cursor stays unchanged; lower
+    hard limit. A window that hits the cap raises `PermanentError` and the cursor stays unchanged; lower
     `window_days` with `PATCH /v1/sources/{id}` if that happens. Both limits are marked `# ponytail:`.
   - 429/5xx from the port surface as `TransientError` and stop the iterator; the cursor of already-yielded
     pages is kept by the caller.
@@ -158,7 +160,7 @@ is invented data (no real names, handles, emails, or ids).
   tags: {tags: list[{name: str}]}}}`. Real Intercom conversation webhooks carry the whole conversation with
   its parts, so every payload is a full snapshot and the normal upsert applies (ADR-002).
 - `topic == "ping"` → empty list (fixture `intercom/ping.json`); `conversation.*` → one record from the
-  snapshot; any other topic → `TransformError` (the event goes dead).
+  snapshot; any other topic → `PermanentError` (the event goes dead).
 - `external_id = item.id`; `external_event_id = f"{item.id}:{item.updated_at.isoformat()}:{payload_hash(item)[:12]}"`,
   so two different snapshots with the same `updated_at` are not deduplicated into one.
 - `text` = source body + each part body, HTML stripped, joined by blank lines in time order; `title = subject`;
@@ -208,8 +210,8 @@ batch's payload hash); `transform` returns one record per entry with `external_i
 createdAt` (epoch seconds; 13-digit milliseconds are converted), `source_updated_at = updatedAt`. Metadata is
 `CustomMetadata(record_type, score, fields)`: flat string/number/bool values, `score` taken from
 `metadata["score"]`. The kind is the one exception to "kind per source": `KIND_BY_RECORD_TYPE` in
-`domain/models.py` maps `REVIEW`, `CONVERSATION`, `FORUM_CONVERSATION_THREAD`, `SURVEY` to review,
-conversation, post and the new `survey` kind; any other `type` is a `TransformError`. No config, default HMAC,
+`domain/enums.py` (it was in `domain/models.py`) maps `REVIEW`, `CONVERSATION`, `FORUM_CONVERSATION_THREAD`, `SURVEY` to review,
+conversation, post and the new `survey` kind; any other `type` is a `PermanentError`. No config, default HMAC,
 no puller. One bad record dead-letters the whole batch (marked `ponytail:`). The contract test skips
 `malformed` and `unsupported_type` fixtures as transform inputs.
 
@@ -231,14 +233,14 @@ the registry and metadata tests fail until all are there. The custom connector w
   `check_source` because the `Source` model already rejects a push source without a secret.
 - There is no `connector_for`/`puller_for`; the registry completeness test guarantees `CONNECTORS[t]` exists.
 - `external_event_id` validates with the input model and falls back to `payload_hash` on `ValidationError`, so
-  it never raises. Missing `base_url`/`start_after` config or an unparseable cursor raises `TransformError`.
+  it never raises. Missing `base_url`/`start_after` config or an unparseable cursor raises `PermanentError`.
 - Twitter edits set `source_updated_at=None`; the edit's later `created_at` decides the winning version, and
   the store keeps the original creation time. Twitter delete tombstones are not built (no delete fixture shape).
 - `HttpxClient` builds the URL with `httpx.URL(url).copy_merge_params(params)` (or the bare URL when `params`
   is empty), because httpx's `params=` replaces a query string already in the URL; `posts.json?post_ids[]=…`
   relies on this.
 - Empty `text` is allowed: an image-only post or a rating with no words is still feedback.
-- Fleet 2: a Playstore review with no user comment raises `TransformError("review has no user comment")`
+- Fleet 2: a Playstore review with no user comment raises `PermanentError("review has no user comment")`
   and goes dead (it used to return `[]`); a bad payload must not look like "no data".
 - Connector files split into `discourse.py` + `discourse_models.py` + `discourse_pull.py`; registry tests live
   in `test_registry.py`; pull error tests in `test_discourse_pull_errors.py`.

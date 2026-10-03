@@ -26,7 +26,8 @@ All four gates must be green before any commit. Settings use the `FI_` prefix (s
 - Layout: `domain/` (models), `ports/` (Protocols), `adapters/` (sqlalchemy, memory, http), `connectors/` (one per source + registry), `services/`, `api/`, `wiring.py`, `main.py`. Services import ports only.
 - Every port has a SQLite adapter and a memory fake; both run the contract tests under `tests/adapters/`.
 - Webhooks are push-only and take no API key: the source id picks the source, its HMAC proves the sender.
-- Add a source: enum value, connector file with its input model, metadata model in the union, `KIND_BY_SOURCE` entry (`custom` maps per record type in `KIND_BY_RECORD_TYPE` instead), registry entry, fixtures under `tests/fixtures/<type>/`; the contract test fails until all exist.
+- Add a source in five steps: (1) a `SourceType` value and its `KIND_BY_SOURCE` entry in `domain/enums.py`; (2) a metadata model in the `SourceMetadata` union in `domain/metadata.py`; (3) a connector file with its input model in `connectors/`; (4) its entry in `CONNECTORS` (and `PULLERS` if it pulls) in `connectors/registry.py`; (5) fixtures under `tests/fixtures/<type>/`. The contract test fails until all five exist. (`custom` maps per record type in `KIND_BY_RECORD_TYPE` instead
+  of a step-1 entry.)
 - Files ≤120 lines. Comments only for `# ponytail:` markers (ceiling + upgrade) and rare "why".
 - Fixtures are synthetic; never commit real ids, keys or customer text. `.seed.json` and `*.db*` are ignored.
 - Known deliberate gaps are listed in the README and `docs/interview/debt_ledger.md`; do not "fix" them without a decision.

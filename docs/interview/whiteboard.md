@@ -1,5 +1,8 @@
 # Whiteboard script (10 minutes)
 
+Terms: [glossary.md](glossary.md). Follow-up answers: [qa_bank.md](qa_bank.md). The live run that matches this
+drawing: [demo_script.md](demo_script.md).
+
 Draw in this order. Each step is one box or arrow and one sentence. Module names in brackets are the real
 files, so if someone opens the repo the drawing matches.
 
@@ -64,11 +67,8 @@ Point at the custom box. Say: "This one takes the batch shape Enterpret's public
 `{"records": [...]}`, each with an `id`, a `type` and `createdAt` in epoch seconds. One push is one raw event,
 and each entry becomes one record. Its `type` picks the kind, and `SURVEY` needed a new kind, `survey`."
 
-If they ask "how do you add Zendesk": "Five steps. One: a `SourceType` enum value and its `KIND_BY_SOURCE`
-entry. Two: a metadata model in the `SourceMetadata` union. Three: a connector file with its input model.
-Four: a registry entry, in the tuple inside `CONNECTORS`, and in `PULLERS` if it pulls. Five: fixtures,
-including `malformed.json`. The registry test and the metadata test fail until all of them exist. The
-pipeline, worker and API do not change. The custom connector was added exactly this way."
+If they ask "how do you add Zendesk": "Five steps: (1) a `SourceType` value and its `KIND_BY_SOURCE` entry in `domain/enums.py`; (2) a metadata model in the `SourceMetadata` union in `domain/metadata.py`; (3) a connector file with its input model in `connectors/`; (4) its entry in `CONNECTORS` (and `PULLERS` if it pulls) in `connectors/registry.py`; (5) fixtures under `tests/fixtures/<type>/`. The contract test fails until all five exist. The pipeline, worker and API do not change.
+The custom connector was added exactly this way."
 
 Then the table **`feedback_records`** [adapters/sqlalchemy/feedback_store.py]: common columns (`kind:
 review|conversation|post|survey`, `text, title, author, language, rating, source_created_at,
@@ -88,9 +88,10 @@ configured instance, so two Playstore apps are two rows with their own secrets a
 
 Draw `GET /health`, `GET /admin/raw-events?status=dead`, `POST /admin/raw-events/{id}/replay` and
 `POST /admin/raw-events/replay` [api/health.py, api/admin.py]. Say: "Health tells me three things. Are the
-worker and scheduler threads alive. How many pull sources failed their last scheduled sync: a count, no ids.
-And how deep the queue is. Only a dead or stuck thread makes health answer 503. A failing source shows in the
-count but does not change the status code, because restarting us would not fix someone else's API. Dead
+worker and scheduler threads alive. How many pull sources failed their last scheduled sync: a count in the
+body, no ids. And how deep the queue is. Health answers 503 when a thread is dead or unhealthy, or when
+storage is down, because it reads the queue counts. A failing source only shows in the count and does not
+change the status code, because restarting us would not fix someone else's API. Dead
 events are listed per tenant, newest first. I replay one by id, or many at once with the bulk replay, by
 status and optionally by source. Every worker log line carries the raw event id, so one id takes me from
 ingress to record. Pull log lines carry the source id instead, and startup lines show a dash."
@@ -110,8 +111,8 @@ Write them in a corner and point at the boxes:
 |---|---|---|
 | Two workers | Second worker box, same claim arrow | "Same single UPDATE. On Postgres I add SKIP LOCKED to that one query." |
 | 10k burst | Thick arrow into the table | "Inserts are cheap, the 202 stays fast, the backlog drains at the worker's pace. SQLite is one writer. Past that I move to Postgres: set FI_DATABASE_URL, add a driver, change three queries (claim, upsert, enqueue), add migrations." |
-| Edits out of order | Two arrows into one record, timestamps | "COALESCE(updated, created) must not be older. Equal is accepted, so replay works. Their engineering blog describes the same idea: version-based rejection of stale updates." |
-| Source deletes | Tombstone column | "deleted_at set, hidden by default, never undone by a later edit." |
+| Edits out of order | Two arrows into one record, timestamps | "COALESCE(updated, created) must not be older. Equal is accepted, so replay works. That is the COALESCE rule, applied in Python today inside BEGIN IMMEDIATE; the SQL ON CONFLICT … WHERE form is the Postgres upgrade (extensions recipe 2). Their engineering blog describes the same idea: version-based rejection of stale updates." |
+| Source deletes | Tombstone column | "Only Discourse push payloads carry a delete today and it becomes a tombstone; Twitter and Intercom deletes go dead on purpose; pull-side Discourse deletes are invisible (README § not built)." |
 | Transformer bug last week | Arrow from raw_events back into the pipeline | "Fix the connector, bump its version, replay. No re-fetch, nothing lost." |
 | Noisy tenant | Two tenants' arrows into one queue | "Today one queue, so one tenant's burst delays the others. That is a noisy neighbour. Their engineering blog says they partition events by tenant for this reason. My next step is the same idea: claim round-robin by tenant, then a partition per tenant or tier." |
 | Kafka | Box behind the queue port | "Swap the adapter, and change the retry model: visibility timeout instead of leases, no per-message delay." |

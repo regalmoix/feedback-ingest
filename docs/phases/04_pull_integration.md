@@ -1,5 +1,7 @@
 # Phase 4: Pull integration (Discourse)
 
+Status: historical design record.
+
 Status: implemented 2026-10-03 (commits 301a023 / a5f708f, merged), review fixes applied. Depends on Phases 2–3 and ADR-003.
 
 **Update after Fleet 2 (commit cbb788c).** The code wins over this LLD. What changed here:
@@ -107,7 +109,7 @@ tests/fixtures/discourse/{search_page1,search_page2,posts_topic_*.json}
   needs more than 10 search pages (Discourse rejects page 11) raises instead of stalling silently; the
   live window is bounded by `config["window_days"]`, not `config["until"]`; `/health` is degraded when an
   enabled scheduler thread is dead.
-- Phase 6 error handling: `sync` catches only `TransientError` and `TransformError` and puts `str(exc)` in
+- Phase 6 error handling: `sync` catches only `TransientError` and `PermanentError` and puts `str(exc)` in
   `PullResult.error`; any other exception propagates (503 from the endpoint, `scheduler tick failed` in the
   log). `POST /sync` answers 502 with the `PullResult` when `error` is set. The scheduler keeps the latest
   tick's errors per source. (Superseded by Fleet 2: `/health` shows `failing_sources` as a count and
@@ -116,8 +118,9 @@ tests/fixtures/discourse/{search_page1,search_page2,posts_topic_*.json}
   is gone; the loop calls `sync` per source.
 - Phase 6 closing: the one-call "sync every source" method is gone. The scheduler loop syncs each source in its own `try`; an
   unexpected exception is logged (`scheduled sync failed`, with `tenant_id` and `source_id`) and recorded as
-  `internal error (see logs)`, and the next source still runs. If listing sources fails, the tick records
-  `{"<tick>": "<ExceptionName>"}`. `last_errors` is replaced once per tick, so `/health` shows the latest tick.
+  counted as failing, and the next source still runs. Onboarding pass: the scheduler keeps `failing_sources`, an
+  int set once per tick (the `_sync_one` results summed); if listing sources fails, it is the number of pull
+  sources last listed (at least 1). `/health` shows the latest tick.
 
 ## How to explain this phase in the interview
 "Polling is just another producer. The connector returns pages; each page's payloads go through the exact same

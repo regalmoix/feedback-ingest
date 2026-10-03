@@ -1,10 +1,12 @@
 # Phase 3: Push API, pipeline, worker
 
+Status: historical design record.
+
 Status: implemented 2026-10-03 (commit e245efe, merged ee1ec69), review fixes applied. Depends on Phases 1–2, ADR-001 and ADR-003. First phase with a runnable server.
 
 **Update after Fleet 2 (commit cbb788c).** The code wins over this LLD. What changed here:
 - The webhook takes no API key (Phase 6) and only push sources accept webhooks (Fleet 2). Order: source by id (404), not a push source (409 "source does not accept webhooks"), bad or missing signature (401), disabled (409), body not a JSON object or nested too deep (400), then 202. Signature check, parse and insert run in the threadpool. Every route refuses bodies over 1 MiB with 413.
-- `enqueue` returns `Enqueued(id, status)`. A duplicate that hits a dead row logs a WARNING ("not requeued, replay it").
+- `enqueue` returns `Enqueued(id, status)`. A duplicate that hits a dead row logs a WARNING ("left dead, replay it").
 - Unexpected exceptions are stored in `raw_events.error` as `"<Type> (see logs)"`; the traceback goes only to the log. Every path to dead logs `dead: <error>` at WARNING. The pipeline stamps `ingested_at` with `model_validate(record.model_dump() | {"ingested_at": now})`.
 - `/health` returns 503 "degraded" only when an enabled worker or scheduler thread is unhealthy. Its body also has `worker_enabled`, `scheduler_enabled`, `scheduler_alive` and `failing_sources` (a count).
 - Bulk replay: `POST /admin/raw-events/replay?source_id=&status=&limit=`.
@@ -59,7 +61,7 @@ so `FI_LEASE_SECONDS=0` fails at startup instead of at the first claim.
   2. `records = CONNECTORS[source.type].transform(source, dict(event.payload))`.
   3. For each record: `record.model_copy(update={"ingested_at": now})` then `feedback.upsert(record)`.
   4. `mark_processed(event)` (fenced on the claimed event's `attempts` and `lease_until`; a False return means a newer claim owns the row, which is logged and ignored).
-  - `except (ValidationError, TransformError)` → `mark_dead(event, str(exc)[:500])`.
+  - `except (ValidationError, PermanentError)` → `mark_dead(event, str(exc)[:500])`.
   - `except Exception` (TransientError, OperationalError, anything unexpected) → if `event.attempts >= max_attempts`
     → dead, else `mark_failed(event, error, next_attempt_at = now + min(2**attempts, cap))`.
     Unexpected exceptions are logged at ERROR with the traceback; known transient ones at WARNING.
@@ -105,7 +107,7 @@ so `FI_LEASE_SECONDS=0` fails at startup instead of at the first claim.
 `admin.py` (tenant-scoped by API key; "admin" means operator endpoints, not a separate auth tier)
 - `GET /admin/raw-events?status=dead&limit=50` → list of `RawEventView(id, source_id, status, attempts, error, received_at, next_attempt_at)`.
 - `GET /admin/raw-events/{id}` → the full raw event including payload (tenant-checked).
-- `POST /admin/raw-events/{id}/replay` → `requeue(id, now)`; 404 if not this tenant's or unknown; 409 if currently processing; `200 {"status": "pending"}`.
+- `POST /admin/raw-events/{id}/replay` → `replay(id, now)`; 404 if not this tenant's or unknown; 409 if currently processing; `200 {"status": "pending"}`.
 - `GET /admin/queue` → `counts(tenant_id=tenant.id)` per status.
 
 `health.py`: `GET /health` (no auth) → `{"status": "ok", "worker_alive": bool, "queue": counts(tenant_id=None)}`;

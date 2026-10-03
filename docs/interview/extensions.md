@@ -26,13 +26,15 @@ Paths are from the repo root. Terms are in [glossary.md](glossary.md). "Why not 
 
 ## 1. Add a source (Zendesk), in 5 steps
 
+The recipe: (1) a `SourceType` value and its `KIND_BY_SOURCE` entry in `domain/enums.py`; (2) a metadata model in the `SourceMetadata` union in `domain/metadata.py`; (3) a connector file with its input model in `connectors/`; (4) its entry in `CONNECTORS` (and `PULLERS` if it pulls) in `connectors/registry.py`; (5) fixtures under `tests/fixtures/<type>/`. The contract test fails until all five exist.
+
 The tests fail until all five steps are done. `tests/unit/connectors/test_registry.py` and
 `tests/unit/test_models.py::test_every_source_type_has_a_metadata_model` check that every type has a connector,
 a kind, a metadata model and a `malformed` fixture. The contract tests in `tests/unit/connectors/test_contract.py`
 then run every fixture. That is the point: you cannot half-add a source.
 
-1. **Name it.** In `feedback_ingest/domain/enums.py` add `ZENDESK = "zendesk"` to `SourceType`. In
-   `feedback_ingest/domain/models.py` add it to `KIND_BY_SOURCE`, reusing a kind (a ticket is a `conversation`).
+1. **Name it.** In `feedback_ingest/domain/enums.py` add `ZENDESK = "zendesk"` to `SourceType`. In the
+   same file add it to `KIND_BY_SOURCE`, reusing a kind (a ticket is a `conversation`).
    Now `tests/unit/connectors/test_registry.py` fails, because the registry has no connector for the new type.
 2. **Metadata model.** In `feedback_ingest/domain/metadata.py` add `ZendeskMetadata` with
    `source_type: Literal[SourceType.ZENDESK] = SourceType.ZENDESK` and only the fields that are not already
@@ -67,15 +69,15 @@ This is exactly the five-step recipe, done against Enterpret's public webhook sh
 (`{"records": [{id, type, createdAt, text, title?, metadata}]}`, see `docs/research/01_product_and_integrations.md`):
 
 1. `SourceType.CUSTOM` in `domain/enums.py`, plus one new kind, `FeedbackKind.SURVEY`. The one twist: a custom
-   source carries several kinds, so instead of a `KIND_BY_SOURCE` entry, `domain/models.py` has
+   source carries several kinds, so instead of a `KIND_BY_SOURCE` entry, `domain/enums.py` has
    `KIND_BY_RECORD_TYPE` (`REVIEW`→review, `CONVERSATION`→conversation, `FORUM_CONVERSATION_THREAD`→post,
-   `SURVEY`→survey) and `FeedbackRecord.kind` reads the record's `type` from its metadata. That is the only
-   place the rule lives.
+   `SURVEY`→survey), and the custom connector passes `kind=KIND_BY_RECORD_TYPE[record.type]` to `new_record`.
+   That is the only place the rule lives.
 2. `CustomMetadata(record_type, score, fields)` in `domain/metadata.py`, in the union; `fields` is flat
    string/number/bool metadata, `score` is lifted out of `metadata["score"]`.
 3. `connectors/custom.py`: input models `CustomBatchIn` / `CustomRecordIn` (epoch seconds or milliseconds),
    one record per entry, `external_event_id` = hash of the whole batch (one delivery), default HMAC, no config.
-   Any other `type` is a `TransformError`, so the batch goes dead with "unsupported record type".
+   Any other `type` is a `PermanentError`, so the batch goes dead with "unsupported record type".
 4. `CustomConnector()` in the `CONNECTORS` tuple; no puller.
 5. `tests/fixtures/custom/` (`batch`, `batch_edited`, `malformed`, `unsupported_type`), golden tests in
    `tests/unit/connectors/test_custom.py`, and `tests/api/test_custom_webhook.py` (one push, three records of three
@@ -139,7 +141,7 @@ How each port method maps:
 | `mark_processed` | status `processed` | delete the message | commit the offset |
 | `mark_failed` (delay) | `next_attempt_at = now + 2^attempts` | change the message's visibility to the delay | no per-message delay: publish to a retry topic, commit |
 | `mark_dead` | status `dead` | a dead-letter queue after N receives | publish to a dead topic |
-| `requeue` (replay) | `UPDATE` to pending | move back from the dead-letter queue | republish |
+| `replay` | `UPDATE` to pending | move back from the dead-letter queue | republish |
 | fence | `attempts` plus `lease_until` must match | the receipt handle is the closest thing; weaker | none; rely on the idempotent upsert |
 | `get`, `list_by_status`, `counts` | plain SQL | not available | not available |
 
@@ -318,7 +320,7 @@ behind the same Protocol, not a new core.
      `author_path`, `title_path`;
    - a tiny dotted-path reader (`"ticket.requester.name"`, numbers for list indexes); no JSONPath library;
    - `transform` reads paths from `source.config`, validates the result through `FeedbackRecord` as usual, and
-     raises `TransformError` when a required path is missing.
+     raises `PermanentError` when a required path is missing.
 4. Catch: `external_event_id(payload)` gets no `source`, so it cannot read the configured paths. It falls back to
    `payload_hash`. That still works: an identical resend is a duplicate, and an edit changes the hash, so it is
    a new event.
@@ -340,7 +342,7 @@ What is true today:
 
 Recipe:
 
-1. **Counters.** In `feedback_ingest/services/pipeline.py`, count each final status by `source_type` in `_finish`.
+1. **Counters.** In `feedback_ingest/services/pipeline.py`, count each final status by `source_type` in `_mark_outcome`.
    Start as plain integers behind a lock on `/health`; move to a Prometheus client with a `/metrics` route once
    something scrapes it.
 2. **Queue age.** Add `oldest_pending_at` to the queue port and both adapters (`MIN(received_at)` for pending).

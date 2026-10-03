@@ -1,5 +1,7 @@
 # Phase 5: Tenancy, sources and records API, seed, demo
 
+Status: historical design record.
+
 Status: implemented 2026-10-03 (commits 301a023 / a5f708f, merged), review fixes applied. Depends on Phases 3–4.
 
 **Update after Fleet 2 (commit cbb788c) and the tailoring pass (b8f6e2b).** The code wins over this LLD. What changed here:

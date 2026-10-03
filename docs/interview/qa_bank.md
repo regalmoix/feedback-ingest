@@ -46,8 +46,9 @@ and it is a second system to run.
 
 **Go deeper:** A worker takes work with one SQL statement that sets `status='processing'` and a lease time and
 returns the rows. Retries are just a `next_attempt_at` column. Dead letters are just `status='dead'`. Replay is
-an `UPDATE` back to pending. Push and pull both write here, so there is one pipeline. Call it an inbox or a
-durable log, never an outbox: an outbox holds messages we will send out.
+an `UPDATE` back to pending. Push and pull both write here, so there is one pipeline. The table is the durable
+log; the port (`RawEventQueue`) is its queue view; we never call it an outbox, because an outbox holds messages
+we will send out.
 
 **Point at:** `feedback_ingest/adapters/sqlalchemy/raw_event_queue.py`, `feedback_ingest/adapters/sqlalchemy/tables.py`
 (`RawEventRow`), `feedback_ingest/ports/queue.py`.
@@ -135,7 +136,10 @@ threads.
 **Go deeper:** The one async endpoint is the webhook, because it reads the raw body for the signature; it then
 hands the insert to the threadpool so the event loop never waits on the database (a test checks this).
 `aiosqlite` would still run SQLite on a thread underneath. Our transforms are light, so the GIL is not the
-limit. If transforms got heavy, the answer is a separate worker process, not asyncio.
+limit. If transforms got heavy, the answer is a separate worker process, not asyncio. The real limit to admit:
+Starlette's threadpool is 40 threads, and `POST /sync` runs a whole sync inline (up to the 60 s deadline), so 40
+concurrent syncs would stall every sync route behind them. The `ponytail:` note on `api/sync.py` says to enqueue
+a sync job once backfills take minutes.
 
 **Point at:** `feedback_ingest/api/ingest.py` (`run_in_threadpool`), `feedback_ingest/services/worker.py`,
 `feedback_ingest/services/scheduler.py`, `tests/api/test_push_api.py` (`test_accept_runs_off_the_event_loop`).
@@ -195,7 +199,10 @@ picks it up again, and the upsert makes the second run the same as the first.
 
 **Go deeper:** Each claim adds one to `attempts`. If the event itself is what crashes the process, it would
 crash again on every claim; so the pipeline checks first, and once `attempts` passes `max_attempts` (5) it marks
-the event dead without running the transform. A slow worker that comes back after its lease ran out is
+the event dead without running the transform. Why `>` in that pre-check but `>=` in the retry path:
+the claim already counted the attempt about to start, so attempt 5 still runs (`5 > 5` is false); after a
+transient failure, `attempts >= max_attempts` means that was the last allowed try, so the event goes dead
+instead of scheduling a sixth. A slow worker that comes back after its lease ran out is
 stopped by the fence: its finish call only applies if the row still has the same `attempts` and
 `lease_until`, so it logs `lease lost` and changes nothing.
 
@@ -211,12 +218,13 @@ stopped by the fence: its finish call only applies if the row still has the same
 **Go deeper:** The event id is the item id plus its last-changed time, like `reviewId:lastModified`, or a hash
 of the payload when it has no usable id. Including the time matters: a real edit has a new time, so it is a new
 event and is not dropped. Demo step 3 shows this live. One case warns: if the stored copy is already dead, the
-duplicate does not requeue it. We log a WARNING, `duplicate of a dead raw event; not requeued, replay it`, and
-the operator replays it.
+duplicate leaves it dead. We log a WARNING, `duplicate of a dead raw event; left dead, replay it`, and
+the operator replays it. Re-running it automatically would be pointless: a byte-identical duplicate cannot carry
+a fix; only a connector change can, so replay after a version bump.
 
 **Point at:** `feedback_ingest/services/ingestion.py`, `feedback_ingest/connectors/playstore.py`
 (`external_event_id`), `tests/e2e/test_push_to_query.py`, `tests/unit/services/test_ingestion.py`
-(`test_a_duplicate_of_a_dead_event_is_not_requeued_but_warns`).
+(`test_a_duplicate_of_a_dead_event_is_not_replayed_but_warns`).
 
 ### Q14. What if an older edit arrives after a newer one?
 
@@ -224,16 +232,16 @@ the operator replays it.
 late, stale copy is stored in `raw_events` and marked processed, but it does not overwrite the record.
 
 **Go deeper:** "Last changed" is `source_updated_at`, or `source_created_at` when a source sends no update
-time. Equal or newer wins, so a re-run of the same version, like a replay, still writes. The store returns
+time. Say this one: Play payloads carry no creation time, so a review's `source_created_at` is the first-seen
+`lastModified`. Equal or newer wins, so a re-run of the same version, like a replay, still writes. The store returns
 `skipped_older` for the loser. A delete is the exception: it always applies, even if it is older. A contract
 test feeds every connector's edit fixtures in both orders and checks the newer text wins.
 
-**Point at:** `feedback_ingest/adapters/sqlalchemy/feedback_store.py` (`upsert`), `feedback_ingest/domain/models.py`
-(`version_at`), `tests/unit/connectors/test_contract.py` (`test_an_edit_is_a_new_raw_event_and_the_newer_text_wins`).
+**Point at:** `feedback_ingest/domain/models.py` (`merge`, `version_at`), both feedback stores (`upsert` calls `merge`), `tests/unit/connectors/test_contract.py` (`test_an_edit_is_a_new_raw_event_and_the_newer_text_wins`).
 
 ### Q15. What about a poison payload?
 
-**Say:** A payload that fails its Pydantic input model, or raises `TransformError`, goes to `dead` on the first
+**Say:** A payload that fails its Pydantic input model, or raises `PermanentError`, goes to `dead` on the first
 attempt with a short reason. It is never retried and never thrown away, so after a fix we replay it.
 
 **Go deeper:** The error is written as `field: message` pairs without the input values, capped at 500
@@ -265,7 +273,10 @@ per-tenant limit today, so one tenant's burst delays everyone; admit that and po
 check, so only one worker can flip a row to `processing`. A test runs four threads, each with its own engine,
 on 40 events, and every event is claimed exactly once.
 
-**Go deeper:** This happens by accident with `uvicorn --workers N`, which starts N copies of the in-process
+**Go deeper:** Be precise about what that test proves. SQLite serialises writers, so it shows the statement
+never double-claims with real threads and engines; it does not exercise Postgres. What keeps claims safe on
+Postgres READ COMMITTED is the repeated predicate: an `UPDATE` that waited on a row lock re-checks its `WHERE`
+against the new row version, sees `processing`, and skips the row. This happens by accident with `uvicorn --workers N`, which starts N copies of the in-process
 worker. The fence stops a late finish from overwriting a newer one. N copies also start N schedulers, which
 fetch the same pages; that wastes calls but the unique key drops the repeats. Inside one process, a source
 syncs once at a time: a second manual sync of it gets 409, and the scheduler skips it while a manual sync runs.
@@ -306,6 +317,8 @@ Ten pages is about 500 posts, so about 500 posts per day is the hard limit of Di
 smaller `window_days` (1 to 31): `PATCH /v1/sources/{id}` with `{"config": {"window_days": "1"}}`. The PATCH
 merges that key into the stored config and checks the result, so a bad value is 422. A dead scheduler shows
 `scheduler_alive: false` and health 503.
+The PDF sample search response omits `grouped_search_result`; the live API always sends it and we require it so
+a missing one is never read as the last page; a mock built from the PDF sample fails loudly, not silently.
 Moving the cursor back by hand is always safe because repeats are dropped; moving it forward skips posts. The
 step-by-step is Runbook 2 in [firefight_runbook.md](firefight_runbook.md).
 
@@ -339,7 +352,9 @@ claim subquery gets `.with_for_update(skip_locked=True)`, the upsert and enqueue
 transaction has locked", so workers do not wait on each other. The upsert and enqueue are "read, then write",
 which is atomic on SQLite only because of `BEGIN IMMEDIATE`; on Postgres two inserts of the same key can race,
 and the loser gets an `IntegrityError`. That is safe (the event retries, or the sender retries), but noisy, so
-`ON CONFLICT` is the fix. Schema changes need Alembic, because `create_all` never alters a table.
+`ON CONFLICT` is the fix. Schema changes need Alembic, because `create_all` never alters a table. What else is SQLite-specific: only the
+two `event.listens_for` hooks in `db.py` (pragmas and `BEGIN IMMEDIATE`), already behind a dialect check;
+`RETURNING`, the JSON column and the schema inspector all work on Postgres.
 
 **Point at:** `feedback_ingest/adapters/sqlalchemy/raw_event_queue.py` (`claim`),
 `feedback_ingest/adapters/sqlalchemy/feedback_store.py` (`upsert` `ponytail:` note),
@@ -480,7 +495,7 @@ sorted by time and joined with blank lines; `part_count`, `tags` and `state` go 
 kind comes from its own `type` (`KIND_BY_RECORD_TYPE`), because one custom source can send all four kinds. The
 record id is a `uuid5` of source and external id, so it never changes.
 
-**Point at:** `feedback_ingest/domain/models.py` (`KIND_BY_SOURCE`, `KIND_BY_RECORD_TYPE`), `feedback_ingest/connectors/twitter.py`,
+**Point at:** `feedback_ingest/domain/enums.py` (`KIND_BY_SOURCE`, `KIND_BY_RECORD_TYPE`), `feedback_ingest/connectors/twitter.py`,
 `feedback_ingest/connectors/intercom.py`, ADR-002 "What one record is".
 
 ### Q31. How do edits work?
@@ -489,11 +504,12 @@ record id is a `uuid5` of source and external id, so it never changes.
 and overwrites the row. An unchanged copy has the same event id and is dropped at the door.
 
 **Go deeper:** An update keeps the stored `id`, `source_created_at` and `ingested_at`, and stores the new
-version time in `source_updated_at`. Every write must be a full snapshot of the item, never a partial change,
+version time in `source_updated_at`. For Play Store that means `source_created_at` is the first-seen
+`lastModified`, because Play payloads carry no creation time; say so if asked. Every write must be a full snapshot of the item, never a partial change,
 because the upsert replaces fields (the full-snapshot rule). Discourse pull searches by creation date, so an
 edit to an old post is only seen if that window is read again.
 
-**Point at:** `feedback_ingest/adapters/sqlalchemy/feedback_store.py` (`upsert`), ADR-002 "Update rule".
+**Point at:** `feedback_ingest/domain/models.py` (`merge`), `feedback_ingest/connectors/playstore.py`, ADR-002 "Update rule".
 
 ### Q32. How do deletes work?
 
@@ -567,14 +583,16 @@ The stronger form is a shadow run of the new version over stored raw events, wit
 worker, service or table changes, and the tests fail until every piece exists. The `custom` connector was added
 exactly this way, so it is the worked example.
 
-**Go deeper:** The steps are: (1) add `SourceType.ZENDESK` in `domain/enums.py` and its kind in `KIND_BY_SOURCE`
-in `domain/models.py`, reusing an existing kind; (2) add `ZendeskMetadata` to the `SourceMetadata` union in
+**Go deeper:** The steps are: (1) add `SourceType.ZENDESK` and its kind in `KIND_BY_SOURCE`, both in `domain/enums.py`,
+reusing an existing kind; (2) add `ZendeskMetadata` to the `SourceMetadata` union in
 `domain/metadata.py`; (3) write `connectors/zendesk.py` with its input model, `source_type`, `version`,
 `required_config`, `external_event_id`, `transform` (built with `new_record`) and `verify_signature`; (4) add it
 to the tuple inside `CONNECTORS` in `connectors/registry.py` (and to `PULLERS` if it pulls); (5) add fixtures
 under `tests/fixtures/zendesk/`, at least `malformed.json`. `test_registry.py` and
 `test_every_source_type_has_a_metadata_model` fail until all of it exists; then the contract tests run every
-fixture. Exact file names are recipe 1 in [extensions.md](extensions.md). Whiteboard line for "isn't the
+fixture. Exact file names are recipe 1 in [extensions.md](extensions.md). Where it strains is `kind`: it is the one cross-cutting field. Since
+`kind` became a plain field that `new_record` fills from `KIND_BY_SOURCE`, a new source touches only its own
+files plus the enum and the metadata union. Whiteboard line for "isn't the
 registry just an if/else": "Yes, a dict is a dispatch table, but it lives in one file, its keys are
 type-checked, and a test fails if a type is missing."
 
@@ -589,12 +607,11 @@ the score in metadata, and because `kind` is stored as text it needed no migrati
 the score, it becomes a common column, which is a migration plus a replay.
 
 **Go deeper:** That is where the design strains: the record is the costly extension point, the connector is the
-cheap one. `kind` is computed from the source type through `KIND_BY_SOURCE`; only `custom` records take it from
-their own `type` through `KIND_BY_RECORD_TYPE`, where `SURVEY` maps to `survey`. The score lives in
+cheap one. `kind` is a plain field that `new_record` fills from the source type through `KIND_BY_SOURCE`; only `custom`
+records pass their own, from their `type` through `KIND_BY_RECORD_TYPE`, where `SURVEY` maps to `survey`. The score lives in
 `CustomMetadata.score`, because the `rating` column is 1 to 5 only, so an NPS 0 to 10 score cannot reuse it.
 
-**Point at:** `feedback_ingest/domain/enums.py` (`FeedbackKind`), `feedback_ingest/domain/models.py`
-(`KIND_BY_RECORD_TYPE`), `feedback_ingest/domain/metadata.py` (`CustomMetadata`), ADR-003 ruling 9.
+**Point at:** `feedback_ingest/domain/enums.py` (`FeedbackKind`), `KIND_BY_RECORD_TYPE` in the same file, `feedback_ingest/domain/metadata.py` (`CustomMetadata`), ADR-003 ruling 9.
 
 ### Q39. What if a source needs both push and pull?
 
@@ -618,7 +635,8 @@ post arriving both ways becomes two records; that is the cost of keeping one mod
 HMAC-SHA256 check. A source that signs differently overrides that one method; the algorithm belongs to the
 source type, the secret belongs to the tenant's source row.
 
-**Go deeper:** Intercom would compute HMAC-SHA1 and read `X-Hub-Signature`, stripping `sha1=`. Discourse webhooks
+**Go deeper:** Intercom's public docs describe HMAC-SHA1 in `X-Hub-Signature` (prefixed `sha1=`), so its
+override would compute that. Discourse webhooks
 would strip `sha256=` from `X-Discourse-Event-Signature`. None of our five changes the scheme: each one calls
 the default, because our sign script (`scripts/sign.py`, secret from `FI_SIGN_SECRET`) signs fixtures with it. One honest catch: the signature contract test signs with the default header, so
 an overriding connector needs that test taught its scheme.
@@ -664,12 +682,11 @@ scheduler; (3) a `since` filter on bulk replay (bulk replay by `source_id` and `
 fair scheduling, retention and erasure, migrations, metrics, a UI and a Docker image. Each one is a known next
 step with a written plan, and none of them changes the core shape.
 
-**Go deeper:** Say the Playstore one before they do: Google Play has no review webhook; reviews are polled from
-its API, so our fixtures stand in for that poller, and the transform is the same either way. Twitter webhooks
-need a CRC handshake we did not build. Also not built from the Phase 6 plan: process counters on `/health`,
-source and time filters on the dead list, and a Dockerfile.
+**Go deeper:** Say the Playstore one before they do: Google Play has no review webhook, so our fixtures stand in
+for that poller. The full list, with the reason for each and the items kept on purpose, is one list:
+[README § What is deliberately not built](../../README.md#what-is-deliberately-not-built).
 
-**Point at:** `docs/PLAN.md` ("Out of scope"), `docs/phases/06_hardening_interview_pack.md`, ADR-003 context table.
+**Point at:** that README section, [debt_ledger.md](debt_ledger.md) for the `ponytail:` shortcuts.
 
 ---
 
@@ -830,8 +847,8 @@ AUDIO_RECORDING. We map the first four to kinds (`review`, `conversation`, `post
 because no existing kind fit.
 
 **Go deeper:** AUDIO_RECORDING is not text: it needs an audio download and a transcript, which is enrichment, not
-ingestion. Today it is a `TransformError`, and since one push is one raw event, the whole batch goes dead and can
+ingestion. Today it is a `PermanentError`, and since one push is one raw event, the whole batch goes dead and can
 be replayed after a fix.
 
-**Point at:** `feedback_ingest/domain/models.py` (`KIND_BY_RECORD_TYPE`), `tests/unit/connectors/test_custom.py`
+**Point at:** `feedback_ingest/domain/enums.py` (`KIND_BY_RECORD_TYPE`), `tests/unit/connectors/test_custom.py`
 (`test_an_unsupported_type_or_an_empty_batch_goes_dead`), `tests/fixtures/custom/unsupported_type.json`.

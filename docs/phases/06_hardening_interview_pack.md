@@ -1,5 +1,7 @@
 # Phase 6: Hardening and interview pack
 
+Status: historical design record.
+
 Status: designed 2026-10-03. Depends on Phases 3–5 being committed.
 
 **Update after Fleet 2 (commit cbb788c).** This is the design as written; the code wins. Built differently:

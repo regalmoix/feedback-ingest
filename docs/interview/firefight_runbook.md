@@ -138,7 +138,7 @@ Every dead event for this source, in one call:
 curl -s -X POST "http://127.0.0.1:8000/admin/raw-events/replay?source_id=$SOURCE_ID&status=dead&limit=500" -H "X-API-Key: $API_KEY"
 ```
 
-Good: `{"requeued": n}`, where `n` matches the dead count from step 3. It only touches this tenant's rows. It takes the newest 500 at most, so if `n` is 500, run it again: the rows already replayed are `pending` now, so the next call picks the next 500.
+Good: `{"replayed": n}`, where `n` matches the dead count from step 3. It only touches this tenant's rows. It takes the newest 500 at most, so if `n` is 500, run it again: the rows already replayed are `pending` now, so the next call picks the next 500.
 
 Replay is safe to repeat, because the upsert is keyed on `(source_id, external_id)` and goes through the same version check. If a bug made **wrong** records, not dead ones, replay the `processed` events too, with `status=processed`. Run that one only once per fix: replayed rows become `processed` again, so a second call would pick the same newest rows.
 

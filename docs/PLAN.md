@@ -1,5 +1,7 @@
 # Plan: Feedback Ingestion Service (take-home round 3)
 
+Status: historical design record.
+
 > Progress: Complete 2026-10-03: Phases 0–6 committed; `docs/00_architecture.md` is the current reference; this plan is kept as the original design record and some names below predate review changes (dedupe_key, puller.py, asyncio worker, FeedbackKind.tweet).
 >
 > Update after Fleet 2 (commit cbb788c) and the tailoring pass (b8f6e2b). Where this plan disagrees with the code, the code wins. The changes that touch names in this plan:
@@ -158,7 +160,7 @@ Each phase = (a) Fable writes a 1-page LLD in `docs/phases/NN_*.md` in plain lan
 
 ### Phase 1: Domain, ports, adapters
 - Enums, Pydantic models, per-source metadata models, `domain/errors.py`.
-- `ports/`: `TenantStore.by_api_key`, `SourceStore.get/list_pull/create/update_cursor` (built names: see the Fleet 2 note at the top), `FeedbackStore.upsert/list`, `RawEventQueue.enqueue/claim(lease)/mark_processed(event)/mark_failed(event, error, next_attempt_at)/mark_dead(event, error)/requeue/list_by_status`, `HttpClient.get_json`, `Clock.now`.
+- `ports/`: `TenantStore.by_api_key`, `SourceStore.get/list_pull/create/update_cursor` (built names: see the Fleet 2 note at the top), `FeedbackStore.upsert/list`, `RawEventQueue.enqueue/claim(lease)/mark_processed(event)/mark_failed(event, error, next_attempt_at)/mark_dead(event, error)/replay/list_by_status`, `HttpClient.get_json`, `Clock.now`.
 - `adapters/sqlalchemy/`: tables (UNIQUE `dedupe_key`, index `(tenant_id, source_id, status, next_attempt_at)` on raw_events), engine from `FI_DATABASE_URL`, one class per port. `adapters/memory/`: dict-backed fakes with identical behaviour.
 - `utils/hashing.dedupe_key`, `utils/time` (`SystemClock`), `utils/signing` (HMAC).
 - Tests: a shared contract test module runs the same cases against both the SQLite and memory adapters (upsert twice → one row; older `source_updated_at` doesn't overwrite; claim leases and skips leased; lease expiry re-claims; tenant A cannot read B).
@@ -167,7 +169,7 @@ Each phase = (a) Fable writes a 1-page LLD in `docs/phases/NN_*.md` in plain lan
 ### Phase 2: Connectors + transform
 - `base.py` protocol + registry; four connectors; `tests/fixtures/{discourse_post,playstore_review,twitter_tweet,intercom_conversation}.json` (synthetic, no real user data).
 - 🏛️ Council #3: connector abstraction shape (protocol+registry vs class hierarchy vs config-driven mapping) → `ADR-003`.
-- Tests: each fixture → expected `FeedbackRecord` (kind, text, external_id, metadata validated by its model); malformed payload raises `TransformError`; `CONNECTORS` covers every `SourceType`.
+- Tests: each fixture → expected `FeedbackRecord` (kind, text, external_id, metadata validated by its model); malformed payload raises `PermanentError`; `CONNECTORS` covers every `SourceType`.
 
 ### Phase 3: Push API + worker pipeline
 - `POST /v1/sources/{source_id}/events` (superseded in Phase 6 and Fleet 2: no API key, push sources only; see ADR-003 ruling 8): `X-API-Key` → tenant; source must belong to tenant; HMAC-SHA256 `X-Signature` check with source secret (stdlib `hmac`); insert raw → `202 {raw_event_id}`. Returns `503` if DB write fails (never ack what isn't durable).
