@@ -10,7 +10,7 @@ dead list that can be replayed.
 
 ## Read in this order
 
-1. [Walkthrough](docs/WALKTHROUGH.md): start here: the system layer by layer with code and examples
+1. [Walkthrough](docs/WALKTHROUGH.md): start here: the code tour, data flow and the interview questions it answers
 2. [Architecture](docs/00_architecture.md): diagrams, module map, requirements map
 3. [Whiteboard script](docs/interview/whiteboard.md)
 4. [Demo script](docs/interview/demo_script.md) (what to say at each step of `scripts/demo.sh`)
