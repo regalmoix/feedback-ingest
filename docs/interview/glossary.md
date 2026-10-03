@@ -6,7 +6,7 @@ Plain words for every term you may need at the whiteboard. Each term has three l
 - **Where:** where it lives in this repo.
 - **Why:** why it matters here.
 
-Everything below is built and merged to `main`: Phases 1 to 5, the Fleet 2 hardening (including bulk replay; Fleet 2 is defined in section 6), and the custom connector. Anything not built says so. Paths are under `feedback_ingest/` unless they start with `tests/` or `docs/`.
+Everything below is built and on `main`; anything not built says so. Paths are under `feedback_ingest/` unless they start with `tests/` or `docs/`.
 
 The terms are in teaching order, so each one only uses words defined above it.
 
@@ -35,7 +35,7 @@ The terms are in teaching order, so each one only uses words defined above it.
 ### Connector
 - **What:** The code for one source type: it checks a payload, works out its ids, turns it into feedback records, and for Discourse also fetches pages.
 - **Where:** One file per source in `connectors/` (`discourse.py`, `playstore.py`, `twitter.py`, `intercom.py`, `custom.py`, plus `discourse_pull.py` for paging), all listed in `connectors/registry.py`: `CONNECTORS` is built from a tuple of connectors and maps every type to its connector, and `PULLERS` holds the ones that can pull.
-- **Why:** It is the extensibility story. Adding Zendesk takes five steps: (1) a `SourceType` value and its `KIND_BY_SOURCE` entry in `domain/enums.py`; (2) a metadata model in the `SourceMetadata` union in `domain/metadata.py`; (3) a connector file with its input model in `connectors/`; (4) its entry in `CONNECTORS` (and `PULLERS` if it pulls) in `connectors/registry.py`; (5) fixtures under `tests/fixtures/<type>/`. The contract test fails until all five exist. No route, worker or table changes. The `custom` connector, which takes Enterpret's public webhook shape, was added exactly this way.
+- **Why:** It is the extensibility story. Adding Zendesk takes five steps, listed once in [ADR-003 "How to add a new source"](../decisions/ADR-003-connector-abstraction.md#how-to-add-a-new-source); no route, worker or table changes. The `custom` connector, which takes Enterpret's public webhook shape, was added exactly this way.
 
 ### Connector version
 - **What:** A whole number on each connector, bumped whenever its transform output changes, and stamped on every record it builds.
@@ -45,7 +45,7 @@ The terms are in teaching order, so each one only uses words defined above it.
 ### Port
 - **What:** A small interface that lists the methods the core code may call on the outside world, with no logic inside.
 - **Where:** `ports/`: `TenantStore`, `SourceStore`, `FeedbackStore` in `stores.py`, `RawEventQueue` in `queue.py`, `HttpClient` in `http.py`, `Clock` in `clock.py`.
-- **Why:** The services in `services/` import ports, never adapters, so a Postgres swap stays in the adapters: set `FI_DATABASE_URL`, add a driver, change three queries (claim, upsert, enqueue), add migrations. `wiring.py` builds the adapters; the `main.py` lifespan builds the services.
+- **Why:** The services in `services/` import ports, never adapters, so a Postgres swap stays in the adapters ([extensions.md](extensions.md) recipe 2). `wiring.py` builds the adapters; the `main.py` lifespan builds the services.
 
 ### Adapter
 - **What:** A class that does the real work behind a port, against a real thing or a fake one.
@@ -65,7 +65,7 @@ The terms are in teaching order, so each one only uses words defined above it.
 ## 2. Getting data in
 
 ### Raw event
-- **What:** One incoming payload stored exactly as the source sent it, plus bookkeeping like status, attempts and lease time.
+- **What:** One incoming payload, saved as parsed JSON before we answer, plus bookkeeping like status, attempts and lease time. It is not the raw bytes, so the signature cannot be re-checked from storage; a pulled Discourse post also carries the topic title we add.
 - **Where:** The `RawEvent` model in `domain/models.py` and the `raw_events` table, unique on `(source_id, external_event_id)`.
 - **Why:** It is both the audit log and the work queue, so nothing is lost and anything can be run again.
 
@@ -185,7 +185,7 @@ The terms are in teaching order, so each one only uses words defined above it.
 
 ### Naive UTC
 - **What:** A date and time in UTC with no timezone attached.
-- **Where:** `to_naive_utc` in `utils/time.py`, used by the `NaiveUtc` type in `domain/models.py` to convert every incoming datetime.
+- **Where:** `to_naive_utc` and the `NaiveUtc` type, both defined in `utils/time.py`; the models in `domain/models.py` use `NaiveUtc` to convert every incoming datetime.
 - **Why:** SQLite stores datetimes as text and drops timezones, so if every value is naive UTC, text order matches time order; mixing the two kinds is a silent bug.
 
 ### Composite foreign key
@@ -212,17 +212,4 @@ The terms are in teaching order, so each one only uses words defined above it.
 
 ## 6. How it was built
 
-### Council
-- **What:** A five-advisor pressure test of one decision with real stakes: five agents argue it independently, and the verdict becomes an ADR.
-- **Where:** `docs/decisions/` (ADRs plus the full council transcripts); the method is [AGENT_WORKFLOW.md](../../AGENT_WORKFLOW.md) § 5.
-- **Why:** Storage, the record model and the connector contract each went through one, so every big choice has its alternatives and dissent written down.
-
-### Fleet 2
-- **What:** The second whole-repo review round, commit `cbb788c`.
-- **Where:** The commit itself, and the "Fleet 2" notes at the top of the phase docs and in the ADRs.
-- **Why:** Many docs say "changed in Fleet 2": that is where the security hardening, type tightening and bulk replay landed.
-
-### `# ponytail:` marker
-- **What:** A comment naming a deliberate shortcut, its ceiling (when it stops working) and its upgrade.
-- **Where:** In the code (`grep -rn "ponytail:" feedback_ingest`), harvested into [debt_ledger.md](debt_ledger.md).
-- **Why:** It turns "what would you do next?" into a list you can point at, one row per shortcut.
+The decision reviews, review rounds and `# ponytail:` markers (shortcuts with their ceiling and upgrade, listed in [debt_ledger.md](debt_ledger.md)) are described in [AGENT_WORKFLOW.md](../../AGENT_WORKFLOW.md).

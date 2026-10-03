@@ -4,7 +4,7 @@ Use this when an interviewer says "why not X?". Every row comes from ADR-001, AD
 
 ## Read this first
 
-- **Built** means it is in the code today. Phases 1 to 5, the Fleet 2 hardening (including bulk replay) and the custom connector are all merged to `main`, so every chosen option is built unless its row says "not built".
+- **Built** means it is in the code today. Everything is on `main`, so every chosen option is built unless its row says "not built".
 - **Not built** means we chose not to build it, or named it as a later step. Each such row says so.
 - A **source instance** is one tenant's configured connection (a row in `sources`). A **source type** is the kind of service, like Playstore.
 - `raw_events` is the table where every incoming payload is saved before we reply. It is also the work queue.
@@ -15,16 +15,16 @@ Use this when an interviewer says "why not X?". Every row comes from ADR-001, AD
 
 | Decision | What we chose | Alternative | Why not now | When it becomes the right call |
 |---|---|---|---|---|
-| Database | SQLite through SQLAlchemy 2.0, URL from `FI_DATABASE_URL` (built) | Postgres in docker-compose | More infra to run and explain in a demo. Grading is on code and extensibility, not ops. | When we need more than one writer at a time. Set `FI_DATABASE_URL`, add a driver, change three queries (claim, upsert, enqueue), add migrations. |
+| Database | SQLite through SQLAlchemy 2.0, URL from `FI_DATABASE_URL` (built) | Postgres in docker-compose | More infra to run and explain in a demo. Grading is on code and extensibility, not ops. | When we need more than one writer at a time; [extensions.md](extensions.md) recipe 2 has the steps. |
 | Database library | SQLAlchemy 2.0 | stdlib `sqlite3` | Hand-written row mapping, and a harder switch to Postgres. | For a small one-file script that will never leave SQLite. |
 | Sync or async DB | Sync SQLAlchemy sessions, run through a threadpool | asyncio with `aiosqlite` | Mixing sync and async sessions is where the hours go. | When the whole stack goes async together and one process must wait on many I/O calls at once. |
 | How work is queued | `raw_events` table is the durable queue (built), read by an in-process worker (built) | Redis with arq or rq | A second system to run. The table already gives durability, retries and replay by ID. | When polling the database for work becomes the bottleneck, or several services must share one queue. |
-| How work is queued | Same | Kafka or SQS | No per-message delayed retry and no lookup by ID. Heavy infra for a take-home. It changes the retry model: Kafka needs retry topics, SQS uses visibility timeouts. | When volume or the number of consumers outgrows one table, and we accept a new queue adapter plus a new retry model. |
+| How work is queued | Same | Kafka or SQS | Kafka has no per-message delay; SQS does it through a visibility timeout. Neither can look an event up by id or list a tenant's dead events. Heavy infra for a take-home, and it changes the retry model (Kafka needs retry topics). | When volume or the number of consumers outgrows one table, and we accept a new queue adapter plus a new retry model. |
 | How work is queued | Same | Synchronous inline (transform inside the request) | A crash or slow transform loses the event or makes the sender time out. Nothing to replay. | Only for a one-off script run by hand, where the operator can simply run it again. |
-| Keep raw payloads | Store every payload as-is before any transform | Transform first, store only the record | Loses the ability to recover after a transformer bug. No dead letter, no audit. | Not really. The answer to cost or personal data is a retention purge after N days, which is a named gap, not built. |
+| Keep raw payloads | Store every payload (as parsed JSON) before any transform | Transform first, store only the record | Loses the ability to recover after a transformer bug. No dead letter, no audit. | Not really. The answer to cost or personal data is a retention purge after N days, which is a named gap, not built. |
 | Claim query | One conditional `UPDATE ... RETURNING` that is safe on SQLite (built) | Use `FOR UPDATE SKIP LOCKED` now | SQLite has no row locks. SQLAlchemy silently ignores `with_for_update(skip_locked=True)` on SQLite, so it would do nothing. | On Postgres with many workers. For SKIP LOCKED only the claim query changes (the whole Postgres move changes three: claim, upsert, enqueue). Never say it runs today. |
 | Name of the table's role | "Inbox" or "durable log" | "Outbox" | An outbox holds messages we will send out. This table holds what came in. | If we ever add write-back to sources (named as an extension in ADR-003), the table of pending sends would be the outbox. |
-| Ports | A port on every external interface, each used by at least one test through its in-memory fake (built) | Cut every port except `Connector` (three council advisors) | The owner required the seams. Each one keeps a migration inside the adapters. The fake proves the port has two real implementations. | If a port stops being used by any test, it is no longer earning its place and should go. |
+| Ports | A port on every external interface, each used by at least one test through its in-memory fake (built) | Cut every port except `Connector` (three of the five advisors in the ADR reviews) | The owner required the seams. Each one keeps a migration inside the adapters. The fake proves the port has two real implementations. | If a port stops being used by any test, it is no longer earning its place and should go. |
 | Clock | Keep a `Clock` port (built) | Drop it as gold-plating | Retry and lease tests use the fake clock so they don't really sleep. | If no test needs a fixed time any more. |
 | Where services get data | Services call ports only (built) | Services call SQLAlchemy or httpx directly | Cheap now, rewrite later when the DB or queue changes. | For a throwaway script with no tests. |
 | Scope of `raw_events` | Durable log plus filtered replay | Pitch it as a platform: append-only log with enrichment and LLM stages | Extra surface to build and defend. | When a real downstream stage exists, like language detection. Mention it only as "what comes next". |
@@ -64,7 +64,7 @@ Use this when an interviewer says "why not X?". Every row comes from ADR-001, AD
 ## If they push: the honest one-liners
 
 1. "You're right that Kafka gives ordering per partition and huge throughput; here it would need a new queue adapter and a different retry model, because Kafka has no per-message delay, and that is where the line is."
-2. "Postgres is where this goes next. I set `FI_DATABASE_URL`, add a driver, change three queries (the claim gets `SKIP LOCKED`, the upsert and the enqueue get `INSERT ... ON CONFLICT`), and add migrations. I would do it the day we need more than one writer."
+2. "Postgres is where this goes next, and the change stays inside the adapters (extensions recipe 2). I would do it the day we need more than one writer."
 3. "Redis would work, but it is a second system to run, and the table already gives me durability, retries and replay by ID, so I'd add it only when polling the database becomes the bottleneck."
 4. "Processing inline is simpler, but a crash mid-request loses the event and leaves nothing to replay, so I save first and say yes second."
 5. "An abstract base class gives the same type check; I chose a Protocol because each source fights a shared template, and mypy still catches a broken connector at the registry line."

@@ -52,7 +52,7 @@ Jargon used below:
 | `title` | text, nullable | Only some sources have a title, like a Discourse topic or an Intercom subject. |
 | `text` | text, not null | The feedback itself. For Intercom, every message joined in order. |
 | `author` | text, nullable | The name or handle as the source gives it. |
-| `language` | text, nullable | Filled from the source when it sends one (Playstore, Twitter). We do not detect it. |
+| `language` | text, nullable | Filled from the source when it sends one (Play Store, Twitter, custom). We do not detect it. |
 | `rating` | integer, nullable | Only reviews have a star rating. |
 | `source_created_at` | datetime, not null | When the source says the item was created. Written once on insert and never changed. |
 | `source_updated_at` | datetime, nullable | When the source says the item last changed. Many sources never send it. |

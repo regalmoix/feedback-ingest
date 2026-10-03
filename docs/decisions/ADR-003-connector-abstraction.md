@@ -24,7 +24,7 @@ Our demo script posts the fixtures to our own webhook URL. `scripts/sign.py` sig
 Already fixed before this review:
 - Python 3.12, Pydantic v2, `mypy --strict`, no speculative abstractions.
 - A `typing.Protocol` per capability plus a registry dict. This is the extensibility story and it stays.
-- Every inbound payload, push or pull, is stored as-is in `raw_events` first. A worker transforms it later (ADR-001).
+- Every inbound payload, push or pull, is saved in `raw_events` as parsed JSON before we answer (not the raw bytes, so the signature cannot be re-checked from storage; a pulled Discourse post also carries the topic title we add). A worker transforms it later (ADR-001).
 - `raw_events` is unique on `(source_id, external_event_id)`. `FeedbackRecord` is unique on `(source_id, external_id)` and has `deleted_at`, `connector_version` and `source_updated_at` (ADR-002).
 - `FeedbackStore.upsert` only overwrites when `COALESCE(source_updated_at, source_created_at)` is newer or equal (applied in Python by `merge` inside `BEGIN IMMEDIATE`; see ADR-002). So out-of-order webhooks cannot overwrite a newer record.
 - `Source` has `mode`, `config: dict[str, str]`, `webhook_secret` and `cursor: str | None`. The `HttpClient` and `Clock` ports exist.
@@ -79,6 +79,7 @@ def new_record(
     # identity keys go last so content cannot override them; the pipeline stamps ingested_at
     return FeedbackRecord.model_validate(
         {
+            "kind": KIND_BY_SOURCE.get(connector.source_type),
             **content,
             "id": uuid5(NAMESPACE_URL, f"{source.id}:{external_id}").hex,
             "tenant_id": source.tenant_id,
@@ -91,7 +92,7 @@ def new_record(
     )
 ```
 
-`RecordContent` is a `TypedDict` of the content fields (title, text, author, language, rating, the three timestamps, metadata). `version` is bumped when transform output changes and is stamped on every record. `required_config` lists the config keys every Source of this type must have. `deadline` is the wall-clock budget for one sync (`FI_PULL_DEADLINE_SECONDS`, default 60).
+`RecordContent` is a `TypedDict` of the content fields (title, text, author, language, rating, the three timestamps, metadata, and an optional kind (custom only)); `kind` defaults to the source type's entry in `KIND_BY_SOURCE`. `version` is bumped when transform output changes and is stamped on every record. `required_config` lists the config keys every Source of this type must have. `deadline` is the wall-clock budget for one sync (`FI_PULL_DEADLINE_SECONDS`, default 60).
 
 A connector that uses the default signature delegates to it in two lines:
 
@@ -253,9 +254,9 @@ Adding a source is five small steps: (1) a `SourceType` value and its `KIND_BY_S
 2. Add `ZendeskMetadata` (with `source_type: Literal[SourceType.ZENDESK]`) to `domain/metadata.py` and to the `SourceMetadata` union.
 3. Write `connectors/zendesk.py` with a `ZendeskTicketIn` input model, `source_type`, `version`, `required_config` (empty unless it needs config), `external_event_id` (`f"{ticket id}:{updated_at}"`), `transform` built on `new_record`, and a `verify_signature` override for Zendesk's timestamp-plus-body scheme. Add `pull_config` and `pull` only if Zendesk will be polled.
 4. Add `ZendeskConnector()` to the tuple inside `CONNECTORS`, and to `PULLERS` (via a typed local) if it pulls.
-5. Put recorded, synthetic payloads in `tests/fixtures/zendesk/`, including `malformed.json`.
+5. Put synthetic fixtures in `tests/fixtures/zendesk/`: `ticket.json`, `ticket_edited.json` (same id, later `updated_at`, so the contract test can prove an edit is a new event and the newer text wins) and `malformed.json`.
 
-`tests/unit/connectors/test_registry.py` and `tests/unit/test_models.py::test_every_source_type_has_a_metadata_model` fail until all five steps are done. The contract tests in `tests/unit/connectors/test_contract.py` then run every fixture. Add one golden test for the source's odd cases.
+`tests/unit/connectors/test_registry.py` and `tests/unit/test_models.py::test_every_source_type_has_a_metadata_model` fail until all five steps are done. The contract tests in `tests/unit/connectors/test_contract.py` then run every fixture. Add one golden test for the source's odd cases. Catch to say out loud: `test_verify_signature_accepts_signed_body_and_rejects_tampered` in `test_contract.py` signs with the default `X-Signature` header, so a connector that overrides the signature needs that test taught its scheme. Run `uv run pytest tests/unit/connectors` until green.
 
 Worked example: the custom connector (commit b8f6e2b) was added exactly this way: `SourceType.CUSTOM`, `CustomMetadata`, `connectors/custom.py`, one entry in the `CONNECTORS` tuple, and `tests/fixtures/custom/`.
 
@@ -276,7 +277,7 @@ On the connector, as `verify_signature(secret, body, headers)`. The default, HMA
 Push or pull is an ingress choice, stored as `Source.mode`. Both paths write the same `raw_events` table, and the same transform reads it. Webhooks are push-only: a pull source answers 409 on the webhook route, and it cannot be created with a `webhook_secret` (422). Creating a pull Source for a type that cannot pull is rejected too. Letting one source take both is an extension, not built.
 
 **"How do you version a transform?"**
-Every record carries `connector_version`. Fix the transform, bump `version`, and replay the stored raw events for each affected source, with bulk replay (`POST /admin/raw-events/replay?source_id=...&status=processed`). Replay goes through the same `>=` version guard (ADR-002), so an equal version is accepted and the fixed output overwrites the record. Raw payloads are kept as-is, so nothing is lost. The stronger version: run v2 over raw events next to v1, diff the results, then switch.
+Every record carries `connector_version`. Fix the transform, bump `version`, and replay the stored raw events for each affected source, with bulk replay (`POST /admin/raw-events/replay?source_id=...&status=processed`). Replay goes through the same `>=` version guard (ADR-002), so an equal version is accepted and the fixed output overwrites the record. Raw payloads are kept (as parsed JSON), so nothing is lost. The stronger version: run v2 over raw events next to v1, diff the results, then switch.
 
 **"How do you test a connector?"**
 Fixture in, expected record out, no mocks. One contract test runs every connector over every fixture. It checks that output is deterministic, identity and the version are stamped, the event id never raises and changes on an edit, a malformed payload raises `ValidationError` (which sends it dead in the worker), and the signature accepts a signed body and rejects a tampered one. Pull uses a stub HTTP client. A failure on page 2 must leave the stored cursor where it started.

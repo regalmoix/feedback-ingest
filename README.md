@@ -2,11 +2,34 @@
 
 A multi-tenant backend that ingests customer feedback from heterogeneous sources (Intercom, Play Store,
 Twitter, Discourse, and a custom webhook that takes Enterpret's public record shape) by both push (signed
-webhooks) and pull (polling Discourse's public API). Every payload
-is saved verbatim in a `raw_events` table before the API answers 202. A background worker transforms each
-one into a uniform, de-duplicated `FeedbackRecord` that keeps common fields (kind, text, author, language,
+webhooks) and pull (polling Discourse's public API). The parsed JSON payload is saved in a `raw_events`
+table before the API answers 202 (not the raw bytes, so the signature cannot be re-checked from storage; a
+pulled Discourse post also carries the topic title we add). A background worker transforms each one into a uniform, de-duplicated `FeedbackRecord` that keeps common fields (kind, text, author, language,
 rating, tenant, source) plus typed source-specific metadata. Failures retry with backoff, then park in a
 dead list that can be replayed.
+
+## Read in this order
+
+1. [Architecture](docs/00_architecture.md): diagrams, module map, requirements map
+2. [Whiteboard script](docs/interview/whiteboard.md)
+3. [Demo script](docs/interview/demo_script.md) (what to say at each step of `scripts/demo.sh`)
+4. [Glossary](docs/interview/glossary.md)
+5. Decisions: [ADR-001 storage and queue](docs/decisions/ADR-001-storage-and-queue.md),
+   [ADR-002 record and idempotency](docs/decisions/ADR-002-uniform-record-and-idempotency.md),
+   [ADR-003 connectors](docs/decisions/ADR-003-connector-abstraction.md)
+
+Reference: [Q&A bank](docs/interview/qa_bank.md) (likely questions with short answers),
+[failure scenarios](docs/interview/failure_scenarios.md),
+[firefight runbook](docs/interview/firefight_runbook.md), [alternatives](docs/interview/alternatives.md),
+[extensions](docs/interview/extensions.md) (recipes for "how would you add X?"),
+[debt ledger](docs/interview/debt_ledger.md) (every `ponytail:` shortcut and when to fix it),
+[research](docs/research/) (public Enterpret notes and the tailoring rules), and, historical (superseded where
+the code differs), the [plan](docs/PLAN.md) and the phase docs:
+[01 domain, ports, adapters](docs/phases/01_domain_ports_adapters.md),
+[02 connectors](docs/phases/02_connectors.md), [03 push API and worker](docs/phases/03_push_api_and_worker.md),
+[04 pull](docs/phases/04_pull_integration.md), [05 tenancy, query, seed, demo](docs/phases/05_tenancy_query_seed_demo.md),
+[06 hardening and interview pack](docs/phases/06_hardening_interview_pack.md). How this was built:
+[AGENT_WORKFLOW.md](AGENT_WORKFLOW.md).
 
 ## Run
 
@@ -39,24 +62,12 @@ startup logs a warning saying so. Gates before any commit:
 
 `uv run pytest -m live` runs the live Discourse test (`tests/live/test_discourse_live.py`, needs network).
 
-## Design in ten lines
+## Design
 
-Three words carry most of it (full definitions in [glossary.md](docs/interview/glossary.md)): a **lease** is a
-time-limited claim on a row, so a crashed worker's rows come back when it runs out; the **version guard** lets
-an update win only if its "last changed" time is newer or equal; a **tombstone** is a `deleted_at` mark kept
-instead of removing the row. The **dead list** (also called the dead-letter list) is simply the raw events
-with status `dead`.
-
-1. Two ways in, one pipe: webhooks and the Discourse poller both call `IngestionService.accept`.
-2. `raw_events` is both the audit log and the work queue; the API returns 202 only after the row commits, 503 if it cannot. 202 means accepted, not processed.
-3. `UNIQUE(source_id, external_event_id)` makes a repeated webhook or an overlapping poll a no-op.
-4. `WorkerService` claims rows with a lease in one atomic UPDATE; a crashed worker's rows come back when the lease expires.
-5. `PipelineService` runs `CONNECTORS[type].transform`, then `FeedbackStore.upsert` on `UNIQUE(source_id, external_id)`.
-6. The newer or equal source version wins (a version guard), older copies are skipped, and deletes are sticky tombstones (`deleted_at`).
-7. Transient errors retry at `2^attempts` seconds (capped); bad payloads and exhausted attempts go `dead`; replay (one event or in bulk) resets them.
-8. Tenancy: API key hash to tenant, every query takes `tenant_id`, composite FKs tie rows to their source's tenant. The webhook takes no API key: the source id picks the source, that source's HMAC proves the sender.
-9. Ports and adapters: services see Protocols only; SQLite/SQLAlchemy and httpx adapters, in-memory fakes for tests.
-10. A new source is five steps: (1) a `SourceType` value and its `KIND_BY_SOURCE` entry in `domain/enums.py`; (2) a metadata model in the `SourceMetadata` union in `domain/metadata.py`; (3) a connector file with its input model in `connectors/`; (4) its entry in `CONNECTORS` (and `PULLERS` if it pulls) in `connectors/registry.py`; (5) fixtures under `tests/fixtures/<type>/`. The contract test fails until all five exist. The pipeline, worker and API do not change (`custom` maps per record type in `KIND_BY_RECORD_TYPE` instead of a step-1 entry, and is the worked example).
+Three guarantees: **durable before ack** (the API answers 202 only after the `raw_events` row commits, 503 if
+it cannot), **idempotent upsert** (database unique keys on source plus the source's own id, not application
+checks), and **replay from raw** (the stored payload can be run again through a fixed connector). Everything
+else, with diagrams, is in [docs/00_architecture.md](docs/00_architecture.md).
 
 ## Settings
 
@@ -85,7 +96,7 @@ reads the secret from `FI_SIGN_SECRET` and prints the `X-Signature` value; it on
 
 | Route | Auth | Purpose |
 |---|---|---|
-| `GET /health` | none | Worker and scheduler liveness, `failing_sources` (a count), global queue counts; 503 when the worker or scheduler thread is dead or stuck, or storage is down; never for a failing source |
+| `GET /health` | none | Worker and scheduler liveness, `failing_sources` (a count), global queue counts; 503 when either thread is dead, or the worker has made no progress for about 10 s, or storage is down (the scheduler is only checked for being alive); never for a failing source |
 | `POST /admin/tenants` | `X-Bootstrap-Token` | Create a tenant; returns its API key once; 401 while the server's token is the default or empty |
 | `POST /v1/sources` | `X-API-Key` | Create a source; a push source gets a webhook secret, shown once (a chosen one needs 16+ chars); a pull source cannot have one (422) |
 | `GET /v1/sources` | `X-API-Key` | List the tenant's sources, secrets masked |
@@ -101,7 +112,7 @@ reads the secret from `FI_SIGN_SECRET` and prints the `X-Signature` value; it on
 | `POST /admin/raw-events/replay` | `X-API-Key` | Bulk replay of the tenant's rows: `status` (`dead`, `failed` or `processed`, default `dead`), optional `source_id`, `limit` (default and max 500); returns `{"replayed": n}` |
 | `GET /admin/queue` | `X-API-Key` | The tenant's raw-event counts per status |
 
-A source or event id that belongs to another tenant answers 404. Any body over 1 MiB answers 413. Storage
+A source or event id that belongs to another tenant answers 404 (bulk replay with a foreign `source_id` simply matches nothing). Any body over 1 MiB answers 413. Storage
 down answers 503.
 
 Sources (`type` on `POST /v1/sources`): `discourse` (push or pull), `playstore`, `twitter`, `intercom` (only
@@ -112,41 +123,15 @@ Sources (`type` on `POST /v1/sources`): `discourse` (push or pull), `playstore`,
 `CONVERSATION`, `FORUM_CONVERSATION_THREAD`, `SURVEY` (kinds review, conversation, post, survey). One push is
 one raw event; any other `type` sends the batch to the dead list.
 
-## Docs
+## Assignment
 
-Assignment: [docs/problem_statement.pdf](docs/problem_statement.pdf). It asks for a service that ingests
+ [docs/problem_statement.pdf](docs/problem_statement.pdf). It asks for a service that ingests
 feedback from heterogeneous sources (Intercom, Play Store, Twitter, Discourse posts) by push and pull, keeps
 each source's own metadata (app version, country, ...), serves many tenants, and transforms everything into
 one uniform structure with feedback types (reviews, conversations, ...) and common attributes (language,
 tenant, source); it gives Discourse's search and posts APIs to test pulling, adds de-duplication and several
 sources of one type per tenant as good-to-haves, and judges code quality, coverage of the requirements and
 how easy it is to add a source.
-
-Read in this order:
-
-1. [Architecture](docs/00_architecture.md): diagrams, module map, requirements map
-2. [Whiteboard script](docs/interview/whiteboard.md)
-3. [Demo script](docs/interview/demo_script.md) (what to say at each step of `scripts/demo.sh`)
-4. [Q&A bank](docs/interview/qa_bank.md) (likely questions with short answers)
-5. [Glossary](docs/interview/glossary.md)
-6. Decisions: [ADR-001 storage and queue](docs/decisions/ADR-001-storage-and-queue.md),
-   [ADR-002 record and idempotency](docs/decisions/ADR-002-uniform-record-and-idempotency.md),
-   [ADR-003 connectors](docs/decisions/ADR-003-connector-abstraction.md)
-
-Reference: [failure scenarios](docs/interview/failure_scenarios.md),
-[firefight runbook](docs/interview/firefight_runbook.md), [alternatives](docs/interview/alternatives.md),
-[extensions](docs/interview/extensions.md) (recipes for "how would you add X?"),
-[debt ledger](docs/interview/debt_ledger.md) (every `ponytail:` shortcut and when to fix it),
-[research](docs/research/) (public Enterpret notes and the tailoring rules). How this was built:
-[AGENT_WORKFLOW.md](AGENT_WORKFLOW.md) (defines the review fleet, the council and `ponytail:` markers).
-
-### Historical (superseded where the code differs)
-
-- [Plan](docs/PLAN.md)
-- Phases: [01 domain, ports, adapters](docs/phases/01_domain_ports_adapters.md),
-  [02 connectors](docs/phases/02_connectors.md), [03 push API and worker](docs/phases/03_push_api_and_worker.md),
-  [04 pull](docs/phases/04_pull_integration.md), [05 tenancy, query, seed, demo](docs/phases/05_tenancy_query_seed_demo.md),
-  [06 hardening and interview pack](docs/phases/06_hardening_interview_pack.md)
 
 ## Status of requirements
 
@@ -177,7 +162,7 @@ Not built:
 - Secrets at rest: webhook secrets are plain text in the `sources` table (they must be readable to check the HMAC). Encrypt them, or keep them in a secret manager, before real customers.
 - A timestamp in the webhook signature: a captured, correctly signed request can be sent again. It changes nothing (it is a duplicate raw event); a signed timestamp with a short window is the fix if replays matter.
 - Real Play Store, Twitter and Intercom API clients: those sources are push-only, tested with fixtures. Google Play has no review webhook (reviews are polled from its API), so the fixtures stand in for that poller. The Twitter webhook CRC handshake is not built either.
-- Language detection: `language` is filled when the source sends it (Play Store, Twitter), else empty.
+- Language detection: `language` is filled when the source sends it (Play Store, Twitter, custom), else empty.
 - Health and process counters (metrics, queue age), and source or time filters on the dead list.
 - A UI, Kafka or Redis, and a Dockerfile.
 - Twitter delete events: they fail validation and go dead; the tweet stays visible.

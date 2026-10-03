@@ -27,7 +27,7 @@ Three sentences answer half of these questions. Learn them first:
 
 **Say:** It needs zero infrastructure, so the demo is one process and one file, and the grading is on code and
 extensibility, not on running a database. The connection string is a setting, so moving to Postgres is not a
-rewrite: set `FI_DATABASE_URL`, add a driver, change three queries (claim, upsert, enqueue), add migrations.
+rewrite; it stays inside the adapters ([extensions.md](extensions.md) recipe 2).
 
 **Go deeper:** SQLite allows one writer at a time. We make that safe with three settings on every connection:
 WAL (readers keep reading while one writer writes), `busy_timeout=5000` (a writer waits up to 5 seconds instead
@@ -69,12 +69,12 @@ is recipe 3 in [extensions.md](extensions.md).
 
 ### Q4. Why put every external thing behind a Protocol port?
 
-**Say:** A port is a small interface the services call, and each one has a real adapter and an in-memory fake.
-The same contract tests run against both, so I know the fake behaves like SQLite, and a database or queue swap
-stays inside the adapters, not the services.
+**Say:** A port is a small interface the services call. Every store and queue port has a SQLite adapter and a
+memory fake that run the same contract tests (HttpClient and Clock have test stubs only), so I know the fake
+behaves like SQLite, and a database or queue swap stays inside the adapters, not the services.
 
 **Go deeper:** The ports are tenant, source and feedback stores, the raw event queue, an HTTP client and a
-clock. Services import only ports, never SQLAlchemy or httpx. The rule from the council was: a port no test
+clock. Services import only ports, never SQLAlchemy or httpx. The rule from the decision review was: a port no test
 uses through its fake is a port we cannot defend. The clock port exists so lease and backoff tests do not
 really sleep; say exactly that. The connector Protocol is the one that matters for extensibility. How the
 adapters get in: the app builds the real ones in `wiring.py` (`sql_adapters`); tests pass fakes with
@@ -138,7 +138,7 @@ hands the insert to the threadpool so the event loop never waits on the database
 `aiosqlite` would still run SQLite on a thread underneath. Our transforms are light, so the GIL is not the
 limit. If transforms got heavy, the answer is a separate worker process, not asyncio. The real limit to admit:
 Starlette's threadpool is 40 threads, and `POST /sync` runs a whole sync inline (up to the 60 s deadline), so 40
-concurrent syncs would stall every sync route behind them. The `ponytail:` note on `api/sync.py` says to enqueue
+concurrent syncs would stall every sync route, and the webhook too, since it uses the same threadpool. The `ponytail:` note on `api/sync.py` says to enqueue
 a sync job once backfills take minutes.
 
 **Point at:** `feedback_ingest/api/ingest.py` (`run_in_threadpool`), `feedback_ingest/services/worker.py`,
@@ -344,7 +344,7 @@ transform, or add a lease heartbeat. Tune `claim_batch`. Recipe 4 in [extensions
 
 ### Q21. What exactly changes for Postgres, and where is the SKIP LOCKED line?
 
-**Say:** Set `FI_DATABASE_URL`, add a driver, change three queries (claim, upsert, enqueue), add migrations. The
+**Say:** The steps are recipe 2 in [extensions.md](extensions.md). In short, the
 claim subquery gets `.with_for_update(skip_locked=True)`, the upsert and enqueue move to
 `INSERT ... ON CONFLICT`, and the SQLite pragmas only run for SQLite.
 
@@ -537,8 +537,8 @@ needs a different flow that scrubs or hard-deletes both (recipe 7 in [extensions
 
 ### Q34. Why is `language` mostly null?
 
-**Say:** On purpose: we store it when the source sends it and we do not guess. Playstore and Twitter send a
-language; Discourse and Intercom do not.
+**Say:** On purpose: we store it when the source sends it and we do not guess. Play Store, Twitter and custom
+records carry a language; Discourse and Intercom do not.
 
 **Go deeper:** Language detection is a model choice with its own accuracy problems, and it is not ingestion. It
 would be a later enrichment step that fills a column, with no change to how we ingest. One trap to mention: the
@@ -546,7 +546,7 @@ upsert rewrites every field, so a detected language must live in its own column 
 upsert (recipe 6 in [extensions.md](extensions.md)).
 
 **Point at:** `feedback_ingest/connectors/playstore.py` (`reviewer_language`), `feedback_ingest/connectors/twitter.py`
-(`lang`), ADR-002 "Where the council clashes", item 4.
+(`lang`), ADR-002 (its disagreements section, item 4).
 
 ### Q35. What happens when a source changes its payload, or our metadata changes?
 
@@ -644,6 +644,13 @@ an overriding connector needs that test taught its scheme.
 **Point at:** `feedback_ingest/connectors/base.py`, `feedback_ingest/connectors/playstore.py` (`verify_signature`),
 `tests/unit/connectors/test_contract.py` (`test_verify_signature_accepts_signed_body_and_rejects_tampered`).
 
+### Q40a. Can you re-verify a signature from storage?
+
+**Say:** No: we check the HMAC on the raw bytes before we write, then store the parsed JSON, not the raw body.
+Storing the raw body is a one-column change if audit needs it.
+
+**Point at:** `feedback_ingest/api/ingest.py`, the `payload` column in `feedback_ingest/adapters/sqlalchemy/tables.py`.
+
 ---
 
 ## 7. Process
@@ -651,16 +658,16 @@ an overriding connector needs that test taught its scheme.
 ### Q41. Did you write this?
 
 **Say:** Not by hand, and I will be straight about it: I designed it with AI agents, AI agents wrote the code, and
-other agents reviewed every phase until the reviewers had nothing left. Every big decision went through a
-five-advisor council, and I have read every file, so ask me about any line.
+other agents reviewed every step until the reviewers had nothing left. Every big decision was argued by five
+independent advisor agents, and I have read every file, so ask me about any line.
 
-**Go deeper:** The council verdicts are the three ADRs, with full transcripts next to them. Each phase had a
-written plan before any code, then a review fleet (code review, silent-failure hunting, over-engineering review,
+**Go deeper:** Those verdicts are the three ADRs, with full transcripts next to them. Each step had a
+written plan before any code, then a set of parallel reviewers (code review, silent-failure hunting, over-engineering review,
 test coverage), then fixes, then green lint, types and tests before it was committed. Deliberate shortcuts are
 marked in the code with `ponytail:` comments that name the limit and the upgrade. Offer to make a small change
 live, like adding a field to a metadata model and watching the contract tests react.
 
-**Point at:** `docs/decisions/` (ADRs and council transcripts), `docs/phases/`, `docs/PLAN.md` ("Operating model").
+**Point at:** `docs/decisions/` (ADRs and their transcripts), `docs/phases/`, `docs/PLAN.md` ("Operating model").
 
 ### Q42. What would you change with another week?
 
@@ -678,7 +685,7 @@ scheduler; (3) a `since` filter on bulk replay (bulk replay by `source_id` and `
 
 ### Q43. What did you not build, and why?
 
-**Say:** Real Playstore, Twitter and Intercom API clients (recorded fixtures stand in), language detection,
+**Say:** Real Playstore, Twitter and Intercom API clients (synthetic fixtures stand in), language detection,
 fair scheduling, retention and erasure, migrations, metrics, a UI and a Docker image. Each one is a known next
 step with a written plan, and none of them changes the core shape.
 
@@ -809,7 +816,7 @@ We did not build that; we only keep customer text out of logs and error messages
 
 **Go deeper:** It would go in `IngestionService.accept`: compute the duplicate key from the original payload,
 replace emails, phones and card numbers with placeholders like `[EMAIL]`, then enqueue. It must run before
-storage, because `raw_events` keeps every payload as received. The trade-off: once raw is redacted, replay can
+storage, because `raw_events` keeps every payload (as parsed JSON). The trade-off: once raw is redacted, replay can
 never get the original text back.
 
 **Point at:** `feedback_ingest/services/ingestion.py`, `feedback_ingest/services/pipeline.py` (`_describe`), recipe 6

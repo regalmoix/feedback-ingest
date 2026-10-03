@@ -8,8 +8,8 @@ The service takes in customer feedback from Intercom, Playstore, Twitter and Dis
 
 ## Decision
 **Storage and queue shape (fixed)**
-- **SQLite through SQLAlchemy 2.0.** The connection string comes from `FI_DATABASE_URL`. Moving to Postgres means: set `FI_DATABASE_URL`, add a driver, change three queries (claim, upsert, enqueue), add migrations.
-- **A `raw_events` table is the durable queue.** Every inbound payload is saved exactly as received before we reply. A "durable queue" here means work that sits on disk and survives a crash.
+- **SQLite through SQLAlchemy 2.0.** The connection string comes from `FI_DATABASE_URL`. Moving to Postgres is recipe 2 in `docs/interview/extensions.md`.
+- **A `raw_events` table is the durable queue.** Every inbound payload is saved as parsed JSON before we reply (not the raw bytes, so the signature cannot be re-checked from storage; a pulled Discourse post also carries the topic title we add). A "durable queue" here means work that sits on disk and survives a crash.
 - **We call it an inbox, or a durable log. Not an "outbox".** An outbox holds messages we will send out. This table holds what came in.
 - **Push and pull share one pipeline.** Webhooks and the Discourse poller both write rows into `raw_events`. One in-process worker handles every row the same way. It does not know or care how the row arrived.
 - **The API returns 202 only after the row is committed.** 202 means "saved, not finished yet". If the DB is down we return 503, and the sender retries.
@@ -17,7 +17,7 @@ The service takes in customer feedback from Intercom, Playstore, Twitter and Dis
 **Ports and adapters (fixed by the owner, kept honest)**
 - Every external interface sits behind a Protocol "port". A port is a small interface the core code calls. An "adapter" is the one class that does the real work behind it. Built as six ports, `TenantStore`, `SourceStore`, `FeedbackStore`, `RawEventQueue`, `HttpClient` and `Clock`, plus the `SourceConnector` Protocol as the extensibility seam.
 - **Each port must be used by at least one test through its in-memory fake.** A port with no test using it is a port we cannot defend.
-- **`Connector` is the extensibility port.** It has three jobs: verify the request, fetch since a cursor, transform a payload into a record. Built differently: adding a source is five small steps: (1) a `SourceType` value and its `KIND_BY_SOURCE` entry in `domain/enums.py`; (2) a metadata model in the `SourceMetadata` union in `domain/metadata.py`; (3) a connector file with its input model in `connectors/`; (4) its entry in `CONNECTORS` (and `PULLERS` if it pulls) in `connectors/registry.py`; (5) fixtures under `tests/fixtures/<type>/`. The contract test fails until all five exist. ADR-003 "How to add a new source" has the Zendesk example.
+- **`Connector` is the extensibility port.** It has three jobs: verify the request, fetch since a cursor, transform a payload into a record. Built differently: adding a source is five small steps, listed once in ADR-003 "How to add a new source".
 - **The clock port exists so retry and lease tests don't really sleep.** Say exactly that.
 - **The queue port is named by what it promises:** `enqueue`, `claim`, `mark_processed`, `mark_failed`, `mark_dead`, `replay`. Swapping to a broker means a new adapter **and** a different retry model. Kafka has no per-message delay. SQS uses visibility timeouts. We never call it "one adapter, nothing else changes".
 
@@ -34,7 +34,7 @@ The service takes in customer feedback from Intercom, Playstore, Twitter and Dis
 - **Guard against out-of-order edits.** The upsert only overwrites when the incoming source `updated_at` is newer than or equal to the stored one. An old edit arriving late cannot overwrite a newer one.
 - **Failures are sorted as permanent or transient.** Permanent means the payload will never work, for example bad shape or a failed validation. It goes to `dead` at once. Transient means it might work later, for example a timeout, a 429 or a locked DB. It retries with exponential backoff, and goes to `dead` after N attempts.
 - **Per-tenant visibility on `/health` or an admin endpoint.** Built differently, and smaller: `GET /admin/queue` gives the calling tenant's raw-event counts per status. `GET /admin/raw-events` lists that tenant's dead rows, each with its error. `/health` shows global counts and `failing_sources`, a count of pull sources whose latest scheduled sync failed (no ids). The failing source ids are in the log lines. Oldest pending age and a stored per-source last error are not built.
-- **Every worker and pipeline log line carries `raw_event_id`.** One event can be traced from webhook to final record with a single grep. The "accepted" line carries the stored id, also on a duplicate. Pull lines carry `tenant_id` and `source_id` instead, because a pull is not one event. Startup lines show "-" for the missing keys.
+- **Every worker and pipeline line about an event carries the raw event id (`raw_event_id`).** One event can be traced from webhook to final record with a single grep. The "accepted" line carries the stored id, also on a duplicate. Pull lines carry `tenant_id` and `source_id` instead, because a pull is not one event. Startup lines show "-" for the missing keys.
 - **Replay** puts dead rows back to pending. Dedupe makes a re-run safe. Built: single replay (`POST /admin/raw-events/{id}/replay`) and bulk replay (`POST /admin/raw-events/replay?source_id=&status=&limit=`). Bulk replay works on the calling tenant's rows, filtered by source and by status (dead, failed or processed). A time-window filter is not built.
 
 ## Where the council agrees
@@ -64,9 +64,9 @@ The service takes in customer feedback from Intercom, Playstore, Twitter and Dis
 - **One-command seeded demo.** Have one you have run and broken yourself.
 
 ## Rejected alternatives and why
-- **Postgres via docker-compose:** more infra to run and explain. Getting there later means: set `FI_DATABASE_URL`, add a driver, change three queries (claim, upsert, enqueue), add migrations.
+- **Postgres via docker-compose:** more infra to run and explain. Getting there later is recipe 2 in `docs/interview/extensions.md`.
 - **Redis + arq/rq:** a second system to keep up. The DB table already gives durability, retries and replay by ID.
-- **Kafka / SQS:** no per-message delayed retry or query-by-ID. That is heavy infra for a take-home, and it changes the retry model.
+- **Kafka / SQS:** Kafka has no per-message delay; SQS does it through a visibility timeout. Neither can look an event up by id or list a tenant's dead events. That is heavy infra for a take-home, and it changes the retry model.
 - **Synchronous inline processing:** a crash or slow transform loses events, or makes the sender time out. Nothing to replay.
 
 ## How to say it in the interview
@@ -78,8 +78,8 @@ The service takes in customer feedback from Intercom, Playstore, Twitter and Dis
 - **10k events at once?** → The API does one small write per event, so 202s stay fast. The worker drains the backlog at its own pace. `busy_timeout` makes writers wait, not fail. One tenant's burst can delay others. That shows in the per-tenant counts on `GET /admin/queue`. Round-robin claiming is the next step.
 - **Two workers?** → The claim is one conditional UPDATE. Only one worker can flip a row to processing. The other worker simply does not get that row. On Postgres I would add SKIP LOCKED to the claim, so workers do not wait on each other.
 - **Swap to Kafka?** → The queue port means the core code doesn't change. But I'd be honest: Kafka has no per-message delay, so retries move to retry topics. That's a new adapter plus a new retry model, not just a new adapter.
-- **Why SQLite?** → Zero infra, and the grading is on code and extensibility, not ops. It allows one writer at a time. Past that, I set `FI_DATABASE_URL` to Postgres, add a driver, change three queries (claim, upsert, enqueue), and add migrations.
-- **What did you not build?** → Per-tenant fair scheduling, a retention purge for raw payloads, real Twitter API access (we use recorded files), a stored per-source last error, and enrichment stages. Each one is a known next step, not a surprise.
+- **Why SQLite?** → Zero infra, and the grading is on code and extensibility, not ops. It allows one writer at a time. Past that, Postgres, and the change stays inside the adapters (extensions recipe 2).
+- **What did you not build?** → Per-tenant fair scheduling, a retention purge for raw payloads, real Twitter API access (synthetic fixtures stand in), a stored per-source last error, and enrichment stages. Each one is a known next step, not a surprise.
 
 ## The one thing to do first
 Build the Intercom webhook end to end, with the real claim query and WAL on from day one. That means: verify signature, insert into `raw_events`, return 202, claim, transform, upsert. Then prove it with two tests: the same webhook twice gives one record, and two workers racing on one row gives exactly one claim.

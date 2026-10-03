@@ -6,7 +6,7 @@ Before you start:
 - The server runs at `http://127.0.0.1:8000`. Replace the placeholders once, then copy the commands as they are.
 - `API_KEY` is the client's tenant key. Every tenant route under `/admin/raw-events`, `/admin/queue` and `/v1` takes it in the `X-API-Key` header and is scoped to that tenant, so you only ever see this client's data.
 - Three routes take no API key. `/health` covers all tenants. The webhook `POST /v1/sources/{id}/events` uses the source id to pick the source and its HMAC signature to prove the sender. `POST /admin/tenants` takes the `X-Bootstrap-Token` header instead.
-- **(P4)** marks the scheduler and the sync endpoint, from Phase 4. Everything in this runbook is built and on `main`, including the Fleet 2 fixes.
+- Everything in this runbook is built and on `main`.
 - Words like lease, dead letter, replay and cursor are in `docs/interview/glossary.md`. `docs/interview/failure_scenarios.md` explains each failure in more depth.
 
 ```
@@ -94,7 +94,7 @@ Match what you found to one row.
 | **C.** Nothing arrived: `processed` did not grow, and nothing is dead. | Read the server's access log for this source's URL. `401`: wrong signature (check E); the webhook takes no API key. `404`: wrong source id in the sender's URL. `409`: the source is disabled (check D), or it is a pull source, which never takes webhooks (`source does not accept webhooks`). `400`: the body is not a JSON object. `413`: the body is over 1 MiB. `503`: our database was down, and the sender should retry. Our own app logs do not record 401s, so the access log is the place to look. |
 | **D.** Is the source there, and is it the one the client thinks? | Run the source check below. A disabled source refuses signed webhooks with 409 `source is disabled`, so `enabled: false` **does** explain missing Playstore reviews: everything sent while it was off was refused, not stored. Turn it back on (the `PATCH` command in Runbook 2, step 2) and ask the client to re-send that period. Repeats are safe. |
 | **E.** The client says "we are sending" but you see 401s. | Run the signature probe below. It tells you whether the secret the client uses matches ours, and it stores nothing. |
-| **F.** It is a pull source, not Playstore. | Run a manual sync (P4), then see Runbook 2. For a push source like Playstore, sync answers 409 `source … is not an enabled pull source`. |
+| **F.** It is a pull source, not Playstore. | Run a manual sync, then see Runbook 2. For a push source like Playstore, sync answers 409 `source … is not an enabled pull source`. |
 
 Access log lines for this source (use whatever file uvicorn writes to):
 
@@ -185,7 +185,7 @@ Write this within one working day. Keep it blameless: describe what happened, no
 
 ## Runbook 2: "Discourse pull stopped advancing"
 
-Discourse is a **pull** source. The scheduler (P4) runs every enabled pull source once per tick, every `FI_PULL_INTERVAL_SECONDS` (default 300, that is 5 minutes). Enterpret's help center describes a 4-hour polling cadence for support tools and app stores, so a slower interval is a normal setting, not a hack. Each run reads the source's **cursor**, searches one window of `window_days` days (default 7) starting there, and moves the cursor **only on the final page** of that window. Five things can stop it moving:
+Discourse is a **pull** source. The scheduler runs every enabled pull source once per tick, every `FI_PULL_INTERVAL_SECONDS` (default 300, that is 5 minutes). Enterpret's help center describes a 4-hour polling cadence for support tools and app stores, so a slower interval is a normal setting, not a hack. Each run reads the source's **cursor**, searches one window of `window_days` days (default 7) starting there, and moves the cursor **only on the final page** of that window. Five things can stop it moving:
 - a **429** or other error part-way through,
 - the **10-page cap**: a window holding more than about 500 posts never reaches its final page (Discourse refuses page 11, so we stop at 10). About 500 posts per day is the hard limit of Discourse search,
 - the **pull deadline** (`FI_PULL_DEADLINE_SECONDS`, default 60) or the **reply size cap** (`FI_HTTP_MAX_BYTES`, default 2,000,000),
@@ -220,7 +220,7 @@ curl -s "http://127.0.0.1:8000/v1/sources/$SOURCE_ID" -H "X-API-Key: $API_KEY" |
 curl -s -X PATCH "http://127.0.0.1:8000/v1/sources/$SOURCE_ID" -H "X-API-Key: $API_KEY" -H "Content-Type: application/json" -d '{"enabled": true}'
 ```
 
-### Step 3. Run one sync by hand and read the result (P4)
+### Step 3. Run one sync by hand and read the result
 
 ```
 curl -s -w '\nHTTP %{http_code}\n' -X POST "http://127.0.0.1:8000/v1/sources/$SOURCE_ID/sync" -H "X-API-Key: $API_KEY"

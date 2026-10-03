@@ -24,10 +24,11 @@ All four gates must be green before any commit. Settings use the `FI_` prefix (s
 ## Repo rules
 - Python 3.12, uv, FastAPI, SQLAlchemy 2 (SQLite by default, `FI_DATABASE_URL` swaps), Pydantic v2, mypy strict, ruff ALL.
 - Layout: `domain/` (models), `ports/` (Protocols), `adapters/` (sqlalchemy, memory, http), `connectors/` (one per source + registry), `services/`, `api/`, `wiring.py`, `main.py`. Services import ports only.
-- Every port has a SQLite adapter and a memory fake; both run the contract tests under `tests/adapters/`.
+- Every store and queue port has a SQLite adapter and a memory fake that run the same contract tests under
+  `tests/adapters/` (HttpClient and Clock have test stubs only).
 - Webhooks are push-only and take no API key: the source id picks the source, its HMAC proves the sender.
-- Add a source in five steps: (1) a `SourceType` value and its `KIND_BY_SOURCE` entry in `domain/enums.py`; (2) a metadata model in the `SourceMetadata` union in `domain/metadata.py`; (3) a connector file with its input model in `connectors/`; (4) its entry in `CONNECTORS` (and `PULLERS` if it pulls) in `connectors/registry.py`; (5) fixtures under `tests/fixtures/<type>/`. The contract test fails until all five exist. (`custom` maps per record type in `KIND_BY_RECORD_TYPE` instead
-  of a step-1 entry.)
+- Add a source in five steps; the recipe is in ADR-003 "How to add a new source"
+  ([docs/decisions/ADR-003-connector-abstraction.md](docs/decisions/ADR-003-connector-abstraction.md#how-to-add-a-new-source)).
 - Files ≤120 lines. Comments only for `# ponytail:` markers (ceiling + upgrade) and rare "why".
 - Fixtures are synthetic; never commit real ids, keys or customer text. `.seed.json` and `*.db*` are ignored.
 - Known deliberate gaps are listed in the README and `docs/interview/debt_ledger.md`; do not "fix" them without a decision.

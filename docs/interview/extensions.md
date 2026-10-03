@@ -26,42 +26,9 @@ Paths are from the repo root. Terms are in [glossary.md](glossary.md). "Why not 
 
 ## 1. Add a source (Zendesk), in 5 steps
 
-The recipe: (1) a `SourceType` value and its `KIND_BY_SOURCE` entry in `domain/enums.py`; (2) a metadata model in the `SourceMetadata` union in `domain/metadata.py`; (3) a connector file with its input model in `connectors/`; (4) its entry in `CONNECTORS` (and `PULLERS` if it pulls) in `connectors/registry.py`; (5) fixtures under `tests/fixtures/<type>/`. The contract test fails until all five exist.
-
-The tests fail until all five steps are done. `tests/unit/connectors/test_registry.py` and
-`tests/unit/test_models.py::test_every_source_type_has_a_metadata_model` check that every type has a connector,
-a kind, a metadata model and a `malformed` fixture. The contract tests in `tests/unit/connectors/test_contract.py`
-then run every fixture. That is the point: you cannot half-add a source.
-
-1. **Name it.** In `feedback_ingest/domain/enums.py` add `ZENDESK = "zendesk"` to `SourceType`. In the
-   same file add it to `KIND_BY_SOURCE`, reusing a kind (a ticket is a `conversation`).
-   Now `tests/unit/connectors/test_registry.py` fails, because the registry has no connector for the new type.
-2. **Metadata model.** In `feedback_ingest/domain/metadata.py` add `ZendeskMetadata` with
-   `source_type: Literal[SourceType.ZENDESK] = SourceType.ZENDESK` and only the fields that are not already
-   record columns (for example `priority`, `tags`). Give every optional field a default. Add it to the
-   `SourceMetadata` union. `tests/unit/test_models.py` checks every type has one.
-3. **Connector file.** Write `feedback_ingest/connectors/zendesk.py`, copying the shape of `playstore.py`:
-   - a Pydantic input model (`ZendeskTicketIn`) shaped like the real payload;
-   - `source_type`, `version = 1`, `required_config = ()`;
-   - `external_event_id(payload)`: `f"{ticket id}:{updated_at}"`, falling back to `payload_hash` on a
-     `ValidationError`, so it never raises;
-   - `transform(source, payload)`: validate first, return a list (empty for non-feedback events), each record
-     built with `new_record(source, self, external_id, ...)` from `connectors/base.py`;
-   - `verify_signature`: Zendesk signs a timestamp header plus the body with HMAC-SHA256, base64, in
-     `X-Zendesk-Webhook-Signature`, so override the default here.
-   - Add `pull` and `pull_config` only if Zendesk will be polled.
-4. **Register it.** In `feedback_ingest/connectors/registry.py` add `ZendeskConnector()` to the tuple that
-   builds `CONNECTORS` (and to `PULLERS` if it pulls). mypy checks it against the Protocol on that line.
-5. **Fixtures and one golden test.** Add `tests/fixtures/zendesk/ticket.json`, `ticket_edited.json` (same id,
-   later `updated_at`) and `malformed.json`, all synthetic. The contract test needs the edited pair to prove
-   an edit is a new event and the newer text wins, and needs `malformed` to prove it goes dead. Add
-   `tests/unit/connectors/test_zendesk.py` for Zendesk's odd cases.
-
-Catch to say out loud: `test_verify_signature_accepts_signed_body_and_rejects_tampered` in
-`tests/unit/connectors/test_contract.py` signs with the default `X-Signature` header. A connector that overrides
-the signature needs that test taught its scheme.
-
-Not touched: routes, services, the worker, the tables. Run `uv run pytest tests/unit/connectors` until green.
+The five-step recipe, with Zendesk as the example and the catches to say out loud, lives in one place:
+[ADR-003 "How to add a new source"](../decisions/ADR-003-connector-abstraction.md#how-to-add-a-new-source).
+Not touched: routes, services, the worker, the tables.
 
 ### Worked example: the `custom` connector (built)
 
@@ -210,7 +177,7 @@ out of logs and error text, and nothing more.
 
 **The first stage we did not build: PII redaction before storage.** Enterpret's public pages say they detect
 and obfuscate PII (card numbers, SSNs) before ingestion. Here it cannot be a later stage, because `raw_events`
-keeps every payload verbatim. It goes in `IngestionService.accept` (`feedback_ingest/services/ingestion.py`):
+keeps every payload (the parsed JSON, saved before we answer). It goes in `IngestionService.accept` (`feedback_ingest/services/ingestion.py`):
 compute `external_event_id` from the original payload first (so duplicates still match), then replace emails,
 phone numbers and card numbers with placeholders like `[EMAIL]`, then enqueue. The HMAC check already ran on
 the raw bytes, so it is not affected. The catch to say out loud: once raw is redacted, replay can never get the

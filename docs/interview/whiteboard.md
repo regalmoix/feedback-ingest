@@ -6,6 +6,25 @@ drawing: [demo_script.md](demo_script.md).
 Draw in this order. Each step is one box or arrow and one sentence. Module names in brackets are the real
 files, so if someone opens the repo the drawing matches.
 
+> **Five things to know before you walk in**
+>
+> 1. **The pull cursor moves only on the final page** of a window. `start_after` is read only while the
+>    cursor is null. A backfill means resetting the cursor (by hand in SQL today) and, if a day is busy,
+>    lowering `window_days` with `PATCH /v1/sources/{id}`. Duplicates on every sync are normal: the cursor
+>    keeps a 60 s overlap and `before:` is day-granular, and the unique key drops the repeats.
+> 2. **Attempts are counted by the claim**, not by the failure. A replayed event resets to 0 and the next claim
+>    makes it 1, so it shows `attempts` 1; the cap check is `attempts > FI_MAX_ATTEMPTS`.
+> 3. **`/health` goes 503** if a thread is dead, if storage is down, or if the worker makes no progress for
+>    `max(3 × FI_WORKER_POLL_SECONDS, 10)` seconds.
+> 4. **The version guard is Python `merge()` under `BEGIN IMMEDIATE`**; SQL `ON CONFLICT` is the Postgres form.
+>    `SKIP LOCKED` does not run today. The per-source sync lock is per process, so `uvicorn --workers N` can
+>    poll Discourse twice (failure_scenarios, "`uvicorn --workers N`").
+> 5. **Say it first:** the Play Store push is a stand-in (Google has no review webhook; reviews are polled), and
+>    Twitter's CRC handshake is not built.
+>
+> Live change for the authorship question: add a field to `PlaystoreMetadata` in
+> `feedback_ingest/domain/metadata.py` and run `uv run pytest tests/unit/connectors -q`.
+
 ## 0. The one sentence (say it before drawing anything)
 
 "We save the raw payload to disk before we say yes. Everything after that is a retry or a replay."
@@ -67,8 +86,10 @@ Point at the custom box. Say: "This one takes the batch shape Enterpret's public
 `{"records": [...]}`, each with an `id`, a `type` and `createdAt` in epoch seconds. One push is one raw event,
 and each entry becomes one record. Its `type` picks the kind, and `SURVEY` needed a new kind, `survey`."
 
-If they ask "how do you add Zendesk": "Five steps: (1) a `SourceType` value and its `KIND_BY_SOURCE` entry in `domain/enums.py`; (2) a metadata model in the `SourceMetadata` union in `domain/metadata.py`; (3) a connector file with its input model in `connectors/`; (4) its entry in `CONNECTORS` (and `PULLERS` if it pulls) in `connectors/registry.py`; (5) fixtures under `tests/fixtures/<type>/`. The contract test fails until all five exist. The pipeline, worker and API do not change.
-The custom connector was added exactly this way."
+If they ask "how do you add Zendesk": "Five steps: an enum value, a metadata model, a connector file, a
+registry entry and fixtures; the contract test fails until all five exist, and the pipeline, worker and API do
+not change. The custom connector was added exactly this way." (The full recipe: ADR-003 "How to add a new
+source".)
 
 Then the table **`feedback_records`** [adapters/sqlalchemy/feedback_store.py]: common columns (`kind:
 review|conversation|post|survey`, `text, title, author, language, rating, source_created_at,
@@ -89,12 +110,12 @@ configured instance, so two Playstore apps are two rows with their own secrets a
 Draw `GET /health`, `GET /admin/raw-events?status=dead`, `POST /admin/raw-events/{id}/replay` and
 `POST /admin/raw-events/replay` [api/health.py, api/admin.py]. Say: "Health tells me three things. Are the
 worker and scheduler threads alive. How many pull sources failed their last scheduled sync: a count in the
-body, no ids. And how deep the queue is. Health answers 503 when a thread is dead or unhealthy, or when
-storage is down, because it reads the queue counts. A failing source only shows in the count and does not
+body, no ids. And how deep the queue is. Health answers 503 when either thread is dead, or the worker has made
+no progress for about 10 seconds, or storage is down, because it reads the queue counts. A failing source only shows in the count and does not
 change the status code, because restarting us would not fix someone else's API. Dead
 events are listed per tenant, newest first. I replay one by id, or many at once with the bulk replay, by
-status and optionally by source. Every worker log line carries the raw event id, so one id takes me from
-ingress to record. Pull log lines carry the source id instead, and startup lines show a dash."
+status and optionally by source. Every worker and pipeline line about an event carries the raw event id, so
+one id takes me from ingress to record. Pull log lines carry the source id instead, and startup lines show a dash."
 
 ## 6. The three guarantees (close, 1 minute)
 
@@ -103,21 +124,23 @@ Write them in a corner and point at the boxes:
 1. **Durable before ack.** The insert commits before the 202. DB down means 503 and the sender retries.
    Accepted does not mean processed: Enterpret's public webhook docs say the same about their 200.
 2. **Idempotent by key.** (source, external id) on records; (source, external event id) on raw events.
-3. **Replayable.** Raw payloads are kept verbatim; a connector fix plus replay rebuilds records.
+3. **Replayable.** The parsed JSON payload is saved before we answer (not the raw bytes, so the signature
+   cannot be re-checked from storage; a pulled Discourse post also carries the topic title we add); a
+   connector fix plus replay rebuilds records.
 
 ## What to draw when they push on something
 
 | They ask | Draw | Say |
 |---|---|---|
 | Two workers | Second worker box, same claim arrow | "Same single UPDATE. On Postgres I add SKIP LOCKED to that one query." |
-| 10k burst | Thick arrow into the table | "Inserts are cheap, the 202 stays fast, the backlog drains at the worker's pace. SQLite is one writer. Past that I move to Postgres: set FI_DATABASE_URL, add a driver, change three queries (claim, upsert, enqueue), add migrations." |
+| 10k burst | Thick arrow into the table | "Inserts are cheap, the 202 stays fast, the backlog drains at the worker's pace. SQLite is one writer. Past that I move to Postgres (extensions recipe 2)." |
 | Edits out of order | Two arrows into one record, timestamps | "COALESCE(updated, created) must not be older. Equal is accepted, so replay works. That is the COALESCE rule, applied in Python today inside BEGIN IMMEDIATE; the SQL ON CONFLICT … WHERE form is the Postgres upgrade (extensions recipe 2). Their engineering blog describes the same idea: version-based rejection of stale updates." |
 | Source deletes | Tombstone column | "Only Discourse push payloads carry a delete today and it becomes a tombstone; Twitter and Intercom deletes go dead on purpose; pull-side Discourse deletes are invisible (README § not built)." |
 | Transformer bug last week | Arrow from raw_events back into the pipeline | "Fix the connector, bump its version, replay. No re-fetch, nothing lost." |
 | Noisy tenant | Two tenants' arrows into one queue | "Today one queue, so one tenant's burst delays the others. That is a noisy neighbour. Their engineering blog says they partition events by tenant for this reason. My next step is the same idea: claim round-robin by tenant, then a partition per tenant or tier." |
-| Kafka | Box behind the queue port | "Swap the adapter, and change the retry model: visibility timeout instead of leases, no per-message delay." |
+| Kafka | Box behind the queue port | "Swap the adapter, and change the retry model. Kafka: consumer offsets instead of leases, and retry topics because there is no per-message delay. SQS would use a visibility timeout." |
 | Where it fits in Enterpret | Arrow out of feedback_records to a box "Understand" | "We are Unify. Records go downstream to the taxonomy and Wisdom. Their blog names ClickHouse as the analytics tier; that would be a projection fed from these records. PII redaction before storage is on their public pages; we did not build it." |
-| Did you write this | Nothing | "I designed it and reviewed every file; AI agents wrote and audited the code. Every decision went through a five-advisor council and is in docs/decisions." |
+| Did you write this | Nothing | "I designed it and reviewed every file; AI agents wrote and audited the code. Every big decision was argued by five independent advisor agents and is written up in docs/decisions." |
 
 ## Ports and adapters, if they ask about the layering
 
@@ -125,8 +148,7 @@ Draw a dashed vertical line. Left: services (ingestion, pipeline, worker, pull, 
 (SQLAlchemy stores and queue, httpx client, system clock) and their in-memory fakes. On the line: ports
 [ports/*.py], small Protocols. Say: "Services only import the ports. The same contract test runs against the
 SQLite adapter and the in-memory fake, so I know the fake behaves like the real thing. That is why a Postgres
-swap stays inside the adapters: set FI_DATABASE_URL, add a driver, change three queries (claim, upsert,
-enqueue), add migrations."
+swap stays inside the adapters (extensions recipe 2)."
 
 ## Things never to claim
 

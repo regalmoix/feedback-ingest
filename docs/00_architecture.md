@@ -7,7 +7,8 @@ queue), [ADR-002](decisions/ADR-002-uniform-record-and-idempotency.md) (record a
 ## In plain words
 
 Customer feedback arrives from many places: some apps send it to us the moment it happens (push), and for
-others we go and fetch it on a timer (pull). Whatever arrives is first saved to disk exactly as received, and
+others we go and fetch it on a timer (pull). Whatever arrives is first saved to disk as parsed JSON (not the raw bytes, so a
+signature cannot be re-checked from storage; a pulled Discourse post also carries the topic title we add), and
 only then do we say "got it", so nothing is lost if a later step fails. A background worker turns each saved
 item into one standard feedback record with the same fields whatever the source, plus a small set of extras
 that only that source has. The same piece of feedback arriving twice is stored once, because every record is
@@ -44,8 +45,8 @@ data, and anything that fails to process is parked in a dead list where it can b
 ```
 
 The three guarantees: **durable before ack** (202 only after the `raw_events` row commits), **idempotent
-upsert** (database unique keys, not application checks), **replay from raw** (the verbatim payload is kept,
-so a fixed connector can reprocess it).
+upsert** (database unique keys, not application checks), **replay from raw** (the parsed JSON payload is saved before we
+answer and kept, so a fixed connector can reprocess it).
 
 ## Components
 
@@ -258,9 +259,9 @@ flowchart LR
   review id.
 - `/health` and the push webhook are the unauthenticated routes (`POST /admin/tenants` takes the bootstrap
   token instead of an API key). `/health` shows global queue counts and a count of pull sources whose latest
-  scheduled sync failed (`failing_sources`), no ids and no tenant data. Its status code turns 503 when the
-  worker or scheduler thread is dead or stuck, or when storage is down (it reads the queue counts); a
-  failing source never changes it.
+  scheduled sync failed (`failing_sources`), no ids and no tenant data. Its status code turns 503 when either thread is dead, or the
+  worker has made no progress for about 10 s, or storage is down (it reads the queue counts); the scheduler
+  is only checked for being alive, and a failing source never changes it.
 
 ## Domain model
 
@@ -272,7 +273,8 @@ flowchart LR
   rating, source_created_at, source_updated_at, ingested_at, deleted_at, connector_version, metadata)`.
   `id` is the uuid5 of source id and external id, as 32 hex characters. `kind` is a plain field:
   `new_record` fills it from `KIND_BY_SOURCE`, the custom connector passes the kind its record type maps to
-  (`KIND_BY_RECORD_TYPE`), and the validator checks it for every non-custom source.
+  (`KIND_BY_RECORD_TYPE`), and the validator checks it for every record: a custom record against its
+  record type, every other against its source type.
 - Metadata, one model per source: `DiscourseMetadata(topic_id, post_number, like_count, url)`,
   `PlaystoreMetadata(app_version, device, android_os_version)`, `TwitterMetadata(country, retweets, likes)`,
   `IntercomMetadata(part_count, tags, state)`, `CustomMetadata(record_type, score, fields)`
@@ -330,7 +332,7 @@ Every `__init__.py` under `feedback_ingest/` is an empty package marker.
 | `services/pipeline.py` | `PipelineService.process`: transform, upsert, then processed, failed with backoff, or dead |
 | `services/worker.py` | `WorkerService`: background thread that claims batches and calls the pipeline |
 | `services/pull.py` | `PullService.sync`: one sync per source at a time, run the puller with a deadline, accept each payload, advance the cursor |
-| `services/scheduler.py` | `SchedulerService`: background thread that calls `sync` for each pull source every interval, isolating each source, and keeps that tick's errors per source |
+| `services/scheduler.py` | `SchedulerService`: background thread that calls `sync` for each pull source every interval, isolating each source, and keeps a count of the sources that failed in the latest tick (`failing_sources`) |
 | `utils/hashing.py` | `sha256_text` (API keys) and `payload_hash` (fallback event id) |
 | `utils/signing.py` | HMAC-SHA256 `sign` and constant-time `verify` |
 | `utils/time.py` | `to_naive_utc` and `SystemClock` |
@@ -347,6 +349,6 @@ Every `__init__.py` under `feedback_ingest/` is an empty package marker.
 | Multi-tenancy | Must | `api/deps.py`, `api/tenants.py`, tenant-scoped stores, composite FKs in `adapters/sqlalchemy/tables.py` | `tests/adapters/contract_stores.py`, `tests/adapters/test_sqlalchemy.py::test_rows_must_belong_to_their_sources_tenant`, `tests/api/test_tenants_api.py`, `tests/api/test_records_api.py`, `tests/api/test_push_api.py`, `tests/api/test_admin_api.py`, `tests/api/test_replay_api.py`, `tests/unit/services/test_pipeline.py::test_an_unknown_or_foreign_source_is_dead` (an event whose tenant does not own its source goes dead) |
 | Uniform structure: record types (`kind`) and common attributes (language, tenant, source, ...) | Must | `domain/models.py` (`FeedbackRecord`), `domain/enums.py` (`KIND_BY_SOURCE`, `KIND_BY_RECORD_TYPE`) | `tests/unit/test_models.py`, `tests/unit/connectors/test_contract.py`, `tests/unit/connectors/test_custom.py` (survey kind, kind per record type) |
 | Idempotency (de-dupe) | Good-to-have | UNIQUE keys in `adapters/sqlalchemy/tables.py`, `SqlRawEventQueue.enqueue`, `SqlFeedbackStore.upsert` | `tests/e2e/test_push_to_query.py`, `tests/adapters/contract_queue.py`, `tests/adapters/contract_upsert.py` (incl. `same_version_from_a_newer_connector_replaces_the_row`), `tests/adapters/test_sqlalchemy.py::test_the_database_itself_rejects_a_duplicate_key` (the UNIQUE constraints tested against the engine directly, skipping the app-level lookup), `tests/unit/services/test_pull.py` |
-| Extensibility: worked example | Extra | `connectors/custom.py` added by the five-step recipe (enum value, kind mapping in `KIND_BY_RECORD_TYPE`, `CustomMetadata`, connector file, registry entry, fixtures); no service, route or table changed | `tests/unit/connectors/test_registry.py`, `tests/unit/test_models.py::test_every_source_type_has_a_metadata_model`, `tests/unit/connectors/test_custom.py`, `tests/api/test_custom_webhook.py`, `tests/e2e/test_demo_smoke.py` |
+| Extensibility: worked example | Extra | `connectors/custom.py` added by the five-step recipe (enum value with its `KIND_BY_RECORD_TYPE` mapping, `CustomMetadata`, connector file, registry entry, fixtures); no service, route or table changed | `tests/unit/connectors/test_registry.py`, `tests/unit/test_models.py::test_every_source_type_has_a_metadata_model`, `tests/unit/connectors/test_custom.py`, `tests/api/test_custom_webhook.py`, `tests/e2e/test_demo_smoke.py` |
 | Multiple sources of the same type per tenant | Good-to-have | keys on `source_id`, `api/sources.py` | `tests/e2e/test_multi_source_same_type.py`, `tests/adapters/contract_stores.py` |
 | Beyond the brief: durable before ack, retry, dead letter, replay, restart | Extra | `services/pipeline.py`, `services/worker.py`, `api/admin.py`, `api/errors.py` | `tests/api/test_push_api.py::test_storage_down_is_503_never_202_and_logged`, `tests/api/test_admin_api.py::test_transient_failures_go_dead_then_replay_processes_after_the_fix`, `tests/api/test_replay_api.py::test_bulk_replay_resets_only_the_callers_matching_rows`, `tests/api/test_health.py`, `tests/unit/services/test_worker.py`, `tests/unit/services/test_pipeline.py`, `test_pipeline_failures.py`, `tests/e2e/test_dlq_replay.py`, `tests/e2e/test_restart_resume.py` |
