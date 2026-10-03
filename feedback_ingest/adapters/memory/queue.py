@@ -3,11 +3,12 @@ from datetime import datetime, timedelta
 from feedback_ingest.domain.enums import EventStatus
 from feedback_ingest.domain.errors import check_limit
 from feedback_ingest.domain.models import Enqueued, RawEvent
+from feedback_ingest.ports.queue import RawEventQueue
 
 _RETRYABLE = (EventStatus.PENDING, EventStatus.FAILED)
 
 
-class MemoryRawEventQueue:
+class MemoryRawEventQueue(RawEventQueue):
     def __init__(self) -> None:
         self._events: dict[str, RawEvent] = {}
 

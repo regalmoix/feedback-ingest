@@ -4,7 +4,7 @@ from typing import Any, ClassVar
 from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
 from pydantic.alias_generators import to_camel
 
-from feedback_ingest.connectors.base import default_verify_signature, new_record
+from feedback_ingest.connectors.base import SourceConnector, default_verify_signature, new_record
 from feedback_ingest.domain.enums import SourceType
 from feedback_ingest.domain.errors import PermanentError
 from feedback_ingest.domain.metadata import PlaystoreMetadata
@@ -48,7 +48,7 @@ class PlaystoreReviewIn(_In):
         return [c for c in value if not (isinstance(c, dict) and "developerComment" in c)]
 
 
-class PlaystoreConnector:
+class PlaystoreConnector(SourceConnector):
     source_type: ClassVar[SourceType] = SourceType.PLAYSTORE
     version: ClassVar[int] = 1
     required_config: ClassVar[tuple[str, ...]] = ()

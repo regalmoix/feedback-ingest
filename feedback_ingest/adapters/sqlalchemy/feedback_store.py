@@ -7,9 +7,10 @@ from feedback_ingest.adapters.sqlalchemy.tables import FeedbackRecordRow
 from feedback_ingest.domain.enums import FeedbackKind, UpsertOutcome
 from feedback_ingest.domain.errors import check_limit
 from feedback_ingest.domain.models import FeedbackRecord, merge
+from feedback_ingest.ports.stores import FeedbackStore
 
 
-class SqlFeedbackStore:
+class SqlFeedbackStore(FeedbackStore):
     def __init__(self, engine: Engine) -> None:
         self._write, self._read = sessions(engine)
 

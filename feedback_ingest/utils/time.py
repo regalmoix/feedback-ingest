@@ -3,6 +3,8 @@ from typing import Annotated
 
 from pydantic import AfterValidator, TypeAdapter
 
+from feedback_ingest.ports.clock import Clock
+
 
 def to_naive_utc(value: datetime) -> datetime:
     if value.tzinfo is None:
@@ -19,6 +21,6 @@ NaiveUtc = Annotated[datetime, AfterValidator(to_naive_utc)]
 NAIVE_UTC: TypeAdapter[NaiveUtc] = TypeAdapter(NaiveUtc)
 
 
-class SystemClock:
+class SystemClock(Clock):
     def now(self) -> datetime:
         return datetime.now(UTC).replace(tzinfo=None)

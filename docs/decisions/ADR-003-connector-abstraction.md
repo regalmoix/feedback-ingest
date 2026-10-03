@@ -30,7 +30,7 @@ Already fixed before this review:
 - `Source` has `mode`, `config: dict[str, str]`, `webhook_secret` and `cursor: str | None`. The `HttpClient` and `Clock` ports exist.
 
 Jargon used below:
-- **Protocol**: a Python type that lists methods. Any class with those methods fits it. Nothing is inherited.
+- **Protocol**: a Python type that lists methods. Any class with those methods fits it. Implementations name their port explicitly so the IDE and mypy link them.
 - **Registry**: a plain dict from `SourceType` to the connector object.
 - **Ingress**: how bytes get into `raw_events` (webhook or poll).
 - **Cursor**: a bookmark string that says where the next poll should start.
@@ -201,7 +201,7 @@ A push source without a `webhook_secret` is rejected by the `Source` model itsel
 
 1. **One record or a list?** The proposal, Executor and Expansionist return one record. The Contrarian says zero, many or a tombstone. **Ruling: a list** (ruling 1). A payload that is not feedback has no honest single-record answer.
 2. **Is pull a subtype or a separate job?** First Principles says `PullConnector(SourceConnector)` mixes ingress back into transform. The Executor keeps the subtype. **Ruling: keep the subtype, use the First Principles framing to explain it.** Every puller must transform what it fetches, so the two belong in one class. Push or pull is still chosen by `Source.mode`. `PULLERS` keeps the type information, and `check_source` keeps mode and capability in step.
-3. **Inherit from the Protocol explicitly?** The Executor wants explicit inheritance, so errors show up at the class and a default method can live on the Protocol. The Outsider wants to be able to say "connectors inherit nothing". **Ruling: structural, no inheritance.** mypy still catches a broken connector at the registry tuple. The signature default is a module function that connectors call, so nothing needs inheriting.
+3. **Inherit from the Protocol explicitly?** The Executor wants explicit inheritance, so errors show up at the class and a default method can live on the Protocol. The Outsider wants to be able to say "connectors inherit nothing". **Ruling: structural, no inheritance.** mypy still catches a broken connector at the registry tuple. The signature default is a module function that connectors call, so nothing needs inheriting. Later amended: implementations name their port explicitly so the IDE and mypy link them.
 4. **`runtime_checkable` + `isinstance` (Expansionist) or static registries (Executor)?** **Ruling: static.** `isinstance` on a Protocol only checks that method names exist, not their signatures. It is weaker than mypy, and it is just the if/else in another form.
 5. **Grow the abstraction or keep it small?** The Expansionist wants Config models and a MappedConnector. The Executor, Outsider and First Principles want it small. **Ruling: small.** `config: dict[str, str]` plus `check_source` covers four sources. Everything else is listed as an extension.
 6. **Does transform get the whole Source?** The Contrarian says give it only `tenant_id` and `source_id`. **Ruling: whole Source, with `SecretStr`** (ruling 7). That fixes the leak everywhere, not only in the transform.
@@ -244,7 +244,7 @@ Chairman additions, found while checking the rulings:
 | Contrarian: a result type with skip and delete cases | A list already covers skip (empty), delete (`deleted_at`) and many. |
 | Contrarian: a separate PUSH registry | Every connector can transform a pushed payload, so a push registry would just copy `CONNECTORS`. |
 | A slim `SourceRef` model for transform | `SecretStr` fixes the leak everywhere with no new model. |
-| Executor: explicit Protocol inheritance | It only moves where the error shows up. The default lives in a function, so nothing needs inheriting. |
+| Executor: explicit Protocol inheritance | Rejected at first, later adopted: implementations name their port explicitly so the IDE and mypy link them. The default still lives in a function. |
 
 ## How to add a new source
 

@@ -4,9 +4,10 @@ from datetime import datetime
 from feedback_ingest.domain.enums import FeedbackKind, SourceMode, UpsertOutcome
 from feedback_ingest.domain.errors import NotFoundError, check_limit
 from feedback_ingest.domain.models import FeedbackRecord, Source, Tenant, merge
+from feedback_ingest.ports.stores import FeedbackStore, SourceStore, TenantStore
 
 
-class MemoryTenantStore:
+class MemoryTenantStore(TenantStore):
     def __init__(self) -> None:
         self._tenants: dict[str, Tenant] = {}
 
@@ -21,7 +22,7 @@ class MemoryTenantStore:
         return next((t for t in self._tenants.values() if t.api_key_hash == api_key_hash), None)
 
 
-class MemorySourceStore:
+class MemorySourceStore(SourceStore):
     def __init__(self) -> None:
         self._sources: dict[str, Source] = {}
 
@@ -65,7 +66,7 @@ class MemorySourceStore:
 
 
 # ponytail: no FK check in the fake; the SQLite contract test covers tenant mismatch
-class MemoryFeedbackStore:
+class MemoryFeedbackStore(FeedbackStore):
     def __init__(self) -> None:
         self._records: dict[tuple[str, str], FeedbackRecord] = {}
 

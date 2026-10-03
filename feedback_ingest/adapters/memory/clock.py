@@ -1,7 +1,9 @@
 from datetime import datetime, timedelta
 
+from feedback_ingest.ports.clock import Clock
 
-class FixedClock:
+
+class FixedClock(Clock):
     def __init__(self, now: datetime) -> None:
         self._now = now
 

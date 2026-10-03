@@ -8,9 +8,10 @@ from feedback_ingest.adapters.sqlalchemy.tables import SourceRow, TenantRow
 from feedback_ingest.domain.enums import SourceMode
 from feedback_ingest.domain.errors import NotFoundError
 from feedback_ingest.domain.models import Source, Tenant
+from feedback_ingest.ports.stores import SourceStore, TenantStore
 
 
-class SqlTenantStore:
+class SqlTenantStore(TenantStore):
     def __init__(self, engine: Engine) -> None:
         self._write, self._read = sessions(engine)
 
@@ -28,7 +29,7 @@ class SqlTenantStore:
             return Tenant.model_validate(row, from_attributes=True) if row else None
 
 
-class SqlSourceStore:
+class SqlSourceStore(SourceStore):
     def __init__(self, engine: Engine) -> None:
         self._write, self._read = sessions(engine)
 

@@ -6,11 +6,12 @@ from typing import Any
 import httpx
 
 from feedback_ingest.domain.errors import PermanentError, TransientError
+from feedback_ingest.ports.http import HttpClient
 
 _RETRYABLE_4XX = (HTTPStatus.REQUEST_TIMEOUT, HTTPStatus.TOO_MANY_REQUESTS)
 
 
-class HttpxClient:
+class HttpxClient(HttpClient):
     # no redirects (a public base_url must not bounce us to an internal host), no env proxies
     def __init__(
         self, transport: httpx.BaseTransport | None = None, max_bytes: int = 2_000_000

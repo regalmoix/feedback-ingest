@@ -4,7 +4,7 @@ from typing import Any, ClassVar
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic.alias_generators import to_camel
 
-from feedback_ingest.connectors.base import default_verify_signature, new_record
+from feedback_ingest.connectors.base import SourceConnector, default_verify_signature, new_record
 from feedback_ingest.domain.enums import KIND_BY_RECORD_TYPE, SourceType
 from feedback_ingest.domain.errors import PermanentError
 from feedback_ingest.domain.metadata import CustomMetadata
@@ -31,7 +31,7 @@ class CustomBatchIn(BaseModel):
     records: list[CustomRecordIn] = Field(min_length=1)
 
 
-class CustomConnector:
+class CustomConnector(SourceConnector):
     source_type: ClassVar[SourceType] = SourceType.CUSTOM
     version: ClassVar[int] = 1
     required_config: ClassVar[tuple[str, ...]] = ()

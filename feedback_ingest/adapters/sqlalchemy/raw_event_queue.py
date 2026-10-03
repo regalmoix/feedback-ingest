@@ -7,11 +7,12 @@ from feedback_ingest.adapters.sqlalchemy.tables import RawEventRow
 from feedback_ingest.domain.enums import EventStatus
 from feedback_ingest.domain.errors import check_limit
 from feedback_ingest.domain.models import Enqueued, RawEvent
+from feedback_ingest.ports.queue import RawEventQueue
 
 _RETRYABLE = (EventStatus.PENDING, EventStatus.FAILED)
 
 
-class SqlRawEventQueue:
+class SqlRawEventQueue(RawEventQueue):
     def __init__(self, engine: Engine) -> None:
         self._write, self._read = sessions(engine)
 
@@ -94,9 +95,8 @@ class SqlRawEventQueue:
         newest_first = (RawEventRow.received_at.desc(), RawEventRow.id)
         query = query.order_by(*newest_first).limit(check_limit(limit))
         with self._read.begin() as session:
-            return [
-                RawEvent.model_validate(r, from_attributes=True) for r in session.scalars(query)
-            ]
+            rows = session.scalars(query)
+            return [RawEvent.model_validate(r, from_attributes=True) for r in rows]
 
     def counts(self, tenant_id: str | None = None) -> dict[EventStatus, int]:
         query = select(RawEventRow.status, func.count()).group_by(RawEventRow.status)

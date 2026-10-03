@@ -4,7 +4,12 @@ from typing import Any, ClassVar
 
 from pydantic import ValidationError
 
-from feedback_ingest.connectors.base import PullPage, default_verify_signature, new_record
+from feedback_ingest.connectors.base import (
+    PullConnector,
+    PullPage,
+    default_verify_signature,
+    new_record,
+)
 from feedback_ingest.connectors.discourse_models import DiscoursePostIn
 from feedback_ingest.connectors.discourse_pull import pull_pages
 from feedback_ingest.domain.enums import SourceType
@@ -16,7 +21,7 @@ from feedback_ingest.utils.hashing import payload_hash
 from feedback_ingest.utils.html import strip_tags
 
 
-class DiscourseConnector:
+class DiscourseConnector(PullConnector):
     source_type: ClassVar[SourceType] = SourceType.DISCOURSE
     version: ClassVar[int] = 1
     required_config: ClassVar[tuple[str, ...]] = ("base_url",)

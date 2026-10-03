@@ -3,7 +3,7 @@ from typing import Any, ClassVar
 
 from pydantic import BaseModel, ValidationError
 
-from feedback_ingest.connectors.base import default_verify_signature, new_record
+from feedback_ingest.connectors.base import SourceConnector, default_verify_signature, new_record
 from feedback_ingest.domain.enums import SourceType
 from feedback_ingest.domain.errors import PermanentError
 from feedback_ingest.domain.metadata import IntercomMetadata
@@ -55,7 +55,7 @@ class IntercomEventIn(BaseModel):
     data: dict[str, Any]
 
 
-class IntercomConnector:
+class IntercomConnector(SourceConnector):
     source_type: ClassVar[SourceType] = SourceType.INTERCOM
     version: ClassVar[int] = 1
     required_config: ClassVar[tuple[str, ...]] = ()

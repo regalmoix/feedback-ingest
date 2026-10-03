@@ -53,7 +53,7 @@ The terms are in teaching order, so each one only uses words defined above it.
 - **Why:** Each store and queue port has a real adapter and an in-memory one, and that second one is how a port earns its place.
 
 ### Protocol (typing)
-- **What:** A Python type, `typing.Protocol`, that lists methods; any class with those methods fits it, and nothing is inherited.
+- **What:** A Python type, `typing.Protocol`, that lists methods; any class with those methods fits it. Implementations name their port explicitly so the IDE and mypy link them.
 - **Where:** Every file in `ports/`, and `SourceConnector` and `PullConnector` in `connectors/base.py`.
 - **Why:** mypy checks each connector against the Protocol at the registry line, so a missing method is a type error, and no base class hides the control flow.
 
