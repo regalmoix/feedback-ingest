@@ -1,3 +1,5 @@
+New to the code? Read docs/WALKTHROUGH.md first.
+
 # Architecture
 
 _Status: final, 2026-10-03._ Decisions behind it: [ADR-001](decisions/ADR-001-storage-and-queue.md) (storage and

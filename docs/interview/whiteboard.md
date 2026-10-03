@@ -1,3 +1,5 @@
+New to the code? Read docs/WALKTHROUGH.md first.
+
 # Whiteboard script (10 minutes)
 
 Terms: [glossary.md](glossary.md). Follow-up answers: [qa_bank.md](qa_bank.md). The live run that matches this

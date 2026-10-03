@@ -10,11 +10,12 @@ dead list that can be replayed.
 
 ## Read in this order
 
-1. [Architecture](docs/00_architecture.md): diagrams, module map, requirements map
-2. [Whiteboard script](docs/interview/whiteboard.md)
-3. [Demo script](docs/interview/demo_script.md) (what to say at each step of `scripts/demo.sh`)
-4. [Glossary](docs/interview/glossary.md)
-5. Decisions: [ADR-001 storage and queue](docs/decisions/ADR-001-storage-and-queue.md),
+1. [Walkthrough](docs/WALKTHROUGH.md): start here: the system layer by layer with code and examples
+2. [Architecture](docs/00_architecture.md): diagrams, module map, requirements map
+3. [Whiteboard script](docs/interview/whiteboard.md)
+4. [Demo script](docs/interview/demo_script.md) (what to say at each step of `scripts/demo.sh`)
+5. [Glossary](docs/interview/glossary.md)
+6. Decisions: [ADR-001 storage and queue](docs/decisions/ADR-001-storage-and-queue.md),
    [ADR-002 record and idempotency](docs/decisions/ADR-002-uniform-record-and-idempotency.md),
    [ADR-003 connectors](docs/decisions/ADR-003-connector-abstraction.md)
 
