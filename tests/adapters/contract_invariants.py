@@ -2,6 +2,7 @@ from datetime import timedelta
 
 import pytest
 from contract import SOURCE_A1, Case, event, seed
+from sqlalchemy.exc import IntegrityError
 
 from feedback_ingest.api.deps import Adapters
 from feedback_ingest.domain.models import Tenant
@@ -35,8 +36,17 @@ def an_api_key_hash_belongs_to_one_tenant(a: Adapters) -> None:
         a.tenants.add(Tenant(id="tenant-c", name="Initech", api_key_hash="hash-a"))
 
 
+def a_reused_event_id_with_a_new_key_is_refused(a: Adapters) -> None:
+    seed(a)
+    first = event(SOURCE_A1, "e1", a.clock.now())
+    a.queue.enqueue(first)
+    with pytest.raises((ValueError, IntegrityError)):
+        a.queue.enqueue(first.model_copy(update={"external_event_id": "e2"}))
+
+
 INVARIANT_CASES: list[Case] = [
     replay_clears_the_old_error,
     claim_returns_the_oldest_due_first,
     an_api_key_hash_belongs_to_one_tenant,
+    a_reused_event_id_with_a_new_key_is_refused,
 ]

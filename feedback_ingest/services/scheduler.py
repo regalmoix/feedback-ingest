@@ -8,9 +8,8 @@ from feedback_ingest.domain.models import Source
 from feedback_ingest.services.pull import PullService
 
 log = logging.getLogger(__name__)
-_JOIN_SECONDS = (
-    5  # short so shutdown is quick; an abandoned sync resumes from its saved page cursor
-)
+# short so shutdown is quick; an abandoned sync resumes from its saved page cursor
+_JOIN_SECONDS = 5
 
 
 # ponytail: one thread ticks every pull source in turn; a slow source delays the rest of the tick,

@@ -6,7 +6,7 @@ from pydantic import Field, SecretStr, StringConstraints, model_validator
 
 from feedback_ingest.domain import enums
 from feedback_ingest.domain.enums import EventStatus, FeedbackKind, SourceMode, SourceType
-from feedback_ingest.domain.metadata import FrozenModel, SourceMetadata
+from feedback_ingest.domain.metadata import CustomMetadata, FrozenModel, SourceMetadata
 from feedback_ingest.utils.time import NaiveUtc
 
 Name = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)]
@@ -31,8 +31,7 @@ class Source(FrozenModel):
 
     @model_validator(mode="after")
     def _push_needs_secret(self) -> Self:
-        secret = self.webhook_secret
-        if self.mode is SourceMode.PUSH and not (secret and secret.get_secret_value()):
+        if self.mode is SourceMode.PUSH and not self.webhook_secret:  # an empty SecretStr is falsy
             msg = "a push source needs a webhook_secret"
             raise ValueError(msg)
         return self
@@ -88,8 +87,11 @@ class FeedbackRecord(FrozenModel):
         if self.metadata.source_type != self.source_type:
             msg = f"metadata is for {self.metadata.source_type}, record is {self.source_type}"
             raise ValueError(msg)
-        expected = enums.KIND_BY_SOURCE.get(self.source_type)  # None: custom picks per record type
-        if expected is not None and self.kind != expected:
+        if isinstance(self.metadata, CustomMetadata):
+            expected = enums.KIND_BY_RECORD_TYPE[self.metadata.record_type]
+        else:
+            expected = enums.KIND_BY_SOURCE[self.source_type]
+        if self.kind != expected:
             msg = f"a {self.source_type} record is a {expected}, not {self.kind}"
             raise ValueError(msg)
         return self

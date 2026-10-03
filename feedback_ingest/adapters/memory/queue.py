@@ -16,6 +16,9 @@ class MemoryRawEventQueue:
         for stored in self._events.values():
             if (stored.source_id, stored.external_event_id) == key:
                 return Enqueued(stored.id, stored.status)
+        if event.id in self._events:  # SQLite's primary key refuses it too
+            msg = f"duplicate raw event id {event.id}"
+            raise ValueError(msg)
         self._events[event.id] = event
         return Enqueued(event.id, event.status)
 

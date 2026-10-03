@@ -15,7 +15,7 @@ agents plan, build, review and hand over; this file holds only what is specific 
 uv sync
 uv run ruff check . && uv run ruff format --check . && uv run mypy . && uv run pytest
 uv run uvicorn feedback_ingest.main:app
-scripts/demo.sh            # ten-step demo; needs the network for the Discourse step
+scripts/demo.sh            # eleven-step demo; needs the network for the Discourse step
 uv run pytest -m live      # real meta.discourse.org pull, opt-in
 ```
 All four gates must be green before any commit. Settings use the `FI_` prefix (see `feedback_ingest/config.py`).

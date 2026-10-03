@@ -29,12 +29,13 @@ startup logs a warning saying so. Gates before any commit:
 2. Seeds two synthetic tenants: `lumenote` (consumer app: a Discourse pull source, two Play Store and one custom push source) and `brightwave` (B2B SaaS: Intercom, Twitter and custom push sources).
 3. Pushes the same signed Play Store review twice: `duplicate=false`, then `duplicate=true`.
 4. Pushes it to a second Play Store source of the same tenant.
-5. `lumenote` sees two review records (same `external_id`, two sources); `brightwave` sees none.
+5. `lumenote` sees two review records (same `external_id`, two sources, with rating, language and Play Store metadata); `brightwave` sees none.
 6. One custom webhook batch becomes three records of three kinds; `kind=survey` lists the survey.
-7. A malformed payload goes dead; replay runs it again and it goes dead again.
-8. A live Discourse sync against meta.discourse.org (2021-01-01 to 2021-01-05) and the resulting posts.
-9. Twenty pushes queued with the worker off, `kill -9`, restart: the backlog drains.
-10. Stops the server.
+7. `brightwave` pushes an Intercom conversation and a tweet; both come out in the same record shape.
+8. A malformed payload goes dead; replay runs it again and it goes dead again.
+9. A live Discourse sync against meta.discourse.org (2021-01-01 to 2021-01-05) and the resulting posts.
+10. Twenty pushes queued with the worker off, `kill -9`, restart: the backlog drains.
+11. Stops the server.
 
 `uv run pytest -m live` runs the live Discourse test (`tests/live/test_discourse_live.py`, needs network).
 

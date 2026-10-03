@@ -71,7 +71,6 @@ def pull_pages(
 
 # 60 s overlap: a post committed late with an older timestamp is re-read, dedup absorbs the repeat.
 # A window wholly in the past advances to its end, so an empty week does not stall the cursor.
-# `before:` takes a date, so until is tomorrow at most, which keeps today in the search.
 def _next_cursor(since: datetime, newest: datetime | None, until: datetime, now: datetime) -> str:
     moved = max(newest - _OVERLAP, since) if newest else since
     return (max(moved, until) if until < now else moved).isoformat()
@@ -102,9 +101,8 @@ def _fetch_posts(
             raw = http.get_json(f"{base_url}/t/{topic_id}/posts.json", ids)
             posts += _validated(TopicPostsIn, raw, "posts.json").post_stream.posts
         missing = wanted - {post.get("id") for post in posts}
-        if (
-            missing
-        ):  # a post can vanish between search and fetch; stop so the cursor does not pass it
+        # a post can vanish between search and fetch; stop so the cursor does not pass it
+        if missing:
             msg = f"topic {topic_id} omitted posts {sorted(missing)}"
             raise TransientError(msg)
         payloads += [post | {"topic_title": title} for post in posts]

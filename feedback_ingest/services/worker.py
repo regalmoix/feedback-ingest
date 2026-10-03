@@ -10,8 +10,10 @@ from feedback_ingest.services.pipeline import PipelineService, event_extra
 log = logging.getLogger(__name__)
 
 
-# ponytail: one thread per process. Run one consumer process; uvicorn --workers N starts N workers,
-# all reading the same env (safe, the claim is atomic). Run the worker as its own process to scale.
+# ponytail: one worker thread per process; `uvicorn --workers N` runs N, which is safe because the
+# claim is atomic. All N share one environment, so for a single consumer run separate processes (one
+# with the worker on, the rest with FI_WORKER_ENABLED=false); a standalone worker entrypoint is the
+# upgrade.
 @dataclass
 class WorkerService:
     queue: RawEventQueue

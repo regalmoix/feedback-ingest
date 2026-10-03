@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Rehearsal: the whole story against a local server in ~2 minutes. Needs uv, curl, jq.
+# Rehearsal: the whole story against a local server in ~2 minutes. Needs uv, curl, jq, openssl.
 # Every command is echoed (to stderr) before it runs so it can be copied at the whiteboard.
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -11,39 +11,8 @@ export FI_BOOTSTRAP_TOKEN="$(openssl rand -hex 32)"  # the default token is refu
 BASE="$FI_BASE_URL" FIX=tests/fixtures PY=.venv/bin/python
 TMP="$(mktemp -d)" SERVER_PID=""
 
-show() { printf '\n$' >&2; printf ' %q' "$@" >&2; printf '\n' >&2; "$@"; }
-step() { printf '\n=== %s\n' "$*"; }
-
-start_server() {  # python directly, not `uv run`, so kill -9 hits uvicorn itself
-  if curl -fs "$BASE/health" >/dev/null; then echo "port $PORT is already serving" >&2; exit 1; fi
-  "$PY" -m uvicorn feedback_ingest.main:app --port "$PORT" >>"$TMP/server.log" 2>&1 &
-  SERVER_PID=$!
-  for _ in $(seq 50); do
-    kill -0 "$SERVER_PID" 2>/dev/null || break
-    curl -fs "$BASE/health" >/dev/null && return; sleep 0.2
-  done
-  echo "server did not come up:" >&2; cat "$TMP/server.log" >&2; exit 1
-}
-stop_server() {
-  if [ -n "$SERVER_PID" ]; then kill "$SERVER_PID" 2>/dev/null || true; fi
-  wait "$SERVER_PID" 2>/dev/null || true
-  SERVER_PID=""
-}
+source scripts/demo_lib.sh
 trap 'stop_server; rm -rf "$TMP"' EXIT
-
-push() {  # source_id secret file
-  local sig; sig="$(FI_SIGN_SECRET="$2" "$PY" scripts/sign.py "$3")"
-  show curl -sS --fail-with-body -X POST "$BASE/v1/sources/$1/events" -H "X-Signature: $sig" \
-    --data-binary "@$3"
-  echo
-}
-queue() { curl -sS --fail-with-body "$BASE/admin/queue" -H "X-API-Key: $LUMENOTE_KEY"; }
-wait_idle() {
-  for _ in $(seq 60); do
-    [ "$(queue | jq '.pending + .processing + .failed')" = 0 ] && return; sleep 0.5
-  done
-  echo "queue did not drain" >&2; return 1
-}
 
 step "1. start the server"
 uv sync --quiet
@@ -69,7 +38,7 @@ wait_idle
 
 step "5. lumenote sees 2 review records (same external_id, two sources); brightwave sees 0"
 show curl -sS --fail-with-body "$BASE/v1/records?kind=review" -H "X-API-Key: $LUMENOTE_KEY" |
-  jq -c '[.[] | {source_id, external_id}]'
+  jq -c '[.[] | {source_id, external_id, rating, language, metadata}]'
 show curl -sS --fail-with-body "$BASE/v1/records?kind=review" -H "X-API-Key: $BRIGHTWAVE_KEY" | jq length
 
 step "6. custom webhook (Enterpret's public record shape): one batch, three records, three kinds"
@@ -79,7 +48,15 @@ show curl -sS --fail-with-body "$BASE/v1/records?source_id=$SURVEYS" -H "X-API-K
   jq -c '[.[] | {external_id, kind}]'
 show curl -sS --fail-with-body "$BASE/v1/records?kind=survey" -H "X-API-Key: $LUMENOTE_KEY" | jq -c '.[].metadata'
 
-step "7. malformed payload goes dead; replay runs it again and it goes dead again"
+step "7. brightwave's Intercom and Twitter sources: one uniform record shape"
+bw() { jq -r ".brightwave.sources[\"brightwave-$1\"].$2" .seed.json; }
+push "$(bw support id)" "$(bw support webhook_secret)" "$FIX/intercom/conversation.json"
+push "$(bw x id)" "$(bw x webhook_secret)" "$FIX/twitter/tweet.json"
+QUEUE_KEY="$BRIGHTWAVE_KEY" wait_idle
+show curl -sS --fail-with-body "$BASE/v1/records" -H "X-API-Key: $BRIGHTWAVE_KEY" |
+  jq -c '.[] | {source_type, kind, language, author, metadata}'
+
+step "8. malformed payload goes dead; replay runs it again and it goes dead again"
 push "$ANDROID" "$ANDROID_SECRET" "$FIX/playstore/malformed.json"
 wait_idle
 show curl -sS --fail-with-body "$BASE/admin/raw-events?status=dead" -H "X-API-Key: $LUMENOTE_KEY" |
@@ -91,7 +68,7 @@ wait_idle
 show curl -sS --fail-with-body "$BASE/admin/raw-events/$DEAD_ID" -H "X-API-Key: $LUMENOTE_KEY" |
   jq -c '{status, attempts, next_attempt_at, error: .error[:60]}'
 
-step "8. live Discourse pull (meta.discourse.org, 2021-01-01 .. 2021-01-05)"
+step "9. live Discourse pull (meta.discourse.org, 2021-01-01 .. 2021-01-05)"
 SYNC="$(show curl -sS --fail-with-body -X POST "$BASE/v1/sources/$FORUM/sync" -H "X-API-Key: $LUMENOTE_KEY")"
 echo "$SYNC" | jq -c .
 echo "$SYNC" | jq -e '.error == null' >/dev/null || { echo "sync failed" >&2; exit 1; }
@@ -99,7 +76,7 @@ wait_idle
 show curl -sS --fail-with-body "$BASE/v1/records?kind=post&limit=3" -H "X-API-Key: $LUMENOTE_KEY" |
   jq -c '[.[] | {external_id, title, author}]'
 
-step "9. 20 pushes queued, kill -9, restart: the backlog drains"
+step "10. 20 pushes queued, kill -9, restart: the backlog drains"
 stop_server
 FI_WORKER_ENABLED=false start_server  # worker off so the backlog is certain to be there
 for i in $(seq -w 1 20); do
@@ -115,6 +92,6 @@ for _ in 1 2 3; do queue; echo; sleep 1; done
 wait_idle
 show curl -sS --fail-with-body "$BASE/admin/queue" -H "X-API-Key: $LUMENOTE_KEY"; echo
 
-step "10. stop the server"
+step "11. stop the server"
 stop_server
 echo "done"

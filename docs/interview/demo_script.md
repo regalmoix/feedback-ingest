@@ -1,6 +1,6 @@
 # Demo script
 
-What to say while `scripts/demo.sh` runs. It has ten steps and takes about two minutes. For each step you get
+What to say while `scripts/demo.sh` runs. It has eleven steps and takes about two minutes. For each step you get
 the command (copied from the script), what the interviewer sees, what to say, and the follow-up it invites.
 
 Terms are in [glossary.md](glossary.md). If a follow-up goes deep, the long answers are in
@@ -10,14 +10,14 @@ the demo is in [whiteboard.md](whiteboard.md).
 ## Before you start
 
 - Run it once the day before, on the laptop you will use: `./scripts/demo.sh`.
-- It needs `uv`, `curl` and `jq`, port 8000 free, and network access for step 8 (it calls the live
+- It needs `uv`, `curl`, `jq` and `openssl`, port 8000 free, and network access for step 9 (it calls the live
   meta.discourse.org forum).
 - It deletes and recreates `demo.db`, so every run starts clean.
 - Every command is printed with a leading `$` before it runs, so the interviewer sees exactly what is called.
 - The script stops at the first failure (`set -euo pipefail` and `curl --fail-with-body`), so a run that reaches
   `done` means every step passed.
-- If there is no network: step 8 fails and the script stops. Say so, then run
-  `uv run pytest tests/e2e/test_pull_to_query.py -q`, which runs the same pull against recorded Discourse
+- If there is no network: step 9 fails and the script stops. Say so, then run
+  `uv run pytest tests/e2e/test_pull_to_query.py -q`, which runs the same pull against stubbed Discourse
   responses.
 
 Shell variables you will see: `$BASE` is `http://127.0.0.1:8000`, `$FIX` is `tests/fixtures`, `$PY` is
@@ -93,7 +93,7 @@ that is two Playstore source rows, each with its own secret. The API key and the
 creation; we store only a hash of the key. Creating a tenant takes the bootstrap token, not an API key."
 
 **Follow-up:** "Why is the Discourse source pull and the others push?"
-**Answer:** Discourse has a public API we poll live; Playstore has no review webhook in reality, so recorded
+**Answer:** Discourse has a public API we poll live; Playstore has no review webhook in reality, so synthetic
 fixtures stand in for that poller, and the transform is the same either way (ADR-003 context table).
 
 If someone opens `scripts/seed_lib.py`: `httpx2` is imported under `TYPE_CHECKING` only. Tests drive the seed
@@ -148,20 +148,21 @@ new source with a new id, and its items ingest again as new records.
 **Command:**
 ```
 curl -sS --fail-with-body "$BASE/v1/records?kind=review" -H "X-API-Key: $LUMENOTE_KEY" |
-  jq -c '[.[] | {source_id, external_id}]'
+  jq -c '[.[] | {source_id, external_id, rating, language, metadata}]'
 curl -sS --fail-with-body "$BASE/v1/records?kind=review" -H "X-API-Key: $BRIGHTWAVE_KEY" | jq length
 ```
 
 **They see:**
 ```
-[{"source_id":"<android id>","external_id":"gp:AOqpTEST-review-0001"},
- {"source_id":"<android-beta id>","external_id":"gp:AOqpTEST-review-0001"}]
+[{"source_id":"<android-beta id>","external_id":"gp:AOqpTEST-review-0001","rating":2,"language":"en",
+  "metadata":{"source_type":"playstore","app_version":"4.2.1","device":"testdevice_a1","android_os_version":34}},
+ {"source_id":"<android id>", ...the same fields...}]
 0
 ```
 
 **Say:** "Three pushes, two records: the duplicate collapsed, and the second app is its own record with the same
 external id. Brightwave runs the same query and gets zero, because every read is filtered by the tenant from the
-API key."
+API key. The same row shows the common fields (`rating`, `language`) next to typed Play Store metadata."
 
 **Follow-up:** "What if brightwave asks for lumenote's record by id?"
 **Answer:** 404, not 403, so we do not even confirm it exists (`feedback_ingest/api/records.py`,
@@ -197,7 +198,36 @@ line in the kind map. It went in with the same five-step add-a-source recipe as 
 error), and replay re-runs it after a fix; splitting a batch into per-record events is the marked upgrade
 (`feedback_ingest/connectors/custom.py`, `tests/unit/connectors/test_custom.py`).
 
-## Step 7. A malformed payload goes dead; replay runs it again
+## Step 7. Brightwave's Intercom and Twitter sources
+
+**Command:**
+```
+curl -sS --fail-with-body -X POST "$BASE/v1/sources/<brightwave-support id>/events" \
+  -H "X-Signature: $sig" --data-binary "@tests/fixtures/intercom/conversation.json"
+curl -sS --fail-with-body -X POST "$BASE/v1/sources/<brightwave-x id>/events" \
+  -H "X-Signature: $sig" --data-binary "@tests/fixtures/twitter/tweet.json"
+curl -sS --fail-with-body "$BASE/v1/records" -H "X-API-Key: $BRIGHTWAVE_KEY" |
+  jq -c '.[] | {source_type, kind, language, author, metadata}'
+```
+(the script waits on brightwave's queue with `QUEUE_KEY="$BRIGHTWAVE_KEY" wait_idle`).
+
+**They see:** two 202s, then
+```
+{"source_type":"intercom","kind":"conversation","language":null,"author":"Riley Placeholder",
+ "metadata":{"source_type":"intercom","part_count":0,"tags":["billing"],"state":"open"}}
+{"source_type":"twitter","kind":"post","language":"en","author":"@sample_tweeter",
+ "metadata":{"source_type":"twitter","country":"CA","retweets":3,"likes":17}}
+```
+
+**Say:** "Two more sources, two very different payloads: an Intercom notification wrapping a conversation, and
+a tweet. They come out in the same record shape, with the common fields filled where the source has them and
+the rest in typed metadata. Intercom sends no language, so it stays null rather than guessed."
+
+**Follow-up:** "Is the Twitter webhook real?"
+**Answer:** The transform is real for this payload shape, but the CRC handshake Twitter needs to register a
+webhook is not built; say that first (README, "Known gaps").
+
+## Step 8. A malformed payload goes dead; replay runs it again
 
 **Command:**
 ```
@@ -224,7 +254,7 @@ payload. After a real connector fix, the same call brings it back."
 **Answer:** It retries with backoff (2, 4, 8, 16 seconds) and goes dead after 5 attempts
 (`feedback_ingest/services/pipeline.py`, `tests/api/test_admin_api.py`).
 
-## Step 8. Live Discourse pull
+## Step 9. Live Discourse pull
 
 **Command:**
 ```
@@ -258,7 +288,7 @@ day, so about 500 posts per day is the hard limit. Past that the sync stops with
 lower it with `PATCH /v1/sources/{id}` and `{"config": {"window_days": "1"}}`
 (`feedback_ingest/connectors/discourse_pull.py`).
 
-## Step 9. 20 pushes queued, kill -9, restart
+## Step 10. 20 pushes queued, kill -9, restart
 
 **Command:**
 ```
@@ -286,7 +316,7 @@ point: the backlog was never in memory."
 **Answer:** That row stays `processing` with a 30-second lease; when the lease runs out it is claimed again, and
 the upsert makes the second run safe (`feedback_ingest/adapters/sqlalchemy/raw_event_queue.py`).
 
-## Step 10. Stop the server
+## Step 11. Stop the server
 
 **Command:** the script's `stop_server` (a plain `kill` of the uvicorn process), then `echo "done"`.
 

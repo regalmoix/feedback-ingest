@@ -7,7 +7,12 @@ from pydantic import ValidationError
 from feedback_ingest.connectors.base import RecordContent, new_record
 from feedback_ingest.connectors.registry import CONNECTORS
 from feedback_ingest.domain.enums import EventStatus, SourceType
-from feedback_ingest.domain.metadata import DiscourseMetadata, IntercomMetadata, TwitterMetadata
+from feedback_ingest.domain.metadata import (
+    CustomMetadata,
+    DiscourseMetadata,
+    IntercomMetadata,
+    TwitterMetadata,
+)
 from feedback_ingest.domain.models import FeedbackRecord, RawEvent, Source, Tenant
 from feedback_ingest.services.pull import PullResult
 
@@ -48,6 +53,14 @@ def test_new_record_fills_kind_from_the_source_type_and_a_wrong_kind_is_refused(
     assert record.model_dump()["kind"] == "post"
     with pytest.raises(ValidationError, match="a twitter record is a post, not review"):
         FeedbackRecord.model_validate(record.model_dump() | {"kind": "review"})
+
+
+def test_a_custom_records_kind_must_match_its_record_type() -> None:
+    record = new_record(SOURCE, CONNECTORS[SourceType.TWITTER], "x1", **CONTENT)
+    custom = {"source_type": "custom", "metadata": CustomMetadata(record_type="REVIEW")}
+    assert FeedbackRecord.model_validate(record.model_dump() | custom | {"kind": "review"})
+    with pytest.raises(ValidationError, match="a custom record is a review, not survey"):
+        FeedbackRecord.model_validate(record.model_dump() | custom | {"kind": "survey"})
 
 
 @pytest.mark.parametrize("name", ["", "   ", "x" * 201])
