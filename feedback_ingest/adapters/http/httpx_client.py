@@ -30,9 +30,11 @@ class HttpxClient:
                 _raise_for_status(response.status_code, url)
                 body = self._read(response)
         except (httpx.InvalidURL, httpx.UnsupportedProtocol) as exc:
-            raise PermanentError(str(exc)) from exc
+            msg = f"{type(exc).__name__}: not a usable http(s) URL"  # _safe(url) would re-raise
+            raise PermanentError(msg) from exc
         except httpx.RequestError as exc:
-            raise TransientError(str(exc)) from exc
+            msg = f"{type(exc).__name__} from {_safe(url)}"
+            raise TransientError(msg) from exc
         try:
             data = json.loads(body)
         except (ValueError, RecursionError) as exc:

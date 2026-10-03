@@ -100,7 +100,7 @@ def _fetch_posts(
             ids = [("post_ids[]", str(post_id)) for post_id in chunk]
             raw = http.get_json(f"{base_url}/t/{topic_id}/posts.json", ids)
             posts += _validated(TopicPostsIn, raw, "posts.json").post_stream.posts
-        missing = wanted - {post.get("id") for post in posts}
+        missing = wanted - {p["id"] for p in posts if isinstance(p.get("id"), int)}
         # a post can vanish between search and fetch; stop so the cursor does not pass it
         if missing:
             msg = f"topic {topic_id} omitted posts {sorted(missing)}"

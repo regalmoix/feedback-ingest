@@ -69,9 +69,9 @@ show curl -sS --fail-with-body "$BASE/admin/raw-events/$DEAD_ID" -H "X-API-Key: 
   jq -c '{status, attempts, next_attempt_at, error: .error[:60]}'
 
 step "9. live Discourse pull (meta.discourse.org, 2021-01-01 .. 2021-01-05)"
-SYNC="$(show curl -sS --fail-with-body -X POST "$BASE/v1/sources/$FORUM/sync" -H "X-API-Key: $LUMENOTE_KEY")"
+SYNC="$(show curl -sS -X POST "$BASE/v1/sources/$FORUM/sync" -H "X-API-Key: $LUMENOTE_KEY")"
 echo "$SYNC" | jq -c .
-echo "$SYNC" | jq -e '.error == null' >/dev/null || { echo "sync failed" >&2; exit 1; }
+echo "$SYNC" | jq -e 'has("pages") and .error == null' >/dev/null || { echo "sync failed" >&2; exit 1; }
 wait_idle
 show curl -sS --fail-with-body "$BASE/v1/records?kind=post&limit=3" -H "X-API-Key: $LUMENOTE_KEY" |
   jq -c '[.[] | {external_id, title, author}]'

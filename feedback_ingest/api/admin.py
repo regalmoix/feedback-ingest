@@ -28,6 +28,9 @@ def replay_raw_events(
     limit: Limit = 500,
 ) -> dict[str, int]:
     queue, now = ctx.adapters.queue, ctx.adapters.clock.now()
+    if source_id is not None and ctx.adapters.sources.get(source_id, tenant_id=tenant.id) is None:
+        msg = f"source {source_id} not found"
+        raise NotFoundError(msg)
     events = queue.list_by_status(
         EventStatus(status), tenant_id=tenant.id, source_id=source_id, limit=limit
     )

@@ -1,3 +1,6 @@
+from collections.abc import Sequence
+from typing import Any
+
 import pytest
 from fastapi.testclient import TestClient
 from helpers import (
@@ -79,6 +82,23 @@ def test_502_with_the_pull_result_when_the_source_fails(
     result = _sync(app_client, forum.id)
     assert (result["status"], result["pages"]) == (502, 0)
     assert result["error"] == "503 from https://forum.example.test/search.json"
+
+
+def test_502_when_a_post_id_is_not_an_int(
+    app_client: TestClient, forum: Source, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    http = app_state(app_client).pull.http
+    get_json = http.get_json
+
+    def bad_ids(url: str, params: Sequence[tuple[str, str]] = ()) -> dict[str, Any]:
+        if url.endswith("/posts.json"):
+            return {"post_stream": {"posts": [{"id": [1]}]}}
+        return get_json(url, params)
+
+    monkeypatch.setattr(http, "get_json", bad_ids)
+    result = _sync(app_client, forum.id)
+    assert result["status"] == 502
+    assert "omitted posts" in str(result["error"])
 
 
 def test_503_when_storage_is_down(

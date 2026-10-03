@@ -65,7 +65,7 @@ class PullService:
                 cursor = self._advance(source, page.cursor)
                 pages += 1
         except (TransientError, PermanentError) as exc:  # anything else is ours: let it raise
-            log.warning("pull stopped at the saved cursor: %s", exc, extra=extra)
+            log.warning("pull stopped at the saved cursor: %s", exc, exc_info=exc, extra=extra)
             error = str(exc)
         log.info("pulled %d pages: %d new, %d duplicates", pages, accepted, duplicates, extra=extra)
         return PullResult(

@@ -39,10 +39,15 @@ def _ingest(ctx: AppState, source_id: str, body: bytes, headers: Mapping[str, st
         msg = "source is disabled"
         raise ConflictError(msg)
     try:
-        payload = json.loads(body)
+        payload = json.loads(body, parse_constant=_not_json)
         to_json(payload)  # nesting json.loads accepts but storage and validation would not
     except (ValueError, RecursionError):  # PydanticSerializationError is a ValueError
         payload = None
     if not isinstance(payload, dict):
         raise HTTPException(HTTPStatus.BAD_REQUEST, detail="body must be a JSON object")
     return ctx.ingestion.accept(source, payload)
+
+
+def _not_json(constant: str) -> None:
+    msg = f"{constant} is not JSON"
+    raise ValueError(msg)

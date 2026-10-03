@@ -20,3 +20,7 @@ def test_strip_tags_hides_script_and_style_and_breaks_on_non_inline_tags() -> No
 
 def test_a_stray_closing_script_tag_does_not_hide_the_rest() -> None:
     assert strip_tags("before</script>after") == "before after"
+
+
+def test_an_unknown_marked_section_does_not_raise() -> None:
+    assert strip_tags("<![bogus[ x ]]> hi &amp; bye") == "hi & bye"

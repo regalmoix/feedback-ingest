@@ -1,3 +1,5 @@
+import re
+from html import unescape
 from html.parser import HTMLParser
 from typing import override
 
@@ -35,6 +37,9 @@ class _TextParser(HTMLParser):
 
 def strip_tags(html: str) -> str:
     parser = _TextParser()
-    parser.feed(html)
-    parser.close()
+    try:
+        parser.feed(html)
+        parser.close()
+    except AssertionError:  # stdlib raises this on an unknown marked section (<![x[ ... ]]>)
+        return " ".join(unescape(re.sub(r"<[^>]*>", " ", html)).split())
     return " ".join("".join(parser.parts).split())

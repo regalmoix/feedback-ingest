@@ -89,6 +89,19 @@ def test_request_failures_are_transient(error: type[httpx.RequestError]) -> None
         HttpxClient(httpx.MockTransport(handler)).get_json("https://example.test")
 
 
+def test_request_failures_keep_upstream_bytes_out_of_the_message() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        msg = "illegal header line: bytearray(b'secret-banner')"
+        raise httpx.RemoteProtocolError(msg, request=request)
+
+    client = HttpxClient(httpx.MockTransport(handler))
+    with pytest.raises(
+        TransientError, match=r"RemoteProtocolError from https://example\.test/x"
+    ) as raised:
+        client.get_json("https://example.test/x")
+    assert "secret-banner" not in str(raised.value)
+
+
 def test_error_messages_drop_credentials_from_the_url() -> None:
     with pytest.raises(PermanentError) as raised:
         _client(404).get_json("https://user:hunter2@example.test/x")

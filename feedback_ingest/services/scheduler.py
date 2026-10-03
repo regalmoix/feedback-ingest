@@ -8,7 +8,7 @@ from feedback_ingest.domain.models import Source
 from feedback_ingest.services.pull import PullService
 
 log = logging.getLogger(__name__)
-# short so shutdown is quick; an abandoned sync resumes from its saved page cursor
+# quick shutdown; an abandoned sync restarts its window from the saved cursor (dedup absorbs it)
 _JOIN_SECONDS = 5
 
 
@@ -32,7 +32,9 @@ class SchedulerService:
         if self._thread is not None:
             self._thread.join(timeout=_JOIN_SECONDS)
             if self._thread.is_alive():
-                log.warning("scheduler still syncing on stop; it resumes from the saved cursor")
+                log.warning(
+                    "scheduler still syncing on stop; it restarts from the saved cursor next tick"
+                )
 
     @property
     def alive(self) -> bool:

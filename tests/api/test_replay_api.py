@@ -42,6 +42,16 @@ def test_bulk_replay_resets_only_the_callers_matching_rows(
     )
 
 
+def test_bulk_replay_of_an_unknown_or_foreign_source_is_404(
+    app_client: TestClient, source_a: Source, source_b: Source
+) -> None:
+    for source_id in ("nope", source_b.id):
+        replay = f"/admin/raw-events/replay?source_id={source_id}"
+        assert app_client.post(replay, headers=MINE).status_code == 404
+    replay = f"/admin/raw-events/replay?source_id={source_a.id}"
+    assert app_client.post(replay, headers=MINE).json() == {"replayed": 0}
+
+
 def test_responses_leave_out_the_tenant_id(app_client: TestClient, source_a: Source) -> None:
     event_id = push(app_client, source_a.id, REVIEW).json()["raw_event_id"]
     detail = app_client.get(f"/admin/raw-events/{event_id}", headers=MINE).json()

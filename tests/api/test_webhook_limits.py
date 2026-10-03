@@ -55,6 +55,21 @@ def test_json_nested_too_deep_to_store_is_400(app_client: TestClient, source_a: 
     assert push(app_client, source_a.id, deep).status_code == 400
 
 
+def test_nan_and_infinity_are_not_json(app_client: TestClient, source_a: Source) -> None:
+    for constant in (b"NaN", b"Infinity", b"-Infinity"):
+        body = b'{"reviewId": "r1", "x": ' + constant + b"}"
+        assert push(app_client, source_a.id, body).status_code == 400
+
+
+def test_a_rejected_webhook_is_logged_with_its_source(
+    app_client: TestClient, source_a: Source, caplog: pytest.LogCaptureFixture
+) -> None:
+    assert push(app_client, source_a.id, b"{}", "a-wrong-secret-0000").status_code == 401
+    [record] = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert vars(record)["source_id"] == source_a.id
+    assert "401" in record.getMessage()
+
+
 @pytest.mark.usefixtures("source_a")
 def test_storage_down_logs_the_raw_event_id_from_the_path(
     app_client: TestClient,
