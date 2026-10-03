@@ -121,9 +121,9 @@ WHERE COALESCE(excluded.source_updated_at, excluded.source_created_at)
 ### Metadata in code
 
 - In SQLAlchemy the column is called `metadata`, but the Python attribute is `source_metadata`. SQLAlchemy's declarative `Base` already uses the name `.metadata`, and reusing it crashes at import:
-  `source_metadata: Mapped[dict[str, Any]] = mapped_column("metadata", JSON)`.
+  `source_metadata: Mapped[dict[str, object]] = mapped_column("metadata", JSON)`.
 - Write it with `model.model_dump(mode="json")`. This turns datetimes and enums into plain JSON values.
-- Each metadata model has a `source_type: Literal["playstore"]` (and so on) field. Together they form a discriminated union: `Annotated[DiscourseMetadata | PlaystoreMetadata | TwitterMetadata | IntercomMetadata | CustomMetadata, Field(discriminator="source_type")]`. Pydantic and mypy then always know which model a blob is.
+- Each metadata model has a `source_type: Literal[SourceType.PLAYSTORE]` (and so on) field. Together they form a discriminated union: `Annotated[DiscourseMetadata | PlaystoreMetadata | TwitterMetadata | IntercomMetadata | CustomMetadata, Field(discriminator="source_type")]`. Pydantic and mypy then always know which model a blob is.
 - Strict on write: the transformer builds the model from the payload, so wrong types fail before any database write.
 - Lenient on read: models ignore unknown keys (Pydantic's default), and every new field must have a default. Old blobs still load. Renaming or removing a field means bumping `connector_version` and replaying.
 

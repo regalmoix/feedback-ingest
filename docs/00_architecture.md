@@ -50,8 +50,7 @@ answer and kept, so a fixed connector can reprocess it).
 
 ## Components
 
-Routers are thin. Services depend only on ports (Protocols). Adapters are the only code that touches
-SQLAlchemy or httpx. `wiring.py` builds the adapters; the lifespan in `main.py` builds the services from them
+Routers are thin. Services import ports, the domain and the connector registry; never adapters, SQLAlchemy or httpx. Adapters are the only code that runs SQLAlchemy queries or httpx calls (`api/errors.py` only maps SQLAlchemy exception types to 503). `wiring.py` builds the adapters; the lifespan in `main.py` builds the services from them
 and starts and stops the worker and scheduler.
 
 ```mermaid
@@ -296,7 +295,7 @@ Every `__init__.py` under `feedback_ingest/` is an empty package marker.
 | `api/body_limit.py` | Middleware: any request body over 1 MiB gets 413, whether declared or streamed |
 | `api/schemas.py` | Request and response models for the HTTP API |
 | `api/ingest.py` | Push webhook: source by id (404), push-only (409), signature (401), disabled (409), JSON check (400), `IngestionService.accept`, 202 |
-| `api/sync.py` | Manual pull trigger for one enabled pull source; 502 with the `PullResult` when the source failed, 409 if it is already syncing |
+| `api/sync.py` | Manual pull trigger for one enabled pull source; 502 with the `PullResult` when the source failed, 409 if it is not an enabled pull source or is already syncing |
 | `api/sources.py` | Create, list, get and patch (`enabled`, `config` re-checked) sources; generates and masks webhook secrets |
 | `api/records.py` | Tenant-scoped record query and single-record read |
 | `api/admin.py` | Raw-event list (newest first), detail with payload, single and bulk replay, and queue counts per tenant |

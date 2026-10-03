@@ -91,7 +91,7 @@ The terms are in teaching order, so each one only uses words defined above it.
 
 ### Accepted does not mean processed
 - **What:** A 202 promises the payload is saved on disk. It does not promise a record exists yet; the worker makes the record a moment later, or the event goes dead with its reason.
-- **Where:** The 202 from `api/ingest.py`, then the worker in `services/worker.py`. Enterpret's public webhook docs say the same about their 200.
+- **Where:** The 202 from `api/ingest.py`, then the worker in `services/worker.py`. Their webhook article has a section on a 200 OK whose records still do not appear in the dashboard; our 202 draws the same line: saved on disk, processed later.
 - **Why:** It is what lets the webhook stay fast and still lose nothing: saving is quick, transforming can retry later.
 
 ### 503 on DB down

@@ -66,7 +66,7 @@ plan → [per phase: design doc → implement → review fleet → fix → gates
 - Strict typing at the boundaries (Pydantic or equivalent for every shape crossing a boundary); no `Any`
   outside raw inbound payloads.
 - Services are classes built from ports (Protocols); adapters implement ports; one real adapter and one
-  in-memory fake per port, both run through the same contract tests.
+  in-memory fake per store and queue port (HttpClient and Clock have test stubs only), both run through the same contract tests.
 - Files under about 120 lines; split rather than grow. Public surface small; helpers private.
 - Minimal comments: `# ponytail:` markers and rare "why" notes only.
 - Synthetic fixtures only; never real names, ids, keys or customer text.

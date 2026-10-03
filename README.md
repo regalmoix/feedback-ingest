@@ -168,6 +168,7 @@ Not built:
 - Twitter delete events: they fail validation and go dead; the tweet stays visible.
 - Intercom redactions: `conversation_part.redacted` is an unsupported topic and goes dead on purpose, so a privacy request is not dropped silently. `conversation.deleted` is not special-cased: it goes dead on validation, or upserts if it carries a full conversation.
 - Pull-side deletions: Discourse search never returns deleted posts, so a deleted forum post stays visible.
+- Content-blind duplicates: the raw-event key is item id plus its last-changed time, so a resend with the same id and time but a changed body is answered `duplicate: true` and dropped, even if the stored copy is dead. Real sources stamp every edit with a new time, so this only hits a sender that re-sends a corrected body under the old time; a payload that fails its input model is keyed by its hash, so a corrected one is a new event. Their webhook skips repeated ids by default too. Upgrade: when the stored row is dead and the body differs, overwrite the payload and requeue.
 
 Kept on purpose (raised in review, kept with a reason):
 

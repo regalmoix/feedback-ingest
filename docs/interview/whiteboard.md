@@ -122,7 +122,7 @@ one id takes me from ingress to record. Pull log lines carry the source id inste
 Write them in a corner and point at the boxes:
 
 1. **Durable before ack.** The insert commits before the 202. DB down means 503 and the sender retries.
-   Accepted does not mean processed: Enterpret's public webhook docs say the same about their 200.
+   Their webhook article has a section on a 200 OK whose records still do not appear in the dashboard; our 202 draws the same line: saved on disk, processed later.
 2. **Idempotent by key.** (source, external id) on records; (source, external event id) on raw events.
 3. **Replayable.** The parsed JSON payload is saved before we answer (not the raw bytes, so the signature
    cannot be re-checked from storage; a pulled Discourse post also carries the topic title we add); a
@@ -135,18 +135,18 @@ Write them in a corner and point at the boxes:
 | Two workers | Second worker box, same claim arrow | "Same single UPDATE. On Postgres I add SKIP LOCKED to that one query." |
 | 10k burst | Thick arrow into the table | "Inserts are cheap, the 202 stays fast, the backlog drains at the worker's pace. SQLite is one writer. Past that I move to Postgres (extensions recipe 2)." |
 | Edits out of order | Two arrows into one record, timestamps | "COALESCE(updated, created) must not be older. Equal is accepted, so replay works. That is the COALESCE rule, applied in Python today inside BEGIN IMMEDIATE; the SQL ON CONFLICT … WHERE form is the Postgres upgrade (extensions recipe 2). Their engineering blog describes the same idea: version-based rejection of stale updates." |
-| Source deletes | Tombstone column | "Only Discourse push payloads carry a delete today and it becomes a tombstone; Twitter and Intercom deletes go dead on purpose; pull-side Discourse deletes are invisible (README § not built)." |
+| Source deletes | Tombstone column | "Only Discourse push payloads carry a delete today and it becomes a tombstone. Twitter deletes and Intercom redactions go dead on purpose; an Intercom `conversation.deleted` is not special-cased (dead on validation, or an upsert if it carries a full conversation); pull-side Discourse deletes are invisible (README, not built)." |
 | Transformer bug last week | Arrow from raw_events back into the pipeline | "Fix the connector, bump its version, replay. No re-fetch, nothing lost." |
 | Noisy tenant | Two tenants' arrows into one queue | "Today one queue, so one tenant's burst delays the others. That is a noisy neighbour. Their engineering blog says they partition events by tenant for this reason. My next step is the same idea: claim round-robin by tenant, then a partition per tenant or tier." |
 | Kafka | Box behind the queue port | "Swap the adapter, and change the retry model. Kafka: consumer offsets instead of leases, and retry topics because there is no per-message delay. SQS would use a visibility timeout." |
-| Where it fits in Enterpret | Arrow out of feedback_records to a box "Understand" | "We are Unify. Records go downstream to the taxonomy and Wisdom. Their blog names ClickHouse as the analytics tier; that would be a projection fed from these records. PII redaction before storage is on their public pages; we did not build it." |
+| Where it fits in Enterpret | Arrow out of feedback_records to a box "Understand" | "We are Unify. Records go downstream to the taxonomy and Wisdom. Their blog names ClickHouse as the analytics tier; that would be a projection fed from these records. Their platform page says PII is detected and obfuscated before ingestion; we did not build that and only keep PII out of logs and error text." |
 | Did you write this | Nothing | "I designed it and reviewed every file; AI agents wrote and audited the code. Every big decision was argued by five independent advisor agents and is written up in docs/decisions." |
 
 ## Ports and adapters, if they ask about the layering
 
 Draw a dashed vertical line. Left: services (ingestion, pipeline, worker, pull, scheduler). Right: adapters
 (SQLAlchemy stores and queue, httpx client, system clock) and their in-memory fakes. On the line: ports
-[ports/*.py], small Protocols. Say: "Services only import the ports. The same contract test runs against the
+[ports/*.py], small Protocols. Say: "Services import ports, the domain and the connector registry; never adapters, SQLAlchemy or httpx. The same contract test runs against the
 SQLite adapter and the in-memory fake, so I know the fake behaves like the real thing. That is why a Postgres
 swap stays inside the adapters (extensions recipe 2)."
 

@@ -118,6 +118,7 @@ Users and accounts (https://helpcenter.enterpret.com/en/articles/8611269-syncing
   - `POST https://api.enterpret.com/webhook/custom/all`, header `api-key`.
   - Limits: 2000 req/min max (an older/other source says recommended 100 RPM), 200 KB per request, ~100 records per batch.
   - Errors return `msg`, `code`, `referenceID`; success is HTTP 200.
+  - The article has a troubleshooting section "If the API returns 200 OK but records don't appear in your dashboard" (verified 2026-10-03), so a 200 is an accept, not a processing guarantee.
   - Codes: `ErrCodeInternalError` 500 (retriable), `ErrCodeInvalidRequestArgument` 400, `ErrCodeMissingRequiredField` 400, `ErrCodeRateLimitExceeded` 429 (retriable), `ErrCodePayloadTooLarge` 413.
   - Setup: Integrations -> +New Integration -> Webhook; choose Feedback, User or Account integration; description of source and feedback type required.
 - Users/accounts webhooks: see section 3 (https://helpcenter.enterpret.com/en/articles/8611269-syncing-users-and-accounts).

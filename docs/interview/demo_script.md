@@ -225,7 +225,7 @@ the rest in typed metadata. Intercom sends no language, so it stays null rather 
 
 **Follow-up:** "Is the Twitter webhook real?"
 **Answer:** The transform is real for this payload shape, but the CRC handshake Twitter needs to register a
-webhook is not built; say that first (README, "Known gaps").
+webhook is not built; say that first (README, "What is deliberately not built").
 
 ## Step 8. A malformed payload goes dead; replay runs it again
 

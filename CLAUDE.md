@@ -23,7 +23,7 @@ All four gates must be green before any commit. Settings use the `FI_` prefix (s
 
 ## Repo rules
 - Python 3.12, uv, FastAPI, SQLAlchemy 2 (SQLite by default, `FI_DATABASE_URL` swaps), Pydantic v2, mypy strict, ruff ALL.
-- Layout: `domain/` (models), `ports/` (Protocols), `adapters/` (sqlalchemy, memory, http), `connectors/` (one per source + registry), `services/`, `api/`, `wiring.py`, `main.py`. Services import ports only.
+- Layout: `domain/` (models), `ports/` (Protocols), `adapters/` (sqlalchemy, memory, http), `connectors/` (one per source + registry), `services/`, `api/`, `wiring.py`, `main.py`. Services import ports, the domain and the connector registry; never adapters, SQLAlchemy or httpx.
 - Every store and queue port has a SQLite adapter and a memory fake that run the same contract tests under
   `tests/adapters/` (HttpClient and Clock have test stubs only).
 - Webhooks are push-only and take no API key: the source id picks the source, its HMAC proves the sender.

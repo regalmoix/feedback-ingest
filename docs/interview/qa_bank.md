@@ -71,7 +71,7 @@ is recipe 3 in [extensions.md](extensions.md).
 
 **Say:** A port is a small interface the services call. Every store and queue port has a SQLite adapter and a
 memory fake that run the same contract tests (HttpClient and Clock have test stubs only), so I know the fake
-behaves like SQLite, and a database or queue swap stays inside the adapters, not the services.
+behaves like SQLite, and a database or queue swap stays inside the adapters, not the services. Services import ports, the domain and the connector registry; never adapters, SQLAlchemy or httpx.
 
 **Go deeper:** The ports are tenant, source and feedback stores, the raw event queue, an HTTP client and a
 clock. Services import only ports, never SQLAlchemy or httpx. The rule from the decision review was: a port no test
@@ -219,8 +219,7 @@ stopped by the fence: its finish call only applies if the row still has the same
 of the payload when it has no usable id. Including the time matters: a real edit has a new time, so it is a new
 event and is not dropped. Demo step 3 shows this live. One case warns: if the stored copy is already dead, the
 duplicate leaves it dead. We log a WARNING, `duplicate of a dead raw event; left dead, replay it`, and
-the operator replays it. Re-running it automatically would be pointless: a byte-identical duplicate cannot carry
-a fix; only a connector change can, so replay after a version bump.
+the operator replays it. Re-running it automatically would be pointless for a byte-identical copy. The honest gap: a changed body under the same id and time is also dropped, because the key is the version, not the content (README, not built); real sources stamp edits with a new time, and a body that fails its input model is keyed by its hash, so a corrected one gets through.
 
 **Point at:** `feedback_ingest/services/ingestion.py`, `feedback_ingest/connectors/playstore.py`
 (`external_event_id`), `tests/e2e/test_push_to_query.py`, `tests/unit/services/test_ingestion.py`
@@ -247,7 +246,7 @@ attempt with a short reason. It is never retried and never thrown away, so after
 **Go deeper:** The error is written as `field: message` pairs without the input values, capped at 500
 characters, so customer text does not reach logs or the `error` column. The raw row is still stored, because
 `external_event_id` never raises: it falls back to a payload hash. A Play Store review with no user comment is
-also dead, with `review has no user comment`, so a bad payload never looks like "no data". Demo step 7 replays a
+also dead, with `review has no user comment`, so a bad payload never looks like "no data". Demo step 8 replays a
 bad payload and shows it go dead again, which proves replay really re-runs it.
 
 **Point at:** `feedback_ingest/services/pipeline.py` (`_describe`), `tests/unit/services/test_pipeline.py`
@@ -744,10 +743,9 @@ compute a hash, which is harder for a quick script than pasting a key.
 **Point at:** `feedback_ingest/api/ingest.py`, `feedback_ingest/utils/signing.py`, `tests/api/test_push_api.py`
 (`test_no_api_key_is_needed_but_a_signature_is`).
 
-### Q47. What does 202 mean here, compared with their "accepted does not mean processed"?
+### Q47. What does 202 mean here, compared with their webhook's 200?
 
-**Say:** The same idea. Their webhook docs say a 200 means accepted, not processed; our 202 means the raw payload
-is committed to `raw_events`, and the worker builds the records later.
+**Say:** Their webhook article has a section on a 200 OK whose records still do not appear in the dashboard; our 202 draws the same line: saved on disk, processed later. If we cannot save, we answer 503 so the sender retries.
 
 **Go deeper:** We picked 202 because that code means "accepted for processing". If we cannot save, we answer 503
 so the sender retries; we never say yes to something that is not on disk. The gap: the sender cannot ask about
@@ -809,10 +807,9 @@ incremental copy can ask what changed since last time. The rest is Q24.
 
 **Point at:** `feedback_ingest/adapters/sqlalchemy/tables.py` (`FeedbackRecordRow`), Q24.
 
-### Q52. Why no PII redaction, when their docs say they scrub before ingestion?
+### Q52. Why no PII redaction, when their platform page says PII is obfuscated before ingestion?
 
-**Say:** Their platform page says PII such as card numbers and SSNs is detected and obfuscated before ingestion.
-We did not build that; we only keep customer text out of logs and error messages.
+**Say:** Their platform page says PII is detected and obfuscated before ingestion; we did not build that and only keep PII out of logs and error text.
 
 **Go deeper:** It would go in `IngestionService.accept`: compute the duplicate key from the original payload,
 replace emails, phones and card numbers with placeholders like `[EMAIL]`, then enqueue. It must run before

@@ -43,7 +43,7 @@ Jargon used below:
 
 ### The contract (`feedback_ingest/connectors/base.py`)
 
-Built version (updated after Fleet 2; imports trimmed):
+Built version (as built; imports trimmed):
 
 ```python
 class PullPage(FrozenModel):
@@ -155,7 +155,7 @@ A push source without a `webhook_secret` is rejected by the `Source` model itsel
    - **Twitter's CRC handshake** is a GET challenge, not a signature check. It is an extension (a `handshake` method), added only if Twitter becomes a real webhook.
    - The algorithm belongs to the source type, so it lives on the connector. The secret belongs to the tenant's instance, so it lives on the Source row.
 
-4. **Pull shape: `pull(source, http, clock, deadline) -> Iterator[PullPage]`, where `PullPage(payloads, cursor)`.** (Fleet 2 replaced `now` with `clock` and `deadline`.)
+4. **Pull shape: `pull(source, http, clock, deadline) -> Iterator[PullPage]`, where `PullPage(payloads, cursor)`.** (the second review round replaced `now` with `clock` and `deadline`.)
    - The poll service enqueues one page's payloads and commits them. Only then does it save `page.cursor`.
    - Built: Discourse holds the cursor back until the final page of its search window (see the last point below). So if a call fails mid-window, the stored cursor has not moved, and the next tick restarts the whole window. The payloads already accepted stay in `raw_events`, and rule 2 drops them when they come again.
    - Pull treats permanent and transient upstream errors the same today: stop, keep the cursor, put the message in `PullResult.error`, retry on the next tick.
@@ -173,7 +173,7 @@ A push source without a `webhook_secret` is rejected by the `Source` model itsel
 8. **Webhook routing, end to end** (amended in Phase 6: a webhook authenticates like a real one, with no API key):
    1. `POST /v1/sources/{source_id}/events` arrives with `X-Signature` and no `X-API-Key`. A real sender (Intercom, Zendesk) cannot add our header.
    2. `SourceStore.get_by_id(source_id)`. An unknown id gives 404. The id is an unguessable uuid, so it picks the source but proves nothing by itself.
-   3. Webhooks are push-only (amended in Fleet 2): a pull-mode source gives 409 "source does not accept webhooks", before any signature check, and `POST /v1/sources` rejects a `webhook_secret` on a pull source with 422. A push source always has a secret (the `Source` model requires one).
+   3. Webhooks are push-only (amended in the second review round): a pull-mode source gives 409 "source does not accept webhooks", before any signature check, and `POST /v1/sources` rejects a `webhook_secret` on a pull source with 422. A push source always has a secret (the `Source` model requires one).
    4. `CONNECTORS[source.type].verify_signature(secret, raw_body_bytes, headers)` runs on the raw bytes, before JSON parsing. A failure gives 401. This is what proves the caller. Only then does a disabled source give 409, so source state is told only to a caller who proved itself.
    5. We parse the JSON (400 if it is not an object or is nested too deep), compute `external_event_id`, and call `RawEventQueue.enqueue`. It returns `Enqueued(id, status)`, the stored row's id and status (the existing row on a duplicate). New or duplicate, the reply is 202 with that id. The signature check, the parse and the insert run in the threadpool. A body over 1 MiB is refused with 413 before any of this.
    6. Later, the worker claims the row, loads the Source, calls `transform`, upserts each record, and marks the event processed. A `ValidationError` or `PermanentError` marks it dead. A `TransientError` marks it failed and schedules a retry.

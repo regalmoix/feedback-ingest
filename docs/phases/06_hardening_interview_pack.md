@@ -2,9 +2,9 @@
 
 Status: historical design record.
 
-Status: designed 2026-10-03. Depends on Phases 3–5 being committed.
+Status: implemented 2026-10-03 (commits 63883ad, d77cc76, 9d6a649, cadea41); review fixes applied after.
 
-**Update after Fleet 2 (commit cbb788c).** This is the design as written; the code wins. Built differently:
+**Update after the second review round (commit cbb788c).** This is the design as written; the code wins. Built differently:
 - The log format adds `attempts` to the keys, and `\r` and `\n` in messages are escaped. Worker and pipeline lines carry `raw_event_id`; pull lines carry `tenant_id` and `source_id`; startup lines show "-".
 - `/health` has no `uptime_seconds`, `processed_total` or `dead_total` counters. It shows global queue counts, worker and scheduler flags, and `failing_sources` (a count).
 - `GET /admin/raw-events` filters by `status` and `limit` only. Replay by source is bulk replay, `POST /admin/raw-events/replay?source_id=&status=&limit=`; there is no time-window filter.

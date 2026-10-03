@@ -50,8 +50,7 @@ This is exactly the five-step recipe, done against Enterpret's public webhook sh
    `tests/unit/connectors/test_custom.py`, and `tests/api/test_custom_webhook.py` (one push, three records of three
    kinds, a resend is a duplicate). Demo step 6 pushes the batch.
 
-Their semantics already matched ours: a resent delivery is a duplicate (raw-event key), a newer `updatedAt`
-wins on upsert, and 202 means accepted, not processed. Not copied: their nested typed metadata arrays (we take
+Their public docs describe a repeated id skipped by default (our raw-event key) and, as an opt-in, replaced by the new payload on the same id (our upsert always takes an equal or newer version). Their webhook article has a section on a 200 OK whose records still do not appear in the dashboard; our 202 draws the same line: saved on disk, processed later. Not copied: their nested typed metadata arrays (we take
 the flat form), the `surveyResponse` / `conversation.msgs` content shapes (we take one `text`), and partial
 acceptance of a batch (one bad record dead-letters the batch; marked `ponytail:` in `custom.py`).
 

@@ -109,7 +109,7 @@ tests/e2e/{test_multi_source_same_type,test_demo_smoke}.py  tests/unit/connector
 - Tailoring pass: the seeded tenants are now `lumenote` (Discourse `lumenote-community`, Playstore
   `lumenote-android` and `lumenote-android-beta`, custom `lumenote-surveys`) and `brightwave` (Intercom
   `brightwave-support`, Twitter `brightwave-x`, custom `brightwave-nps`), one source list per tenant in
-  `seed_lib.TENANTS`; `demo.sh` gains step 6 (custom batch, `kind=survey`), so it has ten steps.
+  `seed_lib.TENANTS`; `demo.sh` gains step 6 (custom batch, `kind=survey`), so it had ten steps (eleven after step 7, Intercom and Twitter, was added in Phase 6).
 
 ## How to explain this phase in the interview
 "A tenant creates sources with their own API key; a source is one configured instance, so two Playstore apps are
