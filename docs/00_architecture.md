@@ -156,7 +156,7 @@ sequenceDiagram
   alt body not a JSON object, or nested too deep to store
     R-->>S: 400
   end
-  R->>I: accept(source, payload); signature, parse and accept run in a threadpool
+  R->>I: accept(source, payload), signature, parse and accept run in a threadpool
   I->>C: external_event_id(payload)
   I->>Q: enqueue as pending
   Q-->>I: the stored row id: new, or the existing one on a duplicate
@@ -199,11 +199,11 @@ sequenceDiagram
     PS->>SS: update_cursor to the max of stored and page cursor
   end
   Note over PC,SS: the cursor moves only on the final page: to the newest post minus a 60 s overlap, or to the window end if that is already in the past
-  Note over PC,H: the deadline is checked before each search page and each posts.json call; one response is capped at FI_HTTP_MAX_BYTES; redirects are not followed
-  Note over PS,SS: a TransientError or PermanentError stops the run, the cursor stays at the last saved page and the message lands in PullResult.error (POST sync answers 502); pull treats both the same and retries next tick. Any other error propagates (503 from the endpoint if storage is down, otherwise 500; the scheduler logs it, counts that source as failing and moves on)
+  Note over PC,H: the deadline is checked before each search page and each posts.json call, one response is capped at FI_HTTP_MAX_BYTES, redirects are not followed
+  Note over PS,SS: a TransientError or PermanentError stops the run, the cursor stays at the last saved page and the message lands in PullResult.error (POST sync answers 502), pull treats both the same and retries next tick. Any other error propagates (503 from the endpoint if storage is down, otherwise 500, the scheduler logs it, counts that source as failing and moves on)
   Note over T,PS: one sync per source at a time in this process: a second POST sync gets 409, the scheduler skips the source
   PS-->>T: PullResult with pages, accepted, duplicates, cursor, error
-  Note over T: the scheduler keeps a count of the sources that failed in the latest tick; /health shows it as failing_sources and stays 200
+  Note over T: the scheduler keeps a count of the sources that failed in the latest tick, /health shows it as failing_sources and stays 200
   Note over I: from here the worker path is identical to push
 ```
 
