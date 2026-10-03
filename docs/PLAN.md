@@ -15,7 +15,7 @@ Status: historical design record.
 
 ## Context
 
-The assignment ([docs/problem_statement.pdf](docs/problem_statement.pdf)) asks for a backend that ingests
+The assignment ([docs/problem_statement.pdf](problem_statement.pdf)) asks for a backend that ingests
 feedback records from heterogeneous sources (Intercom, Playstore, Twitter, Discourse) via both **push**
 (webhook) and **pull** (poll a source API) models, under **multi-tenancy**, transforming everything into a
 **uniform internal record** that still carries **source-specific metadata**. Good-to-have: **idempotency**
