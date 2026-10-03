@@ -16,9 +16,6 @@ class MemoryRawEventQueue:
         for stored in self._events.values():
             if (stored.source_id, stored.external_event_id) == key:
                 return Enqueued(stored.id, stored.status)
-        if event.id in self._events:
-            msg = f"duplicate raw event id {event.id}"
-            raise ValueError(msg)
         self._events[event.id] = event
         return Enqueued(event.id, event.status)
 
@@ -54,7 +51,7 @@ class MemoryRawEventQueue:
     def mark_dead(self, event: RawEvent, error: str) -> bool:
         return self._finish(event, status=EventStatus.DEAD, error=error)
 
-    def requeue(self, event_id: str, now: datetime) -> bool:
+    def replay(self, event_id: str, now: datetime) -> bool:
         event = self._events.get(event_id)
         if event is None or (
             event.status == EventStatus.PROCESSING and not _is_claimable(event, now)

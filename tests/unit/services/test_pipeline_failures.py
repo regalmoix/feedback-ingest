@@ -7,7 +7,7 @@ from test_pipeline import LEASE, MAX_ATTEMPTS, claimed, fail_with, make_pipeline
 from feedback_ingest.adapters.memory.clock import FixedClock
 from feedback_ingest.api.deps import Adapters
 from feedback_ingest.domain.enums import EventStatus
-from feedback_ingest.domain.errors import TransformError, TransientError
+from feedback_ingest.domain.errors import PermanentError, TransientError
 
 
 @pytest.mark.parametrize(
@@ -60,7 +60,7 @@ def _fifty_part_validation_error() -> ValidationError:
     ("exc", "status"),
     [
         (TransientError("x" * 600), EventStatus.FAILED),
-        (TransformError("x" * 600), EventStatus.DEAD),
+        (PermanentError("x" * 600), EventStatus.DEAD),
         (_fifty_part_validation_error(), EventStatus.DEAD),
     ],
 )

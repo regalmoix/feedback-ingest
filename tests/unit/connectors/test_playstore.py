@@ -6,7 +6,7 @@ from helpers import load
 
 from feedback_ingest.connectors.playstore import PlaystoreConnector
 from feedback_ingest.domain.enums import FeedbackKind, SourceType
-from feedback_ingest.domain.errors import TransformError
+from feedback_ingest.domain.errors import PermanentError
 from feedback_ingest.domain.metadata import PlaystoreMetadata
 
 PLAYSTORE = PlaystoreConnector()
@@ -37,6 +37,6 @@ def test_developer_reply_is_ignored() -> None:
 def test_review_without_a_user_comment_goes_dead_not_silently_empty() -> None:
     payload = load(SourceType.PLAYSTORE, "review_edited")
     payload["comments"] = payload["comments"][1:]
-    with pytest.raises(TransformError, match="review has no user comment"):
+    with pytest.raises(PermanentError, match="review has no user comment"):
         PLAYSTORE.transform(SOURCE, payload)
     assert PLAYSTORE.external_event_id(payload)

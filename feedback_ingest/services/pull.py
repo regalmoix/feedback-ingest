@@ -6,7 +6,7 @@ from datetime import timedelta
 from pydantic import NonNegativeInt
 
 from feedback_ingest.connectors.registry import PULLERS
-from feedback_ingest.domain.errors import ConflictError, TransformError, TransientError
+from feedback_ingest.domain.errors import ConflictError, PermanentError, TransientError
 from feedback_ingest.domain.metadata import FrozenModel
 from feedback_ingest.domain.models import Source
 from feedback_ingest.ports.clock import Clock
@@ -64,7 +64,7 @@ class PullService:
                         accepted += 1
                 cursor = self._advance(source, page.cursor)
                 pages += 1
-        except (TransientError, TransformError) as exc:  # anything else is ours: let it raise
+        except (TransientError, PermanentError) as exc:  # anything else is ours: let it raise
             log.warning("pull stopped at the saved cursor: %s", exc, extra=extra)
             error = str(exc)
         log.info("pulled %d pages: %d new, %d duplicates", pages, accepted, duplicates, extra=extra)

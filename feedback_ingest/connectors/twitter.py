@@ -5,7 +5,7 @@ from pydantic import BaseModel, ValidationError
 
 from feedback_ingest.connectors.base import default_verify_signature, new_record
 from feedback_ingest.domain.enums import SourceType
-from feedback_ingest.domain.errors import TransformError
+from feedback_ingest.domain.errors import PermanentError
 from feedback_ingest.domain.metadata import TwitterMetadata
 from feedback_ingest.domain.models import FeedbackRecord, Source
 from feedback_ingest.utils.hashing import payload_hash
@@ -49,7 +49,7 @@ class TwitterConnector:
         history = tweet.edit_history_tweet_ids
         if history and tweet.id not in history:
             msg = f"tweet {tweet.id} is missing from its own edit_history_tweet_ids"
-            raise TransformError(msg)
+            raise PermanentError(msg)
         external_id = (history or [tweet.id])[0]
         return [
             new_record(

@@ -5,7 +5,7 @@ from typing import Any
 
 import httpx
 
-from feedback_ingest.domain.errors import TransformError, TransientError
+from feedback_ingest.domain.errors import PermanentError, TransientError
 
 _RETRYABLE_4XX = (HTTPStatus.REQUEST_TIMEOUT, HTTPStatus.TOO_MANY_REQUESTS)
 
@@ -30,7 +30,7 @@ class HttpxClient:
                 _raise_for_status(response.status_code, url)
                 body = self._read(response)
         except (httpx.InvalidURL, httpx.UnsupportedProtocol) as exc:
-            raise TransformError(str(exc)) from exc
+            raise PermanentError(str(exc)) from exc
         except httpx.RequestError as exc:
             raise TransientError(str(exc)) from exc
         try:
@@ -40,7 +40,7 @@ class HttpxClient:
             raise TransientError(msg) from exc
         if not isinstance(data, dict):
             msg = f"expected a JSON object from {_safe(url)}"
-            raise TransformError(msg)
+            raise PermanentError(msg)
         return data
 
     def _read(self, response: httpx.Response) -> bytes:
@@ -57,7 +57,7 @@ def _raise_for_status(status: int, url: str) -> None:
     if status < HTTPStatus.MULTIPLE_CHOICES:
         return
     retryable = status in _RETRYABLE_4XX or status >= HTTPStatus.INTERNAL_SERVER_ERROR
-    kind = TransientError if retryable else TransformError
+    kind = TransientError if retryable else PermanentError
     msg = f"{status} from {_safe(url)}"
     raise kind(msg)
 

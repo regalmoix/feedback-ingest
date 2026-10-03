@@ -9,6 +9,8 @@ def to_naive_utc(value: datetime) -> datetime:
         return value
     try:
         return value.astimezone(UTC).replace(tzinfo=None)
+    # year-9999 inputs; the guards in registry.py and discourse_pull.py exist because they add a
+    # timedelta to a value that already passed this validation
     except OverflowError as exc:
         raise ValueError(str(exc)) from exc
 

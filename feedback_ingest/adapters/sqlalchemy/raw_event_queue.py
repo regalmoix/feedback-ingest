@@ -63,7 +63,7 @@ class SqlRawEventQueue:
     def mark_dead(self, event: RawEvent, error: str) -> bool:
         return self._finish(event, status=EventStatus.DEAD, error=error)
 
-    def requeue(self, event_id: str, now: datetime) -> bool:
+    def replay(self, event_id: str, now: datetime) -> bool:
         return self._set(
             RawEventRow.id == event_id,
             or_(RawEventRow.status != EventStatus.PROCESSING, RawEventRow.lease_until < now),

@@ -3,7 +3,7 @@ from datetime import datetime
 
 from feedback_ingest.domain.enums import FeedbackKind, SourceMode, UpsertOutcome
 from feedback_ingest.domain.errors import NotFoundError, check_limit
-from feedback_ingest.domain.models import FeedbackRecord, Source, Tenant
+from feedback_ingest.domain.models import FeedbackRecord, Source, Tenant, merge
 
 
 class MemoryTenantStore:
@@ -75,21 +75,8 @@ class MemoryFeedbackStore:
         if existing is None:
             self._records[key] = record
             return UpsertOutcome.INSERTED
-        if record.version_at < existing.version_at:
-            if record.deleted_at is None or existing.deleted_at is not None:
-                return UpsertOutcome.SKIPPED_OLDER
-            self._records[key] = existing.model_copy(update={"deleted_at": record.deleted_at})
-            return UpsertOutcome.UPDATED
-        self._records[key] = record.model_copy(
-            update={
-                "id": existing.id,
-                "source_created_at": existing.source_created_at,
-                "source_updated_at": record.version_at,
-                "ingested_at": existing.ingested_at,
-                "deleted_at": existing.deleted_at or record.deleted_at,
-            }
-        )
-        return UpsertOutcome.UPDATED
+        self._records[key], outcome = merge(existing, record)
+        return outcome
 
     def get(self, record_id: str, tenant_id: str) -> FeedbackRecord | None:
         return next(

@@ -6,7 +6,7 @@ import pytest
 from discourse_stub import BASE, DEADLINE, NOW, PULLER, StubHttp, pull_source, routes
 
 from feedback_ingest.adapters.memory.clock import FixedClock
-from feedback_ingest.domain.errors import TransformError, TransientError
+from feedback_ingest.domain.errors import PermanentError, TransientError
 
 
 def test_a_passed_deadline_stops_before_the_first_search_page() -> None:
@@ -32,5 +32,5 @@ def test_the_deadline_is_checked_before_each_posts_call(monkeypatch: pytest.Monk
 
 def test_a_window_end_past_the_calendar_is_a_transform_error() -> None:
     late = pull_source(cursor="9999-12-30T00:00:00")
-    with pytest.raises(TransformError):
+    with pytest.raises(PermanentError):
         next(PULLER.pull(late, StubHttp({}), FixedClock(NOW), DEADLINE))

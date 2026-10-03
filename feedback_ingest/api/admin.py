@@ -1,12 +1,11 @@
-from http import HTTPStatus
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Query
 
 from feedback_ingest.api.deps import Ctx, CurrentTenant
 from feedback_ingest.api.schemas import RawEventDetail, RawEventView
 from feedback_ingest.domain.enums import EventStatus
-from feedback_ingest.domain.errors import NotFoundError
+from feedback_ingest.domain.errors import ConflictError, NotFoundError
 from feedback_ingest.domain.models import RawEvent, Tenant
 
 router = APIRouter(prefix="/admin")
@@ -32,7 +31,7 @@ def replay_raw_events(
     events = queue.list_by_status(
         EventStatus(status), tenant_id=tenant.id, source_id=source_id, limit=limit
     )
-    return {"requeued": sum(queue.requeue(event.id, now) for event in events)}
+    return {"replayed": sum(queue.replay(event.id, now) for event in events)}
 
 
 @router.get("/raw-events/{event_id}", response_model=RawEventDetail)
@@ -43,8 +42,9 @@ def get_raw_event(event_id: str, tenant: CurrentTenant, ctx: Ctx) -> RawEvent:
 @router.post("/raw-events/{event_id}/replay")
 def replay_raw_event(event_id: str, tenant: CurrentTenant, ctx: Ctx) -> dict[str, EventStatus]:
     _tenant_event(event_id, tenant, ctx)
-    if not ctx.adapters.queue.requeue(event_id, ctx.adapters.clock.now()):
-        raise HTTPException(HTTPStatus.CONFLICT, detail="event is being processed")
+    if not ctx.adapters.queue.replay(event_id, ctx.adapters.clock.now()):
+        msg = "event is being processed"
+        raise ConflictError(msg)
     return {"status": EventStatus.PENDING}
 
 

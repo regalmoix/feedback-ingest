@@ -1,4 +1,4 @@
-class TransformError(Exception):
+class PermanentError(Exception):
     pass
 
 

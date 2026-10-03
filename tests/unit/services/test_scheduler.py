@@ -29,20 +29,31 @@ def test_start_and_stop_the_thread(adapters: Adapters, scheduler: SchedulerServi
 
 
 def test_a_failing_tick_does_not_stop_the_next_and_shows_in_health(
-    scheduler: SchedulerService, monkeypatch: pytest.MonkeyPatch
+    adapters: Adapters, scheduler: SchedulerService, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    ticks: list[int] = []
+    add_pull_source(adapters, "src-second")
+    list_enabled, ticks = scheduler.pull.sources.list_enabled, []
 
-    def crash(_: SourceMode) -> list[Source]:
+    def crash_after_first(mode: SourceMode) -> list[Source]:
         ticks.append(1)
+        if len(ticks) == 1:
+            return list_enabled(mode)
         msg = "storage unavailable"
         raise RuntimeError(msg)
 
-    monkeypatch.setattr(scheduler.pull.sources, "list_enabled", crash)
+    monkeypatch.setattr(scheduler.pull.sources, "list_enabled", crash_after_first)
     scheduler.start()
-    wait_until(lambda: len(ticks) >= 2)
+    wait_until(lambda: len(ticks) >= 3)
     assert scheduler.alive
-    assert scheduler.last_errors == {"<tick>": "RuntimeError"}
+    assert scheduler.failing_sources == 2  # every enabled pull source counts on a broken tick
+
+
+def test_a_tick_that_fails_before_listing_any_source_still_counts(
+    scheduler: SchedulerService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(scheduler.pull.sources, "list_enabled", lambda _: 1 / 0)
+    scheduler.start()
+    wait_until(lambda: scheduler.failing_sources == 1)
 
 
 def test_a_crashing_source_does_not_stop_the_next(
@@ -63,7 +74,7 @@ def test_a_crashing_source_does_not_stop_the_next(
     monkeypatch.setattr(scheduler.pull, "sync", broken_first)
     scheduler.start()
     wait_until(lambda: sum(adapters.queue.counts().values()) == 4)
-    wait_until(lambda: scheduler.last_errors == {"src-a-broken": "internal error (see logs)"})
+    wait_until(lambda: scheduler.failing_sources == 1)
     failed = next(r for r in caplog.records if r.message == "scheduled sync failed")
     assert vars(failed)["tenant_id"] == "tenant-a"
     assert vars(failed)["source_id"] == "src-a-broken"
@@ -88,7 +99,7 @@ def test_stop_warns_when_a_sync_outlives_the_join(
     assert "scheduler still syncing on stop" in caplog.text
 
 
-def test_a_tick_records_which_sources_failed(
+def test_a_tick_counts_the_sources_that_failed(
     scheduler: SchedulerService, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     errors: list[str | None] = ["503 from x"]
@@ -96,6 +107,6 @@ def test_a_tick_records_which_sources_failed(
         scheduler.pull, "sync", lambda s: PullResult(source_id=s.id, error=errors[0])
     )
     scheduler.start()
-    wait_until(lambda: scheduler.last_errors == {"src-forum": "503 from x"})
+    wait_until(lambda: scheduler.failing_sources == 1)
     errors[0] = None
-    wait_until(lambda: scheduler.last_errors == {})
+    wait_until(lambda: scheduler.failing_sources == 0)

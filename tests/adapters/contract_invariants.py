@@ -13,7 +13,7 @@ def replay_clears_the_old_error(a: Adapters) -> None:
     a.queue.enqueue(event(SOURCE_A1, "e1", now))
     [claimed] = a.queue.claim(now, lease_seconds=30, limit=10)
     assert a.queue.mark_dead(claimed, "bad")
-    assert a.queue.requeue(claimed.id, now)
+    assert a.queue.replay(claimed.id, now)
     stored = a.queue.get(claimed.id)
     assert stored is not None
     assert (stored.error, stored.lease_until) == (None, None)

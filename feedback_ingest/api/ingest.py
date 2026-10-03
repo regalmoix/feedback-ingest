@@ -9,7 +9,7 @@ from starlette.concurrency import run_in_threadpool
 from feedback_ingest.api.deps import AppState, Ctx
 from feedback_ingest.connectors.registry import CONNECTORS
 from feedback_ingest.domain.enums import SourceMode
-from feedback_ingest.domain.errors import NotFoundError, UnauthorizedError
+from feedback_ingest.domain.errors import ConflictError, NotFoundError, UnauthorizedError
 from feedback_ingest.services.ingestion import AcceptResult
 
 router = APIRouter()
@@ -30,12 +30,14 @@ def _ingest(ctx: AppState, source_id: str, body: bytes, headers: Mapping[str, st
         raise NotFoundError(msg)
     secret = source.webhook_secret if source.mode is SourceMode.PUSH else None
     if secret is None:
-        raise HTTPException(HTTPStatus.CONFLICT, detail="source does not accept webhooks")
+        msg = "source does not accept webhooks"
+        raise ConflictError(msg)
     if not CONNECTORS[source.type].verify_signature(secret.get_secret_value(), body, headers):
         msg = "bad or missing signature"
         raise UnauthorizedError(msg)
     if not source.enabled:  # after the signature: state is only told to a caller who proved itself
-        raise HTTPException(HTTPStatus.CONFLICT, detail="source is disabled")
+        msg = "source is disabled"
+        raise ConflictError(msg)
     try:
         payload = json.loads(body)
         to_json(payload)  # nesting json.loads accepts but storage and validation would not

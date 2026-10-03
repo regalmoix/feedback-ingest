@@ -22,13 +22,13 @@ def stale_worker_cannot_finish(a: Adapters) -> None:
     assert (stored.status, stored.error) == (EventStatus.PROCESSED, None)
 
 
-def requeue_and_marks_are_checked(a: Adapters) -> None:
+def replay_and_marks_are_checked(a: Adapters) -> None:
     seed(a)
     now = a.clock.now()
     a.queue.enqueue(event(SOURCE_A1, "e1", now))
     [claimed] = a.queue.claim(now, lease_seconds=30, limit=10)
     assert claimed.lease_until is not None
-    assert a.queue.requeue(claimed.id, claimed.lease_until) is False  # the lease is live
+    assert a.queue.replay(claimed.id, claimed.lease_until) is False  # the lease is live
     stored = a.queue.get(claimed.id)
     assert stored is not None
     assert stored.status == EventStatus.PROCESSING
@@ -36,9 +36,9 @@ def requeue_and_marks_are_checked(a: Adapters) -> None:
     assert a.queue.mark_processed(ghost) is False
     assert a.queue.mark_failed(ghost, "x", now) is False
     assert a.queue.mark_dead(ghost, "x") is False
-    assert a.queue.requeue("missing", now) is False
+    assert a.queue.replay("missing", now) is False
     expired = claimed.lease_until + timedelta(seconds=1)  # the worker crashed
-    assert a.queue.requeue(claimed.id, expired) is True
+    assert a.queue.replay(claimed.id, expired) is True
     stored = a.queue.get(claimed.id)
     assert stored is not None
     assert (stored.status, stored.attempts, stored.next_attempt_at) == (
@@ -49,7 +49,7 @@ def requeue_and_marks_are_checked(a: Adapters) -> None:
     assert a.queue.mark_processed(claimed) is False
 
 
-def requeued_row_is_fenced_from_the_first_worker(a: Adapters) -> None:
+def replayed_row_is_fenced_from_the_first_worker(a: Adapters) -> None:
     seed(a)
     now = a.clock.now()
     later = now + timedelta(seconds=31)
@@ -57,7 +57,7 @@ def requeued_row_is_fenced_from_the_first_worker(a: Adapters) -> None:
     [first] = a.queue.claim(now, lease_seconds=30, limit=10)
     [second] = a.queue.claim(later, lease_seconds=30, limit=10)
     assert a.queue.mark_dead(second, "bad")
-    assert a.queue.requeue(second.id, later)
+    assert a.queue.replay(second.id, later)
     [third] = a.queue.claim(later, lease_seconds=30, limit=10)
     assert third.attempts == first.attempts
     assert a.queue.mark_processed(first) is False
@@ -100,8 +100,8 @@ def duplicate_enqueue_reports_the_stored_status(a: Adapters) -> None:
 FENCING_CASES: list[Case] = [
     duplicate_enqueue_reports_the_stored_status,
     stale_worker_cannot_finish,
-    requeue_and_marks_are_checked,
-    requeued_row_is_fenced_from_the_first_worker,
+    replay_and_marks_are_checked,
+    replayed_row_is_fenced_from_the_first_worker,
     claim_rejects_non_positive_limit_and_lease,
     claim_takes_the_earliest_due_row_whatever_its_status,
 ]

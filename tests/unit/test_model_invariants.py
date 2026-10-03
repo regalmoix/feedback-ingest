@@ -43,10 +43,11 @@ def test_content_cannot_override_the_records_identity() -> None:
     assert (record.tenant_id, record.source_id, record.external_id) == ("t1", "s1", "x1")
 
 
-def test_kind_is_derived_from_the_source_type_and_still_serialised() -> None:
+def test_new_record_fills_kind_from_the_source_type_and_a_wrong_kind_is_refused() -> None:
     record = new_record(SOURCE, CONNECTORS[SourceType.TWITTER], "x1", **CONTENT)
     assert record.model_dump()["kind"] == "post"
-    assert FeedbackRecord.model_validate(record.model_dump() | {"kind": "review"}) == record
+    with pytest.raises(ValidationError, match="a twitter record is a post, not review"):
+        FeedbackRecord.model_validate(record.model_dump() | {"kind": "review"})
 
 
 @pytest.mark.parametrize("name", ["", "   ", "x" * 201])

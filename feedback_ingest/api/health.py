@@ -24,6 +24,6 @@ def health(ctx: Ctx, response: Response) -> HealthResponse:
         worker_alive=alive,
         scheduler_enabled=scheduler_enabled,
         scheduler_alive=ctx.scheduler.alive,
-        failing_sources=len(ctx.scheduler.last_errors),  # ids stay in the pull log lines
+        failing_sources=ctx.scheduler.failing_sources,  # ids stay in the pull log lines
         queue=ctx.adapters.queue.counts(),
     )

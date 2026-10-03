@@ -1,7 +1,7 @@
 import pytest
 from discourse_stub import BASE, CLOCK, DEADLINE, PULLER, StubHttp, pull_source, routes
 
-from feedback_ingest.domain.errors import TransformError
+from feedback_ingest.domain.errors import PermanentError
 
 
 def test_pages_carry_titles_and_the_cursor_moves_on_the_final_page() -> None:
@@ -64,11 +64,11 @@ def test_a_quiet_window_advances_the_cursor_to_the_window_end() -> None:
 def test_page_guard_stops_before_the_page_discourse_rejects() -> None:
     same = routes([[1], [1]])[f"{BASE}/search.json", "1"]
     found = routes([[1]]) | {(f"{BASE}/search.json", str(p)): same for p in range(1, 11)}
-    found[f"{BASE}/search.json", "11"] = TransformError("400 from search.json")
+    found[f"{BASE}/search.json", "11"] = PermanentError("400 from search.json")
     pages = PULLER.pull(pull_source(), StubHttp(found), CLOCK, DEADLINE)
     cursors = [next(pages).cursor for _ in range(10)]
     assert set(cursors) == {"2026-02-01"}
-    with pytest.raises(TransformError, match="window exceeds 10 pages"):
+    with pytest.raises(PermanentError, match="window exceeds 10 pages"):
         next(pages)
 
 

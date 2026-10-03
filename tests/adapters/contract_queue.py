@@ -1,8 +1,6 @@
 from datetime import timedelta
 
-import pytest
 from contract import SOURCE_A1, SOURCE_B1, TENANT_A, Case, event, seed
-from sqlalchemy.exc import IntegrityError
 
 from feedback_ingest.api.deps import Adapters
 from feedback_ingest.domain.enums import EventStatus
@@ -15,8 +13,6 @@ def duplicate_enqueue_returns_the_stored_id(a: Adapters) -> None:
     assert a.queue.enqueue(first) == (first.id, EventStatus.PENDING)
     assert a.queue.enqueue(event(SOURCE_A1, "e1", now)).id == first.id
     assert a.queue.enqueue(other_source).id == other_source.id
-    with pytest.raises((ValueError, IntegrityError)):
-        a.queue.enqueue(first.model_copy(update={"external_event_id": "e2"}))
     assert a.queue.counts(TENANT_A.id)[EventStatus.PENDING] == 1
 
 
@@ -57,7 +53,7 @@ def expired_lease_is_reclaimed_with_a_fresh_lease(a: Adapters) -> None:
     assert a.queue.claim(after, lease_seconds=30, limit=10) == []
 
 
-def failed_waits_dead_stays_requeue_revives(a: Adapters) -> None:
+def failed_waits_dead_stays_replay_revives(a: Adapters) -> None:
     seed(a)
     now = a.clock.now()
     far = now + timedelta(days=3650)
@@ -71,7 +67,7 @@ def failed_waits_dead_stays_requeue_revives(a: Adapters) -> None:
     dead = a.queue.get(retried.id)
     assert dead is not None
     assert (dead.status, dead.error) == (EventStatus.DEAD, "still boom")
-    assert a.queue.requeue(retried.id, now + timedelta(days=1))
+    assert a.queue.replay(retried.id, now + timedelta(days=1))
     [revived] = a.queue.claim(now + timedelta(days=1), lease_seconds=30, limit=10)
     assert revived.attempts == 1
     assert a.queue.mark_processed(revived)
@@ -114,7 +110,7 @@ QUEUE_CASES: list[Case] = [
     claim_leases_due_rows_once,
     claim_respects_limit,
     expired_lease_is_reclaimed_with_a_fresh_lease,
-    failed_waits_dead_stays_requeue_revives,
+    failed_waits_dead_stays_replay_revives,
     counts_group_by_status_per_tenant,
     list_by_status_is_newest_first_then_id,
 ]

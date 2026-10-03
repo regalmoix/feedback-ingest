@@ -2,7 +2,7 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, NonNegativeInt, PositiveInt
 
-from feedback_ingest.domain.enums import SourceType
+from feedback_ingest.domain.enums import CustomRecordType, SourceType
 
 
 class FrozenModel(BaseModel):
@@ -36,9 +36,6 @@ class IntercomMetadata(FrozenModel):
     part_count: NonNegativeInt
     tags: tuple[str, ...]
     state: str | None = None
-
-
-CustomRecordType = Literal["REVIEW", "CONVERSATION", "FORUM_CONVERSATION_THREAD", "SURVEY"]
 
 
 class CustomMetadata(FrozenModel):

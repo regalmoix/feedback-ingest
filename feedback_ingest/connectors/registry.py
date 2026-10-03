@@ -57,7 +57,7 @@ def _check_values(config: Mapping[str, str]) -> None:
             msg = "config['base_url'] must not point at an internal host"
             raise ValueError(msg)
     try:
-        window_ok = 0 < int(config.get("window_days", "1")) <= _MAX_WINDOW_DAYS
+        window_ok = 0 < int(config.get("window_days", "7")) <= _MAX_WINDOW_DAYS
     except ValueError:
         window_ok = False
     if not window_ok:
@@ -76,6 +76,7 @@ def _check_values(config: Mapping[str, str]) -> None:
 # so only a public name that resolves to a private address gets through: *.nip.io-style names and
 # DNS rebinding. Resolve and pin the address at request time if tenants are untrusted.
 def _is_internal(host: str) -> bool:
+    # we fetch a tenant-supplied URL, so every spelling of a loopback or private host is refused
     host = host.rstrip(".")
     if host == "localhost" or host.endswith((".localhost", ".local", ".internal")):
         return True

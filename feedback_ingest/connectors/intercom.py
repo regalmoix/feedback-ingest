@@ -5,7 +5,7 @@ from pydantic import BaseModel, ValidationError
 
 from feedback_ingest.connectors.base import default_verify_signature, new_record
 from feedback_ingest.domain.enums import SourceType
-from feedback_ingest.domain.errors import TransformError
+from feedback_ingest.domain.errors import PermanentError
 from feedback_ingest.domain.metadata import IntercomMetadata
 from feedback_ingest.domain.models import FeedbackRecord, Source
 from feedback_ingest.utils.hashing import payload_hash
@@ -74,7 +74,7 @@ class IntercomConnector:
             return []
         if not event.topic.startswith("conversation."):
             msg = f"unsupported topic {event.topic}"
-            raise TransformError(msg)
+            raise PermanentError(msg)
         item = IntercomConversationIn.model_validate(event.data.get("item"))
         parts = sorted(item.conversation_parts.conversation_parts, key=lambda p: p.created_at)
         texts = [strip_tags(body or "") for body in (item.source.body, *(p.body for p in parts))]

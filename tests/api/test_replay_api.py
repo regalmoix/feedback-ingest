@@ -16,7 +16,7 @@ def _counts(client: TestClient, key: str) -> dict[str, int]:
     return counts
 
 
-def test_bulk_replay_requeues_only_the_callers_matching_rows(
+def test_bulk_replay_resets_only_the_callers_matching_rows(
     app_client: TestClient, adapters: Adapters, source_a: Source, source_b: Source
 ) -> None:
     other_a = source_a.model_copy(update={"id": "src-a-other"})
@@ -28,12 +28,12 @@ def test_bulk_replay_requeues_only_the_callers_matching_rows(
     assert (_counts(app_client, KEY_A)["dead"], _counts(app_client, KEY_B)["dead"]) == (2, 1)
 
     replay = f"/admin/raw-events/replay?source_id={source_a.id}"
-    assert app_client.post(replay, headers=MINE).json() == {"requeued": 1}
+    assert app_client.post(replay, headers=MINE).json() == {"replayed": 1}
     assert (_counts(app_client, KEY_A)["dead"], _counts(app_client, KEY_A)["pending"]) == (1, 1)
-    assert app_client.post("/admin/raw-events/replay", headers=MINE).json() == {"requeued": 1}
+    assert app_client.post("/admin/raw-events/replay", headers=MINE).json() == {"replayed": 1}
     assert _counts(app_client, KEY_B)["dead"] == 1
     processed = "/admin/raw-events/replay?status=processed&limit=1"
-    assert app_client.post(processed, headers=MINE).json() == {"requeued": 1}
+    assert app_client.post(processed, headers=MINE).json() == {"replayed": 1}
     assert _counts(app_client, KEY_A) == {
         "pending": 3, "processing": 0, "processed": 0, "failed": 0, "dead": 0
     }  # fmt: skip

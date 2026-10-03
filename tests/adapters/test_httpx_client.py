@@ -2,7 +2,7 @@ import httpx
 import pytest
 
 from feedback_ingest.adapters.http.httpx_client import HttpxClient
-from feedback_ingest.domain.errors import TransformError, TransientError
+from feedback_ingest.domain.errors import PermanentError, TransientError
 
 
 def _client(status: int, body: object = None) -> HttpxClient:
@@ -18,7 +18,7 @@ def test_returns_json_object_sends_params_and_does_not_follow_redirects() -> Non
     client = HttpxClient(httpx.MockTransport(handler))
     params = [("q", "x"), ("q", "y")]
     assert client.get_json("https://example.test/new", params) == {"q": ["x", "y"]}
-    with pytest.raises(TransformError, match="301 from"):
+    with pytest.raises(PermanentError, match="301 from"):
         client.get_json("https://example.test/old")
 
 
@@ -58,17 +58,17 @@ def test_retryable_statuses_are_transient_and_keep_the_body_out(
 
 def test_client_errors_and_non_objects_are_transform_errors() -> None:
     for status in (304, 404):
-        with pytest.raises(TransformError, match=str(status)):
+        with pytest.raises(PermanentError, match=str(status)):
             _client(status).get_json("https://example.test")
-    with pytest.raises(TransformError):
+    with pytest.raises(PermanentError):
         _client(200, [1, 2]).get_json("https://example.test")
-    with pytest.raises(TransformError):
+    with pytest.raises(PermanentError):
         _client(200, {}).get_json("http://[::1")
 
 
 @pytest.mark.parametrize("url", ["example.test/x", "ftp://example.test/x"])
 def test_url_without_http_scheme_is_a_transform_error(url: str) -> None:
-    with pytest.raises(TransformError):
+    with pytest.raises(PermanentError):
         HttpxClient().get_json(url)
 
 
@@ -90,7 +90,7 @@ def test_request_failures_are_transient(error: type[httpx.RequestError]) -> None
 
 
 def test_error_messages_drop_credentials_from_the_url() -> None:
-    with pytest.raises(TransformError) as raised:
+    with pytest.raises(PermanentError) as raised:
         _client(404).get_json("https://user:hunter2@example.test/x")
     assert "hunter2" not in str(raised.value)
     assert "https://example.test/x" in str(raised.value)

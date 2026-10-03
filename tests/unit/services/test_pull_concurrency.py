@@ -34,7 +34,7 @@ def test_a_second_sync_of_a_running_source_is_refused_and_the_scheduler_skips_it
     assert started.wait(5)
     with pytest.raises(ConflictError, match="already syncing"):
         pull.sync(source)
-    assert SchedulerService(pull, 60)._sync(source) is None  # noqa: SLF001
+    assert SchedulerService(pull, 60)._sync_one(source) is False  # noqa: SLF001
     release.set()
     first.join(5)
     assert pull.sync(source).error is None  # the lock is released after a run
@@ -65,7 +65,7 @@ def test_an_empty_error_message_still_counts_as_a_failed_source(
     monkeypatch.setattr(adapters.http, "get_json", down)
     scheduler = SchedulerService(service(adapters), interval_seconds=0.01)
     scheduler.start()
-    wait_until(lambda: scheduler.last_errors == {"src-forum": ""})
+    wait_until(lambda: scheduler.failing_sources == 1)
     scheduler.stop()
 
 
@@ -79,7 +79,7 @@ def test_a_sync_that_crashes_during_shutdown_is_logged_as_abandoned(
     scheduler = SchedulerService(service(adapters), interval_seconds=60)
     monkeypatch.setattr(scheduler.pull, "sync", crash)
     scheduler._stop.set()  # noqa: SLF001
-    scheduler._sync(add_pull_source(adapters, "src-forum"))  # noqa: SLF001
+    scheduler._sync_one(add_pull_source(adapters, "src-forum"))  # noqa: SLF001
     [record] = [r for r in caplog.records if r.name.endswith("scheduler")]
     assert (record.levelno, record.getMessage()) == (logging.INFO, "sync abandoned at shutdown")
 

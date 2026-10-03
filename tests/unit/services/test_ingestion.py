@@ -49,7 +49,7 @@ def test_accept_stores_a_malformed_payload_keyed_by_its_hash(
     assert event.external_event_id == payload_hash(payload)
 
 
-def test_a_duplicate_of_a_dead_event_is_not_requeued_but_warns(
+def test_a_duplicate_of_a_dead_event_is_not_replayed_but_warns(
     adapters: Adapters, caplog: pytest.LogCaptureFixture
 ) -> None:
     source = seed_source(adapters, "tenant-a", KEY_A)

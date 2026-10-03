@@ -6,7 +6,7 @@ from helpers import load
 
 from feedback_ingest.connectors.twitter import TwitterConnector
 from feedback_ingest.domain.enums import FeedbackKind, SourceType
-from feedback_ingest.domain.errors import TransformError
+from feedback_ingest.domain.errors import PermanentError
 from feedback_ingest.domain.metadata import TwitterMetadata
 
 TWITTER = TwitterConnector()
@@ -43,5 +43,5 @@ def test_tweet_without_edit_history_or_author_id_keys_on_its_own_id() -> None:
 
 def test_edit_history_without_the_tweet_itself_is_rejected() -> None:
     payload = load(SourceType.TWITTER, "tweet") | {"edit_history_tweet_ids": ["1"]}
-    with pytest.raises(TransformError, match="edit_history"):
+    with pytest.raises(PermanentError, match="edit_history"):
         TWITTER.transform(SOURCE, payload)

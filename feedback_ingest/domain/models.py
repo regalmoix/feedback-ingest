@@ -2,30 +2,13 @@ from collections.abc import Mapping
 from datetime import datetime
 from typing import Annotated, Any, NamedTuple, Self
 
-from pydantic import Field, SecretStr, StringConstraints, computed_field, model_validator
+from pydantic import Field, SecretStr, StringConstraints, model_validator
 
+from feedback_ingest.domain import enums
 from feedback_ingest.domain.enums import EventStatus, FeedbackKind, SourceMode, SourceType
-from feedback_ingest.domain.metadata import (
-    CustomMetadata,
-    CustomRecordType,
-    FrozenModel,
-    SourceMetadata,
-)
+from feedback_ingest.domain.metadata import FrozenModel, SourceMetadata
 from feedback_ingest.utils.time import NaiveUtc
 
-KIND_BY_SOURCE: dict[SourceType, FeedbackKind] = {
-    SourceType.PLAYSTORE: FeedbackKind.REVIEW,
-    SourceType.INTERCOM: FeedbackKind.CONVERSATION,
-    SourceType.TWITTER: FeedbackKind.POST,
-    SourceType.DISCOURSE: FeedbackKind.POST,
-}
-# the one exception: a custom (webhook) record carries its own kind, from the sender's record `type`
-KIND_BY_RECORD_TYPE: dict[CustomRecordType, FeedbackKind] = {
-    "REVIEW": FeedbackKind.REVIEW,
-    "CONVERSATION": FeedbackKind.CONVERSATION,
-    "FORUM_CONVERSATION_THREAD": FeedbackKind.POST,
-    "SURVEY": FeedbackKind.SURVEY,
-}
 Name = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)]
 
 
@@ -86,6 +69,7 @@ class FeedbackRecord(FrozenModel):
     tenant_id: str
     source_id: str
     source_type: SourceType
+    kind: FeedbackKind
     external_id: str
     title: str | None
     text: str
@@ -104,15 +88,31 @@ class FeedbackRecord(FrozenModel):
         if self.metadata.source_type != self.source_type:
             msg = f"metadata is for {self.metadata.source_type}, record is {self.source_type}"
             raise ValueError(msg)
+        expected = enums.KIND_BY_SOURCE.get(self.source_type)  # None: custom picks per record type
+        if expected is not None and self.kind != expected:
+            msg = f"a {self.source_type} record is a {expected}, not {self.kind}"
+            raise ValueError(msg)
         return self
-
-    @computed_field  # type: ignore[prop-decorator]
-    @property
-    def kind(self) -> FeedbackKind:
-        if isinstance(self.metadata, CustomMetadata):
-            return KIND_BY_RECORD_TYPE[self.metadata.record_type]
-        return KIND_BY_SOURCE[self.source_type]
 
     @property
     def version_at(self) -> datetime:
         return self.source_updated_at or self.source_created_at
+
+
+# older loses, but a delete always applies; the store owns id, first-seen and ingested_at
+def merge(
+    existing: FeedbackRecord, incoming: FeedbackRecord
+) -> tuple[FeedbackRecord, enums.UpsertOutcome]:
+    if incoming.version_at < existing.version_at:
+        if incoming.deleted_at is None or existing.deleted_at is not None:
+            return existing, enums.UpsertOutcome.SKIPPED_OLDER
+        deleted = existing.model_copy(update={"deleted_at": incoming.deleted_at})
+        return deleted, enums.UpsertOutcome.UPDATED
+    kept = {
+        "id": existing.id,
+        "source_created_at": existing.source_created_at,
+        "ingested_at": existing.ingested_at,
+        "source_updated_at": incoming.version_at,  # the version only moves forward
+        "deleted_at": existing.deleted_at or incoming.deleted_at,
+    }
+    return incoming.model_copy(update=kept), enums.UpsertOutcome.UPDATED

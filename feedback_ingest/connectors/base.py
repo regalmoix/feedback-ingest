@@ -1,9 +1,9 @@
 from collections.abc import Iterator, Mapping
 from datetime import datetime
-from typing import Any, ClassVar, Protocol, TypedDict, Unpack
+from typing import Any, ClassVar, NotRequired, Protocol, TypedDict, Unpack
 from uuid import NAMESPACE_URL, uuid5
 
-from feedback_ingest.domain.enums import SourceType
+from feedback_ingest.domain.enums import KIND_BY_SOURCE, FeedbackKind, SourceType
 from feedback_ingest.domain.metadata import FrozenModel, SourceMetadata
 from feedback_ingest.domain.models import FeedbackRecord, Source
 from feedback_ingest.ports.clock import Clock
@@ -48,6 +48,7 @@ class RecordContent(TypedDict):
     source_updated_at: datetime | None
     deleted_at: datetime | None
     metadata: SourceMetadata
+    kind: NotRequired[FeedbackKind]  # defaults to KIND_BY_SOURCE; custom passes its own
 
 
 def new_record(
@@ -56,6 +57,7 @@ def new_record(
     # identity keys go last so content cannot override them; the pipeline stamps ingested_at
     return FeedbackRecord.model_validate(
         {
+            "kind": KIND_BY_SOURCE.get(connector.source_type),
             **content,
             "id": uuid5(NAMESPACE_URL, f"{source.id}:{external_id}").hex,
             "tenant_id": source.tenant_id,

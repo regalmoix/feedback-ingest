@@ -5,10 +5,10 @@ from pydantic import BaseModel, ConfigDict, Field
 from pydantic.alias_generators import to_camel
 
 from feedback_ingest.connectors.base import default_verify_signature, new_record
-from feedback_ingest.domain.enums import SourceType
-from feedback_ingest.domain.errors import TransformError
+from feedback_ingest.domain.enums import KIND_BY_RECORD_TYPE, SourceType
+from feedback_ingest.domain.errors import PermanentError
 from feedback_ingest.domain.metadata import CustomMetadata
-from feedback_ingest.domain.models import KIND_BY_RECORD_TYPE, FeedbackRecord, Source
+from feedback_ingest.domain.models import FeedbackRecord, Source
 from feedback_ingest.utils.hashing import payload_hash
 from feedback_ingest.utils.time import NaiveUtc
 
@@ -47,7 +47,7 @@ class CustomConnector:
     def _record(self, source: Source, record: CustomRecordIn) -> FeedbackRecord:
         if record.type not in KIND_BY_RECORD_TYPE:
             msg = f"unsupported record type {record.type[:40]}"
-            raise TransformError(msg)
+            raise PermanentError(msg)
         fields = dict(record.metadata)
         score = fields.pop("score", None)
         return new_record(
@@ -62,6 +62,7 @@ class CustomConnector:
             source_created_at=record.created_at,
             source_updated_at=record.updated_at,
             deleted_at=None,
+            kind=KIND_BY_RECORD_TYPE[record.type],
             metadata=CustomMetadata(record_type=record.type, score=score, fields=fields),
         )
 

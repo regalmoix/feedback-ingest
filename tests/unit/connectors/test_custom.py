@@ -7,10 +7,14 @@ from helpers import load
 from pydantic import ValidationError
 
 from feedback_ingest.connectors.custom import CustomConnector
-from feedback_ingest.domain.enums import FeedbackKind, SourceType
-from feedback_ingest.domain.errors import TransformError
-from feedback_ingest.domain.metadata import CustomMetadata, CustomRecordType
-from feedback_ingest.domain.models import KIND_BY_RECORD_TYPE
+from feedback_ingest.domain.enums import (
+    KIND_BY_RECORD_TYPE,
+    CustomRecordType,
+    FeedbackKind,
+    SourceType,
+)
+from feedback_ingest.domain.errors import PermanentError
+from feedback_ingest.domain.metadata import CustomMetadata
 from feedback_ingest.utils.hashing import payload_hash
 
 CUSTOM = CustomConnector()
@@ -60,7 +64,7 @@ def test_metadata_keeps_its_value_types_and_rejects_nesting() -> None:
 
 
 def test_an_unsupported_type_or_an_empty_batch_goes_dead() -> None:
-    with pytest.raises(TransformError, match="unsupported record type AUDIO_RECORDING"):
+    with pytest.raises(PermanentError, match="unsupported record type AUDIO_RECORDING"):
         CUSTOM.transform(SOURCE, load(SourceType.CUSTOM, "unsupported_type"))
     with pytest.raises(ValidationError):
         CUSTOM.transform(SOURCE, {"records": []})

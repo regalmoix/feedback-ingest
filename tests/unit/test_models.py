@@ -15,6 +15,7 @@ _RECORD: dict[str, Any] = {
     "tenant_id": "t1",
     "source_id": "s1",
     "source_type": "twitter",
+    "kind": "post",
     "external_id": "x1",
     "title": None,
     "text": "hi",
@@ -80,13 +81,14 @@ def test_metadata_ignores_unknown_keys_and_rejects_unknown_source() -> None:
     "bad",
     [
         {"source_type": "discourse"},
+        {"kind": "review"},
         {"rating": 0},
         {"rating": 6},
         {"connector_version": 0},
     ],
 )
 def test_record_rejects_inconsistent_or_out_of_range_fields(bad: dict[str, Any]) -> None:
-    assert FeedbackRecord.model_validate(_RECORD | {"kind": "review"}).kind == "post"
+    assert FeedbackRecord.model_validate(_RECORD).kind == "post"
     with pytest.raises(ValidationError):
         FeedbackRecord.model_validate(_RECORD | bad)
 

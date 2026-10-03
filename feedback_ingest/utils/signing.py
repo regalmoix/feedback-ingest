@@ -9,4 +9,5 @@ def sign(secret: str, body: bytes) -> str:
 def verify(secret: str, body: bytes, signature: str) -> bool:
     if not secret or not signature:
         return False
+    # replace: a lone surrogate in the header compares unequal instead of raising
     return hmac.compare_digest(sign(secret, body).encode(), signature.encode(errors="replace"))

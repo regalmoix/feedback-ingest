@@ -3,7 +3,7 @@ from datetime import datetime
 from uuid import uuid4
 
 from feedback_ingest.api.deps import Adapters
-from feedback_ingest.domain.enums import SourceMode, SourceType
+from feedback_ingest.domain.enums import KIND_BY_SOURCE, SourceMode, SourceType
 from feedback_ingest.domain.metadata import PlaystoreMetadata
 from feedback_ingest.domain.models import FeedbackRecord, RawEvent, Source, Tenant
 
@@ -55,7 +55,8 @@ def record(src: Source, external_id: str, created: datetime, **changes: object) 
         "connector_version": 1,
         "metadata": PlaystoreMetadata(app_version="1.0", device="pixel", android_os_version=34),
     }
-    return FeedbackRecord.model_validate(base | changes)
+    kind = KIND_BY_SOURCE[SourceType(str(changes.get("source_type", src.type)))]
+    return FeedbackRecord.model_validate({"kind": kind} | base | changes)
 
 
 def event(src: Source, external_event_id: str, next_attempt_at: datetime) -> RawEvent:

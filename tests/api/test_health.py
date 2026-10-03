@@ -61,7 +61,7 @@ def test_degraded_when_the_enabled_scheduler_thread_is_dead(adapters: Adapters) 
 
 
 def test_failing_sources_are_counted_but_do_not_degrade(app_client: TestClient) -> None:
-    app_state(app_client).scheduler.last_errors = {"src-forum": "503 from x"}
+    app_state(app_client).scheduler.failing_sources = 1
     response = app_client.get("/health")
     assert response.status_code == 200
     assert (response.json()["status"], response.json()["failing_sources"]) == ("ok", 1)

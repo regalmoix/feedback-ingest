@@ -10,7 +10,7 @@ from pydantic import BaseModel, ValidationError
 
 from feedback_ingest.connectors.base import PullPage
 from feedback_ingest.connectors.discourse_models import SearchHitIn, SearchPageIn, TopicPostsIn
-from feedback_ingest.domain.errors import TransformError, TransientError
+from feedback_ingest.domain.errors import PermanentError, TransientError
 from feedback_ingest.domain.models import Source
 from feedback_ingest.ports.clock import Clock
 from feedback_ingest.ports.http import HttpClient
@@ -38,9 +38,10 @@ def pull_pages(
     now = clock.now()
     try:
         window = timedelta(days=int(source.config.get("window_days", 7)))
+        # `before:` is a date, so tomorrow at most keeps today's posts in the search
         until = min(now + timedelta(days=1), since_at + window)
     except OverflowError as exc:
-        raise TransformError(str(exc)) from exc
+        raise PermanentError(str(exc)) from exc
     query = f"after:{since_at.date()} before:{until.date()}"
     newest: datetime | None = None
     for page in range(1, _MAX_PAGES + 1):
@@ -52,15 +53,12 @@ def pull_pages(
             extra = {"tenant_id": source.tenant_id, "source_id": source.id}
             log.warning("discourse search error: %s", grouped.error, extra=extra)
             msg = "discourse search reported an error"
-            raise TransformError(msg)
+            raise PermanentError(msg)
         newest = max(
             [hit.created_at for hit in search.posts] + ([newest] if newest else []), default=None
         )
         final = not grouped.more_full_page_results
-        cursor = since
-        if final:
-            moved = max(newest - _OVERLAP, since_at) if newest else since_at
-            cursor = (max(moved, until) if until < now else moved).isoformat()
+        cursor = _next_cursor(since_at, newest, until, now) if final else since
         yield PullPage(payloads=_fetch_posts(base_url, http, search, check), cursor=cursor)
         if final:
             return
@@ -68,7 +66,15 @@ def pull_pages(
         f"discourse source {source.id}: window exceeds {_MAX_PAGES} pages; about 500 posts per day"
         " is the hard limit of Discourse search; lower window_days via PATCH"
     )
-    raise TransformError(msg)
+    raise PermanentError(msg)
+
+
+# 60 s overlap: a post committed late with an older timestamp is re-read, dedup absorbs the repeat.
+# A window wholly in the past advances to its end, so an empty week does not stall the cursor.
+# `before:` takes a date, so until is tomorrow at most, which keeps today in the search.
+def _next_cursor(since: datetime, newest: datetime | None, until: datetime, now: datetime) -> str:
+    moved = max(newest - _OVERLAP, since) if newest else since
+    return (max(moved, until) if until < now else moved).isoformat()
 
 
 def _check_deadline(clock: Clock, deadline: datetime) -> None:
@@ -96,7 +102,9 @@ def _fetch_posts(
             raw = http.get_json(f"{base_url}/t/{topic_id}/posts.json", ids)
             posts += _validated(TopicPostsIn, raw, "posts.json").post_stream.posts
         missing = wanted - {post.get("id") for post in posts}
-        if missing:
+        if (
+            missing
+        ):  # a post can vanish between search and fetch; stop so the cursor does not pass it
             msg = f"topic {topic_id} omitted posts {sorted(missing)}"
             raise TransientError(msg)
         payloads += [post | {"topic_title": title} for post in posts]

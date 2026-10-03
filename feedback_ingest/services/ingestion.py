@@ -9,6 +9,7 @@ from feedback_ingest.domain.enums import EventStatus
 from feedback_ingest.domain.models import RawEvent, Source
 from feedback_ingest.ports.clock import Clock
 from feedback_ingest.ports.queue import RawEventQueue
+from feedback_ingest.services.pipeline import event_extra
 
 log = logging.getLogger(__name__)
 
@@ -37,13 +38,8 @@ class IngestionService:
         )
         stored = self.queue.enqueue(event)
         result = AcceptResult(raw_event_id=stored.id, duplicate=stored.id != event.id)
-        extra = {
-            "raw_event_id": stored.id,
-            "tenant_id": source.tenant_id,
-            "source_id": source.id,
-            "duplicate": result.duplicate,
-        }
+        extra = event_extra(event) | {"raw_event_id": stored.id, "duplicate": result.duplicate}
         if result.duplicate and stored.status is EventStatus.DEAD:
-            log.warning("duplicate of a dead raw event; not requeued, replay it", extra=extra)
+            log.warning("duplicate of a dead raw event; left dead, replay it", extra=extra)
         log.info("accepted (duplicate=%s)", result.duplicate, extra=extra)
         return result

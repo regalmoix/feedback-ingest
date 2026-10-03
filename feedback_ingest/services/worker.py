@@ -10,9 +10,8 @@ from feedback_ingest.services.pipeline import PipelineService, event_extra
 log = logging.getLogger(__name__)
 
 
-# ponytail: one thread, one process; uvicorn --workers N would start N of these, which is safe
-# because the claim is atomic, but set FI_WORKER_ENABLED=false on all but one if you want a
-# single consumer
+# ponytail: one thread per process. Run one consumer process; uvicorn --workers N starts N workers,
+# all reading the same env (safe, the claim is atomic). Run the worker as its own process to scale.
 @dataclass
 class WorkerService:
     queue: RawEventQueue
@@ -32,7 +31,7 @@ class WorkerService:
             try:
                 self.pipeline.process(event)
                 progressed = True
-            except Exception:
+            except Exception:  # only storage errors reach here; process() handles its own
                 log.exception("process crashed", extra=event_extra(event))
         if progressed:
             self._last_ok_at = self.clock.now()
@@ -57,6 +56,7 @@ class WorkerService:
 
     @property
     def healthy(self) -> bool:
+        # three missed polls, but at least 10 s so a slow batch or a GC pause is not an outage
         last, window = self._last_ok_at, timedelta(seconds=max(3 * self.poll_seconds, 10))
         return self.alive and last is not None and self.clock.now() - last <= window
 

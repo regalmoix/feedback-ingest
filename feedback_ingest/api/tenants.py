@@ -4,11 +4,11 @@ from http import HTTPStatus
 from typing import Annotated
 from uuid import uuid4
 
-from fastapi import APIRouter, Header, HTTPException
+from fastapi import APIRouter, Header
 
 from feedback_ingest.api.deps import Ctx
 from feedback_ingest.api.schemas import TenantCreate, TenantCreated
-from feedback_ingest.domain.errors import UnauthorizedError
+from feedback_ingest.domain.errors import ConflictError, UnauthorizedError
 from feedback_ingest.domain.models import Tenant
 from feedback_ingest.utils.hashing import sha256_text
 
@@ -32,5 +32,6 @@ def create_tenant(
     try:
         ctx.adapters.tenants.add(tenant)
     except ValueError as exc:
-        raise HTTPException(HTTPStatus.CONFLICT, detail=f"tenant {body.name!r} exists") from exc
+        msg = f"tenant {body.name!r} exists"
+        raise ConflictError(msg) from exc
     return TenantCreated(id=tenant.id, name=tenant.name, api_key=api_key)

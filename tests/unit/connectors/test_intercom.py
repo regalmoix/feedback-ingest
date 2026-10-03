@@ -7,7 +7,7 @@ from helpers import load
 
 from feedback_ingest.connectors.intercom import IntercomConnector
 from feedback_ingest.domain.enums import FeedbackKind, SourceType
-from feedback_ingest.domain.errors import TransformError
+from feedback_ingest.domain.errors import PermanentError
 from feedback_ingest.domain.metadata import IntercomMetadata
 from feedback_ingest.utils.hashing import payload_hash
 
@@ -55,5 +55,5 @@ def test_source_body_and_part_ids_are_optional() -> None:
 def test_ping_is_not_feedback_and_unknown_topics_go_dead() -> None:
     ping = load(SourceType.INTERCOM, "ping")
     assert INTERCOM.transform(SOURCE, ping) == []
-    with pytest.raises(TransformError, match=r"unsupported topic conversation_part\.redacted"):
+    with pytest.raises(PermanentError, match=r"unsupported topic conversation_part\.redacted"):
         INTERCOM.transform(SOURCE, ping | {"topic": "conversation_part.redacted"})

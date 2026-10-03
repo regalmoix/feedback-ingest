@@ -7,7 +7,7 @@ from pydantic import ValidationError
 
 from feedback_ingest.connectors.registry import CONNECTORS
 from feedback_ingest.domain.enums import EventStatus, UpsertOutcome
-from feedback_ingest.domain.errors import TransformError, TransientError
+from feedback_ingest.domain.errors import PermanentError, TransientError
 from feedback_ingest.domain.models import FeedbackRecord, RawEvent
 from feedback_ingest.ports.clock import Clock
 from feedback_ingest.ports.queue import RawEventQueue
@@ -38,17 +38,18 @@ class PipelineService:
     def process(self, event: RawEvent) -> EventStatus:
         extra = event_extra(event)
         # a crash outside this handler leaves the lease to expire; each re-claim bumps attempts
+        # > not >=: claim already counted the attempt about to start
         if event.attempts > self.max_attempts:
             last = event.error or "none recorded (worker crashed; see logs)"
             error = f"attempt limit exceeded; last error: {last}"[:_MAX_ERROR]
             log.warning("dead: %s", error, extra=extra)
-            return _finish(self.queue.mark_dead(event, error), EventStatus.DEAD, extra)
+            return _mark_outcome(self.queue.mark_dead(event, error), EventStatus.DEAD, extra)
         try:
             outcomes = self._apply(event)
-        except (ValidationError, TransformError) as exc:
+        except (ValidationError, PermanentError) as exc:
             error = _describe(exc)
             log.warning("dead: %s", error, extra=extra)
-            return _finish(self.queue.mark_dead(event, error), EventStatus.DEAD, extra)
+            return _mark_outcome(self.queue.mark_dead(event, error), EventStatus.DEAD, extra)
         except TransientError as exc:
             log.warning("transient failure: %s", exc, extra=extra)
             return self._retry(event, f"TransientError: {exc}", extra)
@@ -57,7 +58,7 @@ class PipelineService:
         except Exception as exc:  # its text may hold customer data: it stays in the log only
             log.exception("unexpected failure", extra=extra)
             return self._retry(event, f"{type(exc).__name__} (see logs)", extra)
-        status = _finish(self.queue.mark_processed(event), EventStatus.PROCESSED, extra)
+        status = _mark_outcome(self.queue.mark_processed(event), EventStatus.PROCESSED, extra)
         if status == EventStatus.PROCESSED:
             counts = [outcomes[outcome] for outcome in UpsertOutcome]
             log.info("processed: inserted=%d, updated=%d, skipped_older=%d", *counts, extra=extra)
@@ -65,9 +66,9 @@ class PipelineService:
 
     def _apply(self, event: RawEvent) -> Counter[UpsertOutcome]:
         source = self.sources.get(event.source_id, tenant_id=event.tenant_id)
-        if source is None:
+        if source is None:  # unreachable under the composite FK; the memory fake can hit it
             msg = "source not found"
-            raise TransformError(msg)
+            raise PermanentError(msg)
         records = CONNECTORS[source.type].transform(source, event.payload)
         now = self.clock.now()
         stamped = (
@@ -79,20 +80,22 @@ class PipelineService:
         error = error[:_MAX_ERROR]
         if event.attempts >= self.max_attempts:
             log.warning("dead: %s", error, extra=extra)
-            return _finish(self.queue.mark_dead(event, error), EventStatus.DEAD, extra)
+            return _mark_outcome(self.queue.mark_dead(event, error), EventStatus.DEAD, extra)
         delay = min(2**event.attempts, self.backoff_cap_seconds)
         next_at = self.clock.now() + timedelta(seconds=delay)
-        return _finish(self.queue.mark_failed(event, error, next_at), EventStatus.FAILED, extra)
+        return _mark_outcome(
+            self.queue.mark_failed(event, error, next_at), EventStatus.FAILED, extra
+        )
 
 
-def _describe(exc: ValidationError | TransformError) -> str:
-    if isinstance(exc, TransformError):
+def _describe(exc: ValidationError | PermanentError) -> str:
+    if isinstance(exc, PermanentError):
         return str(exc)[:_MAX_ERROR]
     errors = exc.errors(include_url=False, include_input=False)  # no customer text in the error
     return "; ".join(f"{'.'.join(map(str, e['loc']))}: {e['msg']}" for e in errors)[:_MAX_ERROR]
 
 
-def _finish(ok: bool, status: EventStatus, extra: dict[str, object]) -> EventStatus:
+def _mark_outcome(ok: bool, status: EventStatus, extra: dict[str, object]) -> EventStatus:
     if ok:
         return status
     log.warning("lease lost; a newer claim owns this event", extra=extra)
