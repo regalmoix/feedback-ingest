@@ -120,6 +120,24 @@ id); `external_event_id` (id plus version, the dedupe key); `transform` mapping 
 common fields and the metadata model; edge cases returning 0 records or raising a permanent error. Only
 field names differ between sources.
 
+## Search and analytics (downstream of records, not built)
+
+**How would search and analytics hang off this design?**
+Rule: `feedback_records` is the source of truth; search and analytics are derived copies that lag a little
+and can always be rebuilt.
+- Search (Solr, Elasticsearch, OpenSearch): a post-save hook in `PipelineService._apply` after
+  `feedback.upsert` returns `inserted` or `updated` sends the record to the indexer. Risk: dual write (DB
+  saved, index call fails, or the reverse). Fix: write an "index me" row in the same transaction (outbox)
+  and let a worker push it, or read the database change log instead of hooks; plus a periodic full reindex.
+- Analytics (Redshift, StarRocks, ClickHouse): every insert/update becomes a change event (CDC such as
+  Debezium, or published by our code), streamed (Kinesis Firehose, Kafka) into a 1:1 mirror table in a
+  column store, so heavy queries ("complaints per app version per week") never load the main database.
+- At Eightfold: post-save hooks refresh Solr; Firehose keeps an entity changelog that builds 1:1 analytics
+  tables in Redshift or StarRocks. Enterpret's engineering blog describes CDC into a self-managed
+  ClickHouse.
+Say: "Records are the truth. Search is fed after each save through an outbox so a failed index call is
+not lost. Analytics gets a 1:1 mirror through change data capture. Both are rebuildable."
+
 ## The worker
 
 **What does the worker do?**
