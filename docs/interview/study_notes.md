@@ -119,6 +119,10 @@ the cursor and we crashed before page 2 (a post from 02-02), the next sync would
 read 02-02. Cost: a window over 10 pages (~500 posts) never reaches its final page, so the cursor is stuck until
 `window_days` is lowered with one PATCH. A source whose API returns results in time order could move it per page;
 the generic `_sync` loop already allows that.
+Same trap with the 60 s deadline: if a window always needs longer, every sync times out mid-window, saves
+pages as duplicates, and the cursor never moves (quieter than the 10-page error). Signs: the source stays in
+`failing_sources`, duplicates grow, cursor flat. Fix: smaller `window_days`, or a bigger deadline; real fix is
+paging by time inside the window or saving "window X, page N done" to resume.
 
 **Scheduler in prod: cron or Airflow?**
 Split it. A tiny trigger (cron, EventBridge, Celery beat) runs every minute, picks sources with
