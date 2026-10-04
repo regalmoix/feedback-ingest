@@ -85,6 +85,29 @@ dropped; an edit has a new time, so a new key, so it is kept and later updates t
 only `r1`, edits would be lost. Exceptions: a custom batch is keyed by a hash of the whole body (the batch
 is one delivery); an unreadable payload falls back to a body hash.
 
+## Records and metadata
+
+**What is `FeedbackRecord`?**
+The uniform internal record the assignment asks for, stored in `feedback_records`. Same columns for every
+source (text, title, author, language, rating, kind, created/updated times, tenant, source, external id,
+deleted_at, connector_version) plus `metadata` JSON for source-specific extras. `raw_events` = what arrived
+(log and queue); `feedback_records` = what we understood (queryable, rebuildable by replay). One raw event
+can become 0, 1 or many records (Intercom ping = 0, review = 1, custom batch of 3 = 3).
+
+**How is per-source metadata typed?**
+One Pydantic model per source, combined in a union picked by the `source_type` field (each model has
+`source_type: Literal["playstore"]` etc.). Pydantic validates only the matching model; the record also
+checks its own `source_type` equals the metadata's, so Play Store metadata cannot sit on a tweet; reading
+back rebuilds the right class from JSON. New source = one new model in the union. Cost: filtering inside
+JSON (`app_version = 4.2.1`) is slower than a real column; fix by indexing or promoting the few fields
+people filter on (their help center describes starring a couple of key metadata fields per source).
+
+**What does every connector do?**
+Five things: an input model that validates the payload (bad payload: dead); `external_id` (the item's own
+id); `external_event_id` (id plus version, the dedupe key); `transform` mapping into `new_record(...)` with
+common fields and the metadata model; edge cases returning 0 records or raising a permanent error. Only
+field names differ between sources.
+
 ## The worker
 
 **What does the worker do?**
