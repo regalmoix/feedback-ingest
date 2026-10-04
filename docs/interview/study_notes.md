@@ -144,6 +144,12 @@ retry, and dies only on the next claim. `process`'s `>` (checked before work): c
 earlier attempts crashed before anything was recorded (process killed); the claim already counted those
 attempts, so `> max` means "stop".
 
+**How is a retry done? Do we re-enqueue?**
+No. The row is the queue entry, so a retry is a status change: `_retry` marks it `failed` with
+`next_attempt_at = now + min(2^attempts, 300 s)`, and the claim picks it up again when due. Contrast:
+SQS keeps the same message but hides it longer (change its visibility timeout); Kafka cannot delay one
+message, so you publish a copy to a retry topic and move on.
+
 **Scaling and other worker questions?**
 More processes (the claim is atomic); one process handles one event at a time. Thread not async because
 the database calls block and one thread is simplest.
