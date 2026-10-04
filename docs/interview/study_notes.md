@@ -149,6 +149,16 @@ stamp `ingested_at`, upsert each (insert, update or skip; `ingested_at` only sti
 saves on its own: if record 2 of 3 fails, record 1 is stored, the event retries, and record 1 is re-saved
 harmlessly (same version).
 
+**What are the save rules (`merge()`)?**
+No stored record: inserted. Newer or equal version: updated (equal counts, so a replay after a fix
+overwrites). Older: skipped. A delete, even an older one: applied (`deleted_at` set). Already deleted:
+stays deleted, `deleted_at` is never cleared. Never changed by an update: `id`, `ingested_at`,
+`source_created_at`; the stored version only moves forward. Why deletes win: a delete is final, so an
+out-of-order old edit must not bring the item back. Say: "Newer or equal wins, older is ignored, deletes
+are sticky and always apply, so arrival order cannot corrupt a record." Memory store keys by
+`(source_id, external_id)` like the database's unique key, not by `id`, so it does not depend on how ids
+are made.
+
 ## Search and analytics (downstream of records, not built)
 
 **How would search and analytics hang off this design?**
