@@ -113,6 +113,12 @@ earlier. A new event gets `now` (ready at once). After each failure it moves out
 +16 s, and the 5th failure marks it dead (wait capped at `FI_BACKOFF_CAP_SECONDS`, 300). Replay sets it
 back to `now` and resets attempts. Backoff avoids hammering a struggling upstream or database.
 
+**In what order are events claimed? Is it fair across tenants?**
+Up to `batch` (10) claimable events, earliest `next_attempt_at` first (oldest waiting work first).
+Claimable = pending/failed and due, or processing with an expired lease. Not fair per tenant: if tenant A
+dumps 10,000 events, tenant B waits behind them (noisy neighbour). Fix: round-robin claims per tenant or a
+queue per tenant (their engineering blog describes per-tenant partitioning).
+
 **Scaling and other worker questions?**
 More processes (the claim is atomic); one process handles one event at a time. Thread not async because
 the database calls block and one thread is simplest.
