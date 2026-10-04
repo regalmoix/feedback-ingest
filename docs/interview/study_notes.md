@@ -320,6 +320,14 @@ admin replays the event mid-work.
 More processes (the claim is atomic); one process handles one event at a time. Thread not async because
 the database calls block and one thread is simplest.
 
+**What actually triggers a retry on a push event today?**
+Only database errors. Processing is DB read, pure `transform` (no network), DB write. `transform` can only fail
+permanently (dead). A DB hiccup (`OperationalError: database is locked` after SQLite's 5 s wait) is not our
+`TransientError`; it lands in the catch-all `except Exception` and retries with the same backoff, error stored as
+`"OperationalError (see logs)"`. `TransientError` is raised only on the pull side today (HTTP, deadline), where
+`PullService` catches it and stops the sync; it never makes a failed raw event. The pipeline's `TransientError`
+branch is the slot for future network steps (enrichment, a lookup at the source).
+
 ## Tenancy and storage
 
 **Why does the pipeline use `sources.get(id, tenant_id=...)` and not `get_by_id` plus a check?**
