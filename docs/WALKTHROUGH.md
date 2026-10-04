@@ -1003,6 +1003,300 @@ sequenceDiagram
 
 </details>
 
+## Part B2. The pull path and replay (read before Part C)
+
+Part B followed a review that was **pushed** to us. Half the assignment is **pull**: we fetch feedback
+ourselves. The good news: a pulled item joins the exact same path at Hop 4. Pulling only adds three
+things: who starts a pull, how pages are fetched, and how the **cursor** (the bookmark of how far we have
+read) moves. Then replay, which Part C uses twice.
+
+```
+scheduler tick (every 5 min) ─┐
+POST /v1/sources/{id}/sync ──┴─> PullService.sync ─> Discourse puller yields pages
+                                         │                    │
+                                         │   each item ───────┘──> IngestionService.accept  (Hop 4 onwards)
+                                         └─> after each page: save the cursor
+```
+
+### P1. Who starts a pull
+
+Two callers. The **scheduler** is a background thread, shaped like the worker, that wakes every
+`FI_PULL_INTERVAL_SECONDS` (300 by default):
+
+[feedback_ingest/services/scheduler.py:43-52](../feedback_ingest/services/scheduler.py#L43-L52)
+
+```python
+    def _loop(self) -> None:
+        sources: list[Source] = []
+        while not self._stop.wait(self.interval_seconds):
+            try:
+                sources = self.pull.sources.list_enabled(SourceMode.PULL)
+                failing = sum(self._sync_one(source) for source in sources)
+            except Exception:
+                log.exception("scheduler tick failed")
+                failing = max(len(sources), 1)  # every source last listed; never 0 on a broken tick
+            self.failing_sources = failing  # health shows this tick only
+```
+
+Each tick lists the enabled pull sources and syncs them one by one. `_sync_one` returns `True` when a
+source failed; the sum becomes `failing_sources`, which `/health` reports as a count. If the whole tick
+breaks (for example the database is down), the count is set to at least 1 so health never shows "0
+failing" for a broken tick.
+
+The second caller is a person, through the API (the demo uses this):
+
+[feedback_ingest/api/sync.py:15-26](../feedback_ingest/api/sync.py#L15-L26)
+
+```python
+# ponytail: inline sync; enqueue a "sync job" if a backfill takes minutes
+@router.post("/v1/sources/{source_id}/sync")
+def sync_source(
+    source: Annotated[Source, Depends(tenant_source)], ctx: Ctx, response: Response
+) -> PullResult:
+    if source.mode is not SourceMode.PULL or not source.enabled:
+        msg = f"source {source.id} is not an enabled pull source"
+        raise ConflictError(msg)
+    result = ctx.pull.sync(source)
+    if result.error is not None:
+        response.status_code = HTTPStatus.BAD_GATEWAY
+    return result
+```
+
+Only an enabled pull source may sync (409 otherwise). The sync runs inside the request and the answer is
+the `PullResult`; if the pull stopped on an error the status is 502, so the caller sees it failed.
+
+### P2. `PullService.sync`: one sync, never two at once for the same source
+
+[feedback_ingest/services/pull.py:41-49](../feedback_ingest/services/pull.py#L41-L49)
+
+```python
+    def sync(self, source: Source) -> PullResult:
+        lock = self._running.setdefault(source.id, threading.Lock())
+        if not lock.acquire(blocking=False):
+            msg = f"source {source.id} is already syncing"
+            raise ConflictError(msg)
+        try:
+            return self._sync(source)
+        finally:
+            lock.release()
+```
+
+A small lock per source. If the scheduler is syncing a source and you press "sync" on it, the second one
+gets 409 instead of running twice. The comment above the class is honest about the limit: the lock lives
+in one process, so two `uvicorn` processes could sync the same source together; the duplicate items are
+then dropped by the raw-event key, so it costs effort, not correctness.
+
+### P3. The sync loop: same `accept` as a webhook
+
+[feedback_ingest/services/pull.py:55-69](../feedback_ingest/services/pull.py#L55-L69)
+
+```python
+        deadline = self.clock.now() + timedelta(seconds=self.deadline_seconds)
+        try:
+            for page in PULLERS[source.type].pull(source, self.http, self.clock, deadline):
+                # ponytail: whole-page accept loop; batch enqueue if a page ever holds thousands
+                # of items
+                for payload in page.payloads:
+                    if self.ingestion.accept(source, payload).duplicate:
+                        duplicates += 1
+                    else:
+                        accepted += 1
+                cursor = self._advance(source, page.cursor)
+                pages += 1
+        except (TransientError, PermanentError) as exc:  # anything else is ours: let it raise
+            log.warning("pull stopped at the saved cursor: %s", exc, exc_info=exc, extra=extra)
+            error = str(exc)
+```
+
+Read it as: ask the source's puller for pages; hand every item in a page to `IngestionService.accept`,
+the same function the webhook calls in Hop 4, so dedupe, the queue, the worker, retries and the save
+rules all apply unchanged; after the whole page is saved, move the cursor. A **deadline**
+(`FI_PULL_DEADLINE_SECONDS`, 60) stops a sync that runs too long.
+
+If the source fails (rate limit, timeout, bad response), the loop stops, the cursor stays where it was,
+and the reason goes into `PullResult.error`. Any other exception is a bug in our code and is allowed to
+raise, so it is not hidden.
+
+The real result from demo step 9:
+
+`{"pages": 3, "accepted": 127, "duplicates": 0, "cursor": "2021-01-05T00:00:00", "error": null}`
+
+### P4. The cursor never moves backwards
+
+[feedback_ingest/services/pull.py:82-87](../feedback_ingest/services/pull.py#L82-L87)
+
+```python
+    def _advance(self, source: Source, cursor: str) -> str:
+        stored = self.sources.get(source.id, source.tenant_id)
+        if stored is not None and stored.cursor is not None:
+            cursor = max(stored.cursor, cursor, key=NAIVE_UTC.validate_python)
+        self.sources.update_cursor(source.id, source.tenant_id, cursor)
+        return cursor
+```
+
+Before saving a new cursor it compares it with the stored one and keeps the later of the two. So two syncs
+finishing in an odd order cannot rewind the bookmark.
+
+### P5. The Discourse puller: a window, pages, and when the cursor moves
+
+You do not need every line of `discourse_pull.py`. Two parts matter. First, the **window**: which dates to
+search.
+
+[feedback_ingest/connectors/discourse_pull.py:36-45](../feedback_ingest/connectors/discourse_pull.py#L36-L45)
+
+```python
+    since = source.cursor or source.config["start_after"]  # check_source parsed start_after
+    since_at = NAIVE_UTC.validate_python(since)
+    now = clock.now()
+    try:
+        window = timedelta(days=int(source.config.get("window_days", 7)))
+        # `before:` is a date, so tomorrow at most keeps today's posts in the search
+        until = min(now + timedelta(days=1), since_at + window)
+    except OverflowError as exc:
+        raise PermanentError(str(exc)) from exc
+    query = f"after:{since_at.date()} before:{until.date()}"
+```
+
+Start from the cursor, or from `start_after` the first time. Search at most `window_days` (7 by default,
+the demo uses 4) ahead, and never past tomorrow. Discourse search filters by whole dates (`after:` and
+`before:`).
+
+Second, the **pages**:
+
+[feedback_ingest/connectors/discourse_pull.py:47-64](../feedback_ingest/connectors/discourse_pull.py#L47-L64)
+
+```python
+    for page in range(1, _MAX_PAGES + 1):
+        check()
+        raw = http.get_json(f"{base_url}/search.json", [("q", query), ("page", str(page))])
+        search = _validated(SearchPageIn, raw, "search.json")
+        grouped = search.grouped_search_result
+        if grouped.error:  # upstream text stays in the log, out of PullResult and the API
+            extra = {"tenant_id": source.tenant_id, "source_id": source.id}
+            log.warning("discourse search error: %s", grouped.error, extra=extra)
+            msg = "discourse search reported an error"
+            raise PermanentError(msg)
+        newest = max(
+            [hit.created_at for hit in search.posts] + ([newest] if newest else []), default=None
+        )
+        final = not grouped.more_full_page_results
+        cursor = _next_cursor(since_at, newest, until, now) if final else since
+        yield PullPage(payloads=_fetch_posts(base_url, http, search, check), cursor=cursor)
+        if final:
+            return
+```
+
+It asks for search page 1, 2, 3, ... and yields each one with its posts. The key line is
+`cursor = ... if final else since`: pages before the last carry the **old** cursor; only the final page
+carries the new one. Why: Discourse does not return results oldest-first, so a cursor taken from a middle
+page could jump past posts on a later page. If the run dies halfway, the next sync re-reads the whole
+window, and the raw-event key drops the repeats. Discourse refuses pages above 10, so a window with more
+than about 500 posts stops with an error (the fix is a smaller `window_days`, settable with PATCH).
+
+### P6. The cursor rule, with real values
+
+[feedback_ingest/connectors/discourse_pull.py:72-76](../feedback_ingest/connectors/discourse_pull.py#L72-L76)
+
+```python
+# 60 s overlap: a post committed late with an older timestamp is re-read, dedup absorbs the repeat.
+# A window wholly in the past advances to its end, so an empty week does not stall the cursor.
+def _next_cursor(since: datetime, newest: datetime | None, until: datetime, now: datetime) -> str:
+    moved = max(newest - _OVERLAP, since) if newest else since
+    return (max(moved, until) if until < now else moved).isoformat()
+```
+
+Real outputs (computed by calling `_next_cursor`):
+
+| Case | Cursor before | Newest post found | Window end | New cursor |
+|---|---|---|---|---|
+| Past window with posts (like the demo) | 2021-01-01 | 2021-01-04 18:30 | 2021-01-05 | `2021-01-05T00:00:00` |
+| Past window, no posts | 2021-01-01 | none | 2021-01-05 | `2021-01-05T00:00:00` |
+| Window reaches today | 2026-02-28 | 2026-03-01 10:30 | 2026-03-02 | `2026-03-01T10:29:00` |
+| Today, nothing new since | 2026-03-01 10:29 | none | 2026-03-02 | `2026-03-01T10:29:00` |
+
+Two rules: a window wholly in the past jumps to its end (so an empty week does not stall the bookmark);
+otherwise the cursor stops 60 seconds before the newest post, so a post saved a moment late is read
+again rather than missed. Reading twice is free: the duplicate is dropped.
+
+### P7. Replay and the dead list
+
+The admin routes are tenant-scoped like every other route. The dead list is
+`GET /admin/raw-events?status=dead`, newest first. Replay for one event:
+
+[feedback_ingest/api/admin.py:45-51](../feedback_ingest/api/admin.py#L45-L51)
+
+```python
+@router.post("/raw-events/{event_id}/replay")
+def replay_raw_event(event_id: str, tenant: CurrentTenant, ctx: Ctx) -> dict[str, EventStatus]:
+    _tenant_event(event_id, tenant, ctx)
+    if not ctx.adapters.queue.replay(event_id, ctx.adapters.clock.now()):
+        msg = "event is being processed"
+        raise ConflictError(msg)
+    return {"status": EventStatus.PENDING}
+```
+
+And in bulk, for example "every dead event of this source":
+
+[feedback_ingest/api/admin.py:22-37](../feedback_ingest/api/admin.py#L22-L37)
+
+```python
+@router.post("/raw-events/replay")
+def replay_raw_events(
+    tenant: CurrentTenant,
+    ctx: Ctx,
+    source_id: str | None = None,
+    status: Literal["dead", "failed", "processed"] = "dead",
+    limit: Limit = 500,
+) -> dict[str, int]:
+    queue, now = ctx.adapters.queue, ctx.adapters.clock.now()
+    if source_id is not None and ctx.adapters.sources.get(source_id, tenant_id=tenant.id) is None:
+        msg = f"source {source_id} not found"
+        raise NotFoundError(msg)
+    events = queue.list_by_status(
+        EventStatus(status), tenant_id=tenant.id, source_id=source_id, limit=limit
+    )
+    return {"replayed": sum(queue.replay(event.id, now) for event in events)}
+```
+
+What replay actually does to the row (the in-memory version; SQLite does the same in one UPDATE):
+
+[feedback_ingest/adapters/memory/queue.py:58-72](../feedback_ingest/adapters/memory/queue.py#L58-L72)
+
+```python
+    def replay(self, event_id: str, now: datetime) -> bool:
+        event = self._events.get(event_id)
+        if event is None or (
+            event.status == EventStatus.PROCESSING and not _is_claimable(event, now)
+        ):
+            return False  # a live lease: a worker owns it
+        self._update(
+            event_id,
+            status=EventStatus.PENDING,
+            attempts=0,
+            next_attempt_at=now,
+            lease_until=None,
+            error=None,
+        )
+        return True
+```
+
+Back to `pending`, attempts 0, error cleared, due now. The worker then claims it like a new event and runs
+the stored payload through today's connector code. It is refused only while a worker holds a live lease
+(409). A processed event can be replayed too: the save accepts an equal version, so a fixed connector's
+output overwrites the old record.
+
+<details><summary>Check yourself</summary>
+
+- Where does a pulled post join the push path? *At `IngestionService.accept` (Hop 4); from there it is
+  identical.*
+- Why does only the final page move the cursor? *Search results are not oldest-first, so a middle page's
+  newest post could skip posts on later pages.*
+- A sync is rate-limited on page 2. What happens? *The loop stops, the cursor stays put, the error is in
+  `PullResult` (502 for a manual sync), and the next tick re-reads the window; repeats are dropped.*
+- What does replay change on the row? *Status pending, attempts 0, error cleared, due now.*
+
+</details>
+
 ## Part C. "How does the app handle X?"
 
 Each answer is a trace through code you saw in Part B. Outputs are from the same run.
