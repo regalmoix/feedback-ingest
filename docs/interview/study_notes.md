@@ -102,6 +102,18 @@ back rebuilds the right class from JSON. New source = one new model in the union
 JSON (`app_version = 4.2.1`) is slower than a real column; fix by indexing or promoting the few fields
 people filter on (their help center describes starring a couple of key metadata fields per source).
 
+**How would we filter or search by metadata?**
+Today `GET /v1/records` filters only by source, kind and time. Ladder, cheapest first: (1) query the JSON
+(`metadata->>'app_version'`), scans rows; (2) index a JSON field (Postgres expression or GIN index);
+(3) promote a hot field to a real indexed column (e.g. a generated column from the JSON), chosen per
+source, like Enterpret's "starred" fields; (4) a search index (Solr, Elasticsearch, OpenSearch) for
+full-text, any-field filters and facets; (5) an analytics store (ClickHouse) for counts and trends.
+For 4 and 5 the database stays the source of truth: feed the copy after each upsert (outbox table or the
+database change log), accept a small lag, and rebuild it from `feedback_records` (itself rebuildable from
+`raw_events`). Same pattern as a Solr index over the DB at Eightfold. Their public job posts name
+ElasticSearch and ClickHouse. Say: "Metadata is JSON so new sources need no schema change; hot filters
+get promoted to indexed columns; search goes to an index fed from the record table, always rebuildable."
+
 **What does every connector do?**
 Five things: an input model that validates the payload (bad payload: dead); `external_id` (the item's own
 id); `external_event_id` (id plus version, the dedupe key); `transform` mapping into `new_record(...)` with
