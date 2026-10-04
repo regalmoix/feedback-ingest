@@ -150,6 +150,15 @@ No. The row is the queue entry, so a retry is a status change: `_retry` marks it
 SQS keeps the same message but hides it longer (change its visibility timeout); Kafka cannot delay one
 message, so you publish a copy to a retry topic and move on.
 
+**When does an event retry and when does it go dead?**
+Retry (`failed`): transient errors (upstream 503/timeout, database locked) and unknown exceptions (logged
+with the traceback; stored error is only "<ErrorType> (see logs)"). Dead at once: validation failure
+(payload missing a field), permanent errors (unsupported topic or record type, source not found). Dead
+after 5 attempts: anything still failing. Say: "Bad data cannot get better, so it goes dead and waits for
+a fix plus replay. Flaky failures retry with backoff. After 5 tries anything goes dead so nothing loops
+forever." Unknown errors are retried on purpose (safe if transient); the upgrade is classifying more as
+permanent once seen in production.
+
 **Scaling and other worker questions?**
 More processes (the claim is atomic); one process handles one event at a time. Thread not async because
 the database calls block and one thread is simplest.
