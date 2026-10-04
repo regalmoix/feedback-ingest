@@ -110,6 +110,14 @@ key), just wasted calls. Fix: a DB lease on the source row, like the event claim
 After the page's payloads are saved, never before, and never backwards (`max(stored, new)`). Discourse moves
 it only on the final page of a window, so a crash mid-window re-reads that window; duplicates are dropped.
 
+**Scheduler in prod: cron or Airflow?**
+Split it. A tiny trigger (cron, EventBridge, Celery beat) runs every minute, picks sources with
+`next_sync_at <= now`, and enqueues one sync job per source. Sync workers run the jobs in parallel, so a slow
+source delays only itself (today one thread ticks every source in turn). A lease on the source row stops
+double pulls (manual plus scheduled, or two workers). Per-source schedules also give per-source intervals,
+backoff for sources that keep failing, and room for each API's rate limits. Airflow suits a few big batch jobs
+(backfills, analytics), not thousands of small syncs every few minutes.
+
 ## Records and metadata
 
 **What is `FeedbackRecord`?**
