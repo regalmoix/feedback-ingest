@@ -159,6 +159,18 @@ are sticky and always apply, so arrival order cannot corrupt a record." Memory s
 `(source_id, external_id)` like the database's unique key, not by `id`, so it does not depend on how ids
 are made.
 
+**What does `new_record` guard, and what is `connector_version` for?**
+Connectors pass content (text, rating, ...); `new_record` sets `id`, `tenant_id`, `source_id`,
+`source_type`, `external_id` and `connector_version` after it, so a connector cannot override them (a buggy
+connector passing `tenant_id="other"` still gets the source's tenant). Every connector has a version stamped
+on each record: after fixing a parser, bump it and replay only records built by the old version.
+
+**How is the SQLite save made safe, and why not ON CONFLICT?**
+Read the existing row, decide with `merge()`, write, all in one locked transaction (`BEGIN IMMEDIATE`), so no
+other writer gets in between. On Postgres the same rule becomes one
+`INSERT ... ON CONFLICT ... DO UPDATE WHERE <newer>`. Say: "SQLite's write lock makes the simple version
+safe; the single-statement form is the Postgres upgrade."
+
 ## Search and analytics (downstream of records, not built)
 
 **How would search and analytics hang off this design?**
