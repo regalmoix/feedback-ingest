@@ -3,7 +3,7 @@ name = "feedback-ingest"
 version = "0.1.0"
 description = "Multi-tenant feedback ingestion service (push webhooks + pull connectors)"
 authors = [
-    { name = "Nachiket Agrawal", email = "nagrawal@eightfold.ai" }
+    { name = "Nachiket Agrawal", email = "agrawalnachiket14@gmail.com" }
 ]
 requires-python = ">=3.12"
 dependencies = [
