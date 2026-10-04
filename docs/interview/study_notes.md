@@ -119,6 +119,18 @@ Claimable = pending/failed and due, or processing with an expired lease. Not fai
 dumps 10,000 events, tenant B waits behind them (noisy neighbour). Fix: round-robin claims per tenant or a
 queue per tenant (their engineering blog describes per-tenant partitioning).
 
+**How do our queue ideas map to SQS, Redis, Kafka?**
+| Ours (SQLite table) | SQS | Redis | Kafka |
+|---|---|---|---|
+| Claim + lease | visibility timeout | XREADGROUP pending list | partition owner + offset |
+| Lease expiry retries a crash | message reappears | XAUTOCLAIM stale entries | uncommitted offset re-read |
+| Backoff via `next_attempt_at` | change visibility / delay | sorted set by retry time | retry topics (no per-message delay) |
+| `status = dead` | dead-letter queue | separate stream | dead-letter topic |
+| Lookup by id, per-tenant dead list | no | only if indexed yourself | no |
+
+Say: "SQS is the closest swap. Kafka changes the retry model. Either way keep a small table for lookup and
+replay."
+
 **Scaling and other worker questions?**
 More processes (the claim is atomic); one process handles one event at a time. Thread not async because
 the database calls block and one thread is simplest.
