@@ -47,6 +47,14 @@ compare. Wrong or missing signature: 401. Only push sources have one.
 Senders like Intercom can only be given a URL, not custom headers. The unguessable source id in the URL
 picks the source, its signature proves the sender, and the tenant comes from the source row.
 
+**Why store only a hash of the API key? Why plain SHA-256, not bcrypt?**
+A leaked database must not let anyone log in. The key is shown once at tenant creation; we store only its
+SHA-256 hash, and on each request hash the `X-API-Key` header and look that hash up (unique index). Plain
+fast hash is fine because keys are 256 random bits (unguessable); passwords are short and guessable, so
+they need slow salted hashes (bcrypt, argon2), which also could not be looked up directly. Contrast:
+webhook secrets are stored in plain text because we need the real value to compute each HMAC; the fix
+is encryption at rest or a secrets manager (KMS), the "secrets at rest" gap.
+
 **Do we authenticate when we pull from Discourse?**
 No: meta.discourse.org search is public. A private forum needs an API key in request headers; not built
 (known gap). It would live with the source's settings, stored as a secret.
