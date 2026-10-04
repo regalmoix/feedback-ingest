@@ -127,6 +127,15 @@ take `kind` from `KIND_BY_SOURCE`. Dedupe is per batch (raw event key = hash of 
 is one delivery), upsert is per record (by each entry's `id`). One bad entry sends the whole batch to dead
 (marked shortcut; upgrade: save the good ones, dead-letter only the bad one). Unknown type = permanent error.
 
+**Why does a record have `external_id` but not `external_event_id`? Can we trace a record to its delivery?**
+The record keeps identity and version separately: `external_id` is the key (one row per item), the version
+is a comparable timestamp (`source_updated_at`, else `source_created_at`) used by `merge()`.
+`external_event_id` answers "have we received this delivery?", so it lives on the raw event. Gap: a record
+does not point back to the raw event that last produced it. Workaround: for most sources the raw key starts
+with the item id, so search by source and key prefix (fails for custom batches, keyed by body hash).
+Add-on: a `last_raw_event_id` column set in `_apply` (latest delivery only; full history needs a separate
+history table).
+
 ## Search and analytics (downstream of records, not built)
 
 **How would search and analytics hang off this design?**
