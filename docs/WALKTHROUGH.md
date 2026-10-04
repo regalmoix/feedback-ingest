@@ -8,7 +8,7 @@ This is the place to start. It eases you into the code, then follows one real pi
 
 1. Read Part A once, slowly. It shows the five Python patterns the code is built from, so nothing later looks strange.
 2. Part B is the core. It follows one review, hop by hop, from the HTTP request to the database and back out.
-3. Parts C, D and E are interview answers: "how does the app handle X", "how would you swap Y for Z", "why P over Q". Each one is short and ends in code you have already seen in Part B. Part E2 is the broad system design drill: schema and indexes, every API, SQL vs NoSQL, queues, DB down, ACID and SOLID, threads, alarms.
+3. Parts C, D and E are interview answers: "how does the app handle X", "how would you swap Y for Z", "why P over Q". Each one is short and ends in code you have already seen in Part B. Part E2 is the broad system design drill: schema and indexes, every API, SQL vs NoSQL, queues, DB down, ACID and SOLID, threads, alarms. Part E3 is a primer: NoSQL and DynamoDB, ACID, CAP, delivery guarantees, reliability patterns, scaling words, SOLID.
 4. A word in **bold** is being defined right there. After that it is used without explanation.
 5. Every code excerpt is copied from the repo. The link above it opens the exact lines. If an excerpt and the code ever disagree, the code wins.
 6. Every output (JSON, log lines, tables) was produced by running the real code. Random ids are cut to 8 characters.
@@ -2132,6 +2132,9 @@ Two rules the interviewer may test:
 
 ### S3. SQL or NoSQL? Postgres or DynamoDB?
 
+More depth, including DynamoDB basics and how this service would look on it: Part E3, N1 to N4.
+
+
 **Our access patterns pick SQL:**
 1. Two unique keys for idempotency.
 2. An atomic "claim the next due rows" update.
@@ -2197,6 +2200,9 @@ gives up.
 sender, not lost data."
 
 ### S6. ACID and SOLID
+
+More depth (isolation levels, CAP, delivery guarantees, other principles): Part E3, N5 to N10.
+
 
 **ACID** is what a database transaction promises:
 - **Atomic**: all or nothing.
@@ -2307,6 +2313,227 @@ cause.
 **Paging rule:**
 - Page a human for data at risk: 503s, the oldest pending event too old, the app down.
 - Open a ticket for one source failing or a dead-rate bump on one tenant.
+
+## Part E3. Primer: NoSQL, and the principles interviewers name-drop
+
+Background you can lean on for about 2 hours of questions. Each item: what it is, a tiny example, and how it
+shows up in this service. Part E2 (S3 and S6) has the short versions; this is the longer one.
+
+### N1. NoSQL in plain words
+
+**SQL (relational)**, like Postgres, MySQL or SQLite:
+- Tables with fixed columns, joins between tables, and transactions across many rows.
+- You design the **data** first, then can ask almost any question later with SQL.
+
+**NoSQL** is a family name, not one thing:
+
+| Type | Examples | Shape | Good at |
+|---|---|---|---|
+| **Key-value / wide-column** | DynamoDB, Cassandra | an item found by its key | huge scale, simple lookups, predictable speed |
+| **Document** | MongoDB, Firestore | JSON documents | flexible fields per record |
+| **Search** | Elasticsearch, Solr | an inverted index | full-text search, filters, facets |
+| **Analytics (columnar)** | ClickHouse, Redshift, StarRocks | columns, not rows | sums and group-bys over billions of rows |
+| **Cache** | Redis, Memcached | in memory | very fast reads, short-lived data |
+
+When people say "NoSQL vs SQL" in an interview, they usually mean **DynamoDB-style key-value vs Postgres**.
+
+### N2. DynamoDB in 5 minutes
+
+**The core idea:** you design **for your queries first**, and every query must go through a key.
+
+- **Partition key (PK):** decides which machine (partition) stores the item. Example: `tenant#lumenote`.
+- **Sort key (SK):** orders items inside one partition, and allows range queries on it. Example:
+  `record#2026-02-02#<id>`.
+- **Query:** "give me items with PK = X and SK between A and B". Fast, at any scale.
+- **Scan:** read the whole table. Slow and expensive; avoid it in normal code.
+- **GSI (global secondary index):** a second copy of the data with a different PK and SK, to support another
+  query. Example: PK = `source#src-play-1` to list one source's records. GSIs are updated **eventually**: a
+  moment behind the main table.
+- **Conditional write:** "write only if this condition holds", checked atomically. This is how DynamoDB does
+  idempotency and version guards:
+  - insert once: `attribute_not_exists(pk)`;
+  - newer wins: `updated_at <= :new`.
+- **Transactions:** exist (up to 100 items in one), but cost more. They are used sparingly.
+- **Streams:** a change log of every write, which a consumer (often a Lambda) can read. That is CDC built in:
+  the way to feed search or analytics.
+- **Limits worth knowing:**
+  - an item is at most 400 KB;
+  - a "hot" partition key (one huge tenant) can be throttled.
+- **Read consistency:** reads are eventually consistent by default. You can ask for a strongly consistent read on
+  the main table, but not on a GSI.
+
+**Single-table design:** Amazon teams often put several entity types in one table, with prefixed keys, so one
+query fetches related items together. Example: `PK=tenant#lumenote`, with `SK=source#...` and `SK=record#...`
+in the same partition.
+
+### N3. "NoSQL should be the default": how to answer your friend's view
+
+**Why Amazon engineers say it** (and it is a fair view at Amazon's scale):
+- Predictable latency at any size: a key lookup costs the same at 1 GB or 100 TB.
+- No servers, no failover drills, no vacuum; it scales by itself.
+- Most service APIs **are** key lookups ("get order 123", "list orders of customer X").
+- The access patterns are known up front, and stable.
+
+**Why SQL is still a common default elsewhere:**
+- Access patterns are **not** known up front. New product questions ("1-star reviews last week, any source")
+  are one SQL query, but in DynamoDB they need a new GSI and a backfill.
+- Constraints for free: unique keys, foreign keys, transactions across rows.
+- Joins and ad hoc queries for debugging and support.
+- One Postgres handles a lot more than people expect (many thousands of writes per second on decent hardware).
+
+**A balanced answer** (say this, not "X is better"):
+> "It depends on the access patterns. If I know them up front, they are key lookups, and scale matters most,
+> DynamoDB is a great default: conditional writes give me idempotency, and Streams give me CDC. If queries are
+> still evolving, or I need constraints and ad hoc filters, I start with Postgres. For this service I chose SQL
+> because the queue needs an atomic claim, the record table needs two unique keys and per-tenant filtered reads,
+> and the product is still finding its queries. At larger scale the records store could move to DynamoDB, and
+> analytics goes to a columnar store either way."
+
+**If they push** ("but we'd use DynamoDB here, design it"), you can do it from N4. If they go deep on DynamoDB
+internals: "I haven't run DynamoDB in production; the principle is access-pattern-first modelling and
+conditional writes for correctness."
+
+### N4. This service on DynamoDB (if asked to design it)
+
+| What | Postgres today | DynamoDB version |
+|---|---|---|
+| Records | table with unique `(source_id, external_id)` | PK `tenant#<id>`, SK `source#<sid>#ext#<external_id>`; a conditional write `attribute_not_exists OR version <= :new` is the version guard |
+| List records by time | index `(tenant_id, source_created_at)` | a GSI with PK `tenant#<id>`, SK `<created_at>#<record id>` |
+| Raw events (dedupe) | unique `(source_id, external_event_id)` | a put with `attribute_not_exists` on PK `source#<sid>`, SK `evt#<external_event_id>` |
+| The queue | the `raw_events` table plus the claim | **SQS** (DynamoDB is not a queue); raw payloads in DynamoDB or S3 |
+| Dead list, replay | `status` column query | a GSI on `status` (sparse), or the SQS DLQ |
+| Feed search and analytics | outbox or CDC (not built) | DynamoDB Streams to a Lambda to OpenSearch or ClickHouse |
+| Tenant isolation | `tenant_id` column and FKs | tenant in every PK; IAM policies can even limit access by key prefix |
+
+**What you lose:**
+- foreign keys;
+- ad hoc filters (each new filter needs a GSI);
+- one-statement "claim the next due rows" (hence SQS);
+- easy local development (you need a local emulator).
+
+**What you gain:**
+- no database to operate;
+- effectively unlimited scale per tenant.
+
+### N5. ACID (single database guarantees)
+
+What one **transaction** promises. A transaction is a group of reads and writes that succeed or fail together.
+
+| Letter | Meaning | Tiny example | Here |
+|---|---|---|---|
+| **A**tomic | all or nothing | money moved from A to B: never only debited | the claim is one statement |
+| **C**onsistent | rules hold after every transaction | no row breaks a unique key or FK | unique keys and composite FKs |
+| **I**solated | concurrent transactions do not see each other's half-done work | two people booking the last seat: only one gets it | upsert under `BEGIN IMMEDIATE`; the claim |
+| **D**urable | committed means it survives a crash | "payment confirmed" stays true after a power cut | the raw row commits before the 202 |
+
+**Isolation levels**, enough to sound fluent:
+- From weakest to strongest: read uncommitted, **read committed** (Postgres default), repeatable read,
+  **serializable** (strongest, slowest).
+- Typical problems the weaker ones allow: a **lost update** (two read-modify-writes, one overwrites the other),
+  and **write skew**.
+- Our protection against lost updates: an atomic single statement, or a lock, or a version check.
+
+**BASE** is the usual NoSQL contrast: **B**asically **A**vailable, **S**oft state, **E**ventually consistent.
+It means: stay up, and let replicas catch up a moment later.
+
+### N6. CAP, and consistency in practice
+
+- **CAP:** when the network splits the machines (a **P**artition), a distributed store must choose between
+  **C**onsistency (refuse or wait, so no one reads stale data) and **A**vailability (answer, maybe stale).
+  - Without a split, you get both.
+  - So the practical question is "what happens during a failure?"
+- **PACELC** adds: **E**lse (no split), you trade **L**atency against **C**onsistency. For example, DynamoDB's
+  eventually consistent reads are cheaper and faster than strongly consistent ones.
+- **Consistency words:**
+  - **Strong:** every read sees the latest write.
+  - **Eventual:** reads catch up after a moment.
+  - **Read-your-writes:** you at least see your own changes.
+- **Here:** `raw_events` → record is **eventually consistent** by design. After a 202, the record appears a
+  moment later. That is fine for feedback analytics. It is not fine for a bank balance.
+
+### N7. Delivery guarantees and idempotency
+
+- **At-most-once:** never repeated, may be lost (fire and forget).
+- **At-least-once:** never lost, may be repeated (retry until acknowledged). **Most real systems, and ours.**
+- **Exactly-once:** very hard end to end across systems. In practice you get **at-least-once plus idempotent
+  processing**, which gives the same end state.
+- **Idempotent:** doing it twice equals doing it once. Ours:
+  - the unique keys on `raw_events` and `feedback_records`;
+  - the version guard in `merge`;
+  - deterministic uuid5 record ids.
+- **Idempotency key:** a client sends a unique key with a request, and the server remembers it to ignore
+  repeats. Our `external_event_id` plays this role for webhooks.
+
+### N8. Reliability patterns (one line each, with where they apply)
+
+| Pattern | What | Here |
+|---|---|---|
+| **Retry with exponential backoff** | wait 2, 4, 8 s… between tries | `_retry` (C5) |
+| **Jitter** | add randomness to the wait, so 1,000 clients do not retry at the same instant | not built; worth adding to backoff |
+| **Dead-letter queue** | park what keeps failing, with the reason | `status = dead` |
+| **Circuit breaker** | after many failures to a dependency, stop calling it for a while, then test again | not built; would wrap the Discourse calls |
+| **Backpressure** | slow the producer when the consumer cannot keep up | not built; the queue absorbs bursts instead (C13) |
+| **Rate limiting** | cap requests per tenant or per second | not built; a noisy-neighbour fix |
+| **Timeouts and deadlines** | never wait forever | 10 s HTTP timeout, 60 s pull deadline |
+| **Lease** | ownership that expires on its own | the claim's 30 s lease (C6) |
+| **Fencing** | reject a write from a stale owner | `_finish` (C6) |
+| **Outbox / inbox** | save the message in the same database as the data, deliver it separately | `raw_events` is an **inbox** |
+| **CDC** | stream every change from the database log to other systems | how search and analytics would be fed |
+| **Graceful shutdown** | stop taking work, finish or hand back in-flight work | worker `stop()`; the lease returns unfinished work |
+
+### N9. Scaling vocabulary
+
+- **Vertical scaling:** a bigger machine. **Horizontal scaling:** more machines.
+- **Replication:** copies of the same data on several machines, for reads and failover. **Read replicas** lag
+  slightly.
+- **Partitioning:** split one table into parts by a key (for example monthly), still on one database.
+- **Sharding:** split data across **separate** databases by a key, for example `tenant_id`.
+  - **Hot shard:** one big tenant overloads its shard.
+- **Indexes:** usually a **B-tree**, a sorted structure that turns "scan everything" into "jump to the range".
+  - Writes cost a bit more for each index.
+  - In a composite index, column order matters: `(tenant_id, created_at)` serves "tenant X since T", but not
+    "since T, any tenant".
+- **Normalisation:** each fact stored once, joined at read time. **Denormalisation:** copy facts to avoid
+  joins, at the cost of keeping copies in sync. Our record copies `tenant_id` and `source_type` (study notes).
+- **Caching:** keep hot reads in memory. The hard part is **invalidation**: knowing when the cache is stale.
+- **CQRS:** separate the write model from the read models. Our raw log plus the record table, plus a future search
+  index, is a light form of it.
+
+### N10. SOLID and other code principles
+
+**SOLID**, each with an example from this code:
+
+| | Principle | Plain words | Here |
+|---|---|---|---|
+| **S** | Single responsibility | a class has one reason to change | `IngestionService` accepts, `PipelineService` processes, `PullService` pulls |
+| **O** | Open/closed | add features by adding code, not editing old code | a new source is a new connector file plus a registry line |
+| **L** | Liskov substitution | any implementation can stand in for its interface | memory fakes and SQLite adapters pass the same contract tests |
+| **I** | Interface segregation | many small interfaces beat one big one | `Clock`, `HttpClient`, `RawEventQueue`, `FeedbackStore` are separate ports |
+| **D** | Dependency inversion | depend on interfaces; inject the concrete parts | services take ports in their constructor; `wiring.py` picks SQLite |
+
+**Other principles worth a sentence each:**
+- **DRY** (don't repeat yourself): one rule, one place. Example: `merge` is shared by both stores, and
+  `new_record` is the only place a record is built.
+- **KISS and YAGNI** (keep it simple; you aren't gonna need it): no Kafka, no Redis, no plugin system until
+  needed. The `ponytail:` comments mark each shortcut and its upgrade.
+- **Composition over inheritance:** connectors implement a Protocol rather than inherit a deep class tree.
+- **Fail fast at the edges:** validate input with Pydantic at the boundary (webhook, connector input models),
+  so the core trusts its data.
+- **Separation of concerns / ports and adapters (hexagonal):** the business core does not know about HTTP or
+  SQL.
+- **12-factor config:** settings from the environment (`FI_*`), not from code.
+
+<details><summary>Check yourself</summary>
+
+- Your friend says "DynamoDB should be the default". Your one-line answer? *It depends on access patterns: known
+  key lookups at scale, yes; evolving queries or a need for constraints and ad hoc filters, start with Postgres.*
+- How would DynamoDB do our "newer version wins"? *A conditional write: only if the stored version is not newer.*
+- Why is our system "eventually consistent", and why is that fine? *The record appears a moment after the 202;
+  feedback analytics tolerates seconds of delay.*
+- Exactly-once: do we have it? *No. At-least-once plus idempotent processing, which gives the same end state.*
+- Which SOLID letter do the shared contract tests prove? *L, Liskov: the fake and SQLite are interchangeable.*
+
+</details>
 
 ## Part F. Safe to skip
 
