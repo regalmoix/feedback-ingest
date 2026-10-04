@@ -8,7 +8,7 @@ This is the place to start. It eases you into the code, then follows one real pi
 
 1. Read Part A once, slowly. It shows the five Python patterns the code is built from, so nothing later looks strange.
 2. Part B is the core. It follows one review, hop by hop, from the HTTP request to the database and back out.
-3. Parts C, D and E are interview answers: "how does the app handle X", "how would you swap Y for Z", "why P over Q". Each one is short and ends in code you have already seen in Part B.
+3. Parts C, D and E are interview answers: "how does the app handle X", "how would you swap Y for Z", "why P over Q". Each one is short and ends in code you have already seen in Part B. Part E2 is the broad system design drill: schema and indexes, every API, SQL vs NoSQL, queues, DB down, ACID and SOLID, threads, alarms.
 4. A word in **bold** is being defined right there. After that it is used without explanation.
 5. Every code excerpt is copied from the repo. The link above it opens the exact lines. If an excerpt and the code ever disagree, the code wins.
 6. Every output (JSON, log lines, tables) was produced by running the real code. Random ids are cut to 8 characters.
@@ -1941,6 +1941,251 @@ class WorkerService:
 ### E9. A per-source webhook secret over an API key on the webhook
 
 **Choice:** the source id in the URL picks the source, and its HMAC secret proves the sender ([ingest.py:18-19](../feedback_ingest/api/ingest.py#L18-L19)). **Alternative:** require the tenant's `X-API-Key` on webhooks. Real senders like Google or Intercom cannot add our custom header, but they do sign bodies. A per-source secret also limits damage: a leaked secret exposes one source, not the tenant's whole API. The trade-off: secrets are stored as plain text today (a named gap), and each source's secret must be configured on the sender's side.
+
+## Part E2. System design drill (the common follow-ups)
+
+These are the broad system design questions that come after the code questions. They are ordered by how likely
+and how deep the follow-up is. S1, S2, S5 and S9 deserve the most time.
+
+### S1. Tables, indexes, query patterns, partitioning
+
+Rule: **every index exists for one query.** Name the query first, then the index.
+
+| Table | Key and constraints | Index | The query it serves |
+|---|---|---|---|
+| `tenants` | `id`; unique `name`, unique `api_key_hash` | the unique on `api_key_hash` | every API call: hash the key, find the tenant |
+| `sources` | `id`; unique `(id, tenant_id)` | `tenant_id` | "list my sources"; the unique pair is what the composite FKs point at |
+| `raw_events` | unique `(source_id, external_event_id)`; FK `(source_id, tenant_id)` | `(status, next_attempt_at)` | the worker's claim: "pending or failed and due now, oldest first" |
+| `feedback_records` | unique `(source_id, external_id)`; FK `(source_id, tenant_id)` | `(tenant_id, source_created_at)` | `GET /v1/records`: "my records since T, oldest first" |
+
+Two of these are not for speed: the unique keys **are** the idempotency. A repeated webhook or a re-pulled post
+hits the unique key, so the database itself refuses the duplicate. App code cannot race past it.
+
+The composite FK `(source_id, tenant_id)` means a row cannot claim a source of another tenant. It is tenancy
+checked by the database, not only by code.
+
+**Honest gaps, say them before they ask:**
+- `GET /v1/records?source_id=…&kind=…` uses the tenant index, then filters. That is fine at demo size. At scale
+  add `(tenant_id, source_id, source_created_at)`.
+- `GET /admin/raw-events?status=dead` uses the status index, then filters the tenant. At scale add
+  `(tenant_id, status, received_at)`.
+- Paging is `since` plus `limit`, with no next-page token. Prod would add **keyset paging**: return the last
+  `(source_created_at, id)` and ask for rows after it. That pair is unique, so nothing is skipped or repeated,
+  and it stays fast at page 1,000 (unlike `OFFSET`).
+- Metadata filters (for example `rating = 1`): see the study notes, "metadata filtering ladder".
+
+**Partitioning (Postgres, when one table gets too big):**
+- `feedback_records`: hash by `tenant_id`. Every read is per tenant, so a query touches one partition.
+- `raw_events`: range by `received_at` (for example monthly). Old months are dropped whole for retention, with no
+  big `DELETE`.
+- Past one database: shard by `tenant_id`, so a big tenant can live on its own shard.
+- On a broker, the partition key is `tenant_id` or `source_id`. Ordering within one source is kept and tenants
+  spread out.
+
+### S2. Every API in one table
+
+Auth: **tenant** = `X-API-Key` header (stored as SHA-256). **HMAC** = `X-Signature` over the raw body with the
+source's own secret. **bootstrap** = `X-Bootstrap-Token`.
+
+| Route | Auth | Input | Answer | What it does |
+|---|---|---|---|---|
+| `POST /admin/tenants` | bootstrap | `{name}` | 201 `{id, name, api_key}` (key shown once); 401; 409 name taken | create a customer |
+| `POST /v1/sources` | tenant | `{type, name, mode, config, webhook_secret?}` | 201 with the secret shown once; 422 bad config | add a feed; a push source gets a generated secret if none is given |
+| `GET /v1/sources`, `GET /v1/sources/{id}` | tenant | | sources, secret masked as `***` | list or show |
+| `PATCH /v1/sources/{id}` | tenant | `{config?, enabled?}` | the source; 422 | change config (merged) or disable |
+| `POST /v1/sources/{id}/events` | HMAC, no API key | raw JSON body, at most 1 MiB | 202 `{raw_event_id, duplicate}`; 413, 404, 409, 401, 400, 503 | the webhook: verify, save one raw row, answer |
+| `POST /v1/sources/{id}/sync` | tenant | | 200 `{pages, accepted, duplicates, cursor, error}`; 502 upstream failed; 409 | pull one source now, inline |
+| `GET /v1/records` | tenant | `source_id, kind, since, limit (1..500), include_deleted`; unknown params are refused | records, oldest first | the read API |
+| `GET /v1/records/{id}` | tenant | `include_deleted` | one record or 404 | |
+| `GET /admin/raw-events` | tenant | `status` (default dead), `limit` | events, newest first | the dead list |
+| `GET /admin/raw-events/{id}` | tenant | | the event with its payload and error | debug one event |
+| `POST /admin/raw-events/{id}/replay` | tenant | | `{status: pending}`; 409 while leased | re-run one event |
+| `POST /admin/raw-events/replay` | tenant | `status` (dead, failed, processed), `source_id?`, `limit` | `{replayed: n}` | bulk replay, for example after a connector fix |
+| `GET /admin/queue` | tenant | | counts per status for my tenant | queue depth |
+| `GET /health` | none | | 200 or 503, with thread states, `failing_sources`, queue counts | for the load balancer and alarms |
+
+Two rules the interviewer may test:
+- A foreign id is **404, not 403**, so you cannot learn that another tenant's source exists.
+- The webhook takes no API key: the sender (Intercom, a bot) cannot add our key, so the source id picks the source
+  and the HMAC proves the sender.
+
+### S3. SQL or NoSQL? Postgres or DynamoDB?
+
+**Our access patterns pick SQL:**
+1. Two unique keys for idempotency.
+2. An atomic "claim the next due rows" update.
+3. Per-tenant filtered reads with a time range.
+4. A version guard on upsert.
+
+Postgres does all four natively, plus JSON (`jsonb`) for metadata. So: **Postgres first.**
+
+**DynamoDB can do it, differently:**
+- Records: partition key `tenant#source`, sort key `external_id`.
+- Idempotency and the version guard: a **conditional write** (`attribute_not_exists(pk)` or
+  `updated_at <= :new`).
+- The queue would not be a table: use SQS.
+- Every read pattern needs a key or an index (GSI) designed up front. Ad hoc filters ("rating 1 from last week,
+  any source") are awkward.
+- A huge tenant on one partition key is a **hot partition**.
+
+**When DynamoDB wins:** very high write volume, simple key lookups, no servers to run. Say: "I would start on
+Postgres because the queries are relational and I need the unique keys; at very large scale the records store
+could move to DynamoDB with conditional writes, and analytics goes to ClickHouse either way."
+
+### S4. Kafka vs SQS vs Redis
+
+| | Kafka | SQS | Redis (Streams or lists) |
+|---|---|---|---|
+| What it is | an ordered log, kept for days | a managed queue, deleted on success | in-memory data structures |
+| Retry later | no per-message delay: retry topics | visibility timeout, delay queues | do it yourself (sorted set by time) |
+| Dead letters | a DLQ topic you build | a built-in DLQ after N receives | do it yourself |
+| Replay | yes: rewind the offset | no: once deleted it is gone | only while kept |
+| Ordering | per partition | none (FIFO queues: per group, slower) | per stream |
+| Run cost | heavy (brokers, partitions) | none (managed) | medium; data at risk if not persisted |
+| Pick it when | many consumers read the same events, high volume, replay matters | one consumer group, simple jobs, AWS | already in the stack, small volume, low latency |
+
+**For this service:** SQS is the natural first step (retry delays and a DLQ for free). Kafka when many downstream
+systems (search, analytics, enrichment) read the same records. Redis is the weakest fit for durable work.
+
+**The line to say:** "Swapping the queue changes the retry model, not just the adapter. Our `next_attempt_at`
+becomes a visibility timeout on SQS, or retry topics on Kafka. Our lease becomes the visibility timeout, or the
+consumer offset." Replay stays easy in every case because `raw_events` keeps the payload.
+
+### S5. What happens when our database goes down?
+
+Walk the four moving parts:
+
+| Part | What happens | Code |
+|---|---|---|
+| Webhook | the insert fails, so **503 "storage unavailable"**, never a 202. Webhook senders normally retry on a non-2xx answer. Nothing we said yes to is lost. | `api/errors.py`, `_storage_unavailable` |
+| Worker | `run_once` raises, the loop logs it and sleeps one poll, then tries again. It does not crash. | `services/worker.py`, `_loop` |
+| `/health` | returns 503: the queue counts cannot be read, and the worker has made no progress for 10 s. The load balancer stops sending us traffic. | `api/health.py` |
+| Pull | the save fails before the cursor moves. The next tick re-reads the same window. Manual sync answers 503. | `services/pull.py` |
+
+**When the database comes back:** nothing to do by hand. Pending rows are claimed, expired leases are re-claimed,
+and the cursor resumes from where it was saved. SQLite also waits up to 5 s for a lock (`busy_timeout`) before it
+gives up.
+
+**Prod additions:**
+- Postgres with a standby and automatic failover (managed RDS or Aurora).
+- For senders that do not retry: put a buffer in front, for example API Gateway to SQS or S3. Then "accepted"
+  survives our database being down.
+- An alarm on the 503 rate.
+
+**The point to land:** "We never say yes before the row is on disk, so a DB outage turns into retries at the
+sender, not lost data."
+
+### S6. ACID and SOLID
+
+**ACID** is what a database transaction promises:
+- **Atomic**: all or nothing.
+- **Consistent**: the rules hold (unique keys, FKs).
+- **Isolated**: two transactions do not see each other's half-done work.
+- **Durable**: once committed, it survives a crash.
+
+Where we need it:
+- **Durable**: the raw insert commits before the 202.
+- **Atomic and isolated**: the claim is one `UPDATE … RETURNING`. The upsert reads, merges and writes inside
+  `BEGIN IMMEDIATE`, so no other writer gets in between.
+- **Consistent**: unique keys and composite FKs.
+
+Where we do **not** need it: one transaction across "raw event processed" and "record saved". If we crash in
+between, the event is re-processed and the upsert is idempotent. That is **at-least-once plus idempotent**, which
+is cheaper than exactly-once and gives the same end state.
+
+**SOLID** is five design rules for classes, each with one example here:
+
+| Letter | Rule | Here |
+|---|---|---|
+| S | one job per class | `IngestionService` accepts, `PipelineService` processes, `PullService` pulls |
+| O | add features without editing old code | a new source is a new connector plus a registry entry; the pipeline is untouched |
+| L | an implementation can stand in for its interface | the memory fakes and the SQLite adapters pass the same contract tests |
+| I | small interfaces | `Clock`, `HttpClient`, `RawEventQueue` are separate ports, not one big "infra" interface |
+| D | depend on interfaces, not concrete classes | services import ports, never SQLAlchemy or httpx |
+
+### S7. Can we avoid the workers?
+
+Yes, by processing inside the webhook: save the raw row, transform, upsert, then answer.
+- **Gain:** one less moving part, and the record is visible at once.
+- **Cost:**
+  - The webhook gets slower, and a burst slows every sender.
+  - A connector bug turns into 500s. Senders retry, and some disable the webhook after many failures.
+  - There is no place for backoff.
+  - Pull would still need a background job anyway.
+
+**Middle ground:** try inline, and fall back to the queue on failure.
+
+**Managed version:** the workers do not go away, they become someone else's problem. For example SQS triggers a
+Lambda per batch.
+
+Say: "The raw insert is the part that must be synchronous. Transforming can be inline for a tiny system, but the
+queue gives a fast ack, retries with backoff, and a dead list, for about 100 lines."
+
+### S8. Threads and async, in general
+
+- **A thread** runs code alongside other threads. In Python the GIL lets only one thread run Python at a time,
+  but a thread waiting on the network or disk lets another run. So threads suit **I/O-bound** work (DB, HTTP),
+  not CPU-heavy work. CPU-heavy work goes to separate processes.
+- **asyncio** is one thread switching between tasks at each `await`. It is cheap for thousands of concurrent
+  network waits. The catch: every library in the path must be async.
+- **Here:** FastAPI runs our plain `def` routes in its thread pool. The webhook is `async` only to read the body,
+  then hands off to a thread. There are two background threads: the worker and the scheduler. We chose threads
+  because SQLAlchemy and SQLite are used in their normal (sync) form here, and the work is a handful of
+  I/O calls.
+- **"Async processing"** is a different idea from asyncio: answer now, do the work later. That is the
+  `raw_events` queue plus the worker.
+
+### S9. Counters and alarms
+
+What exists today, then what prod adds. Alarm on **symptoms users feel** (lag, errors, dead events), not on every
+cause.
+
+**Today:**
+- `/health`: thread states, worker progress, `failing_sources`, queue counts.
+- One-line logs carrying `raw_event_id`, `tenant_id` and `source_id`.
+- The dead list.
+
+**a. Malformed payload.** Two cases: the source changed its format, or it is sending junk.
+- **What the code does:** the connector's Pydantic input model rejects it, and the event goes **dead on the first
+  try** (no retries for bad data). New extra fields are ignored, so only a removed or renamed required field
+  breaks us. Bad JSON on a webhook is a 400 at the door.
+- **Counter:** dead events per source per minute, with the error text.
+- **Alarm:** a source's dead rate jumps (for example over 5 % of its events in 10 minutes).
+- **Response:**
+  1. Read one dead payload (`GET /admin/raw-events/{id}`).
+  2. If the format changed: update the input model, bump `connector_version`, deploy, then bulk replay that
+     source's dead events. Nothing was lost, because the raw payload was kept.
+  3. If it is junk: leave it dead and tell the customer.
+
+**b. Database or queue down.**
+- **Counters:** the 503 rate on the webhook; DB connection errors; the age of the **oldest pending event**.
+- The age of the oldest pending event is the best single "are we keeping up" signal, better than queue depth: a
+  deep queue that drains is fine, an old one is not.
+- **Alarm:** the 503 rate is above 0 for 2 minutes, or the oldest pending event is older than 5 minutes.
+
+**c. App down.**
+- **Detect:** the load balancer probes `/health`, so a 503 or no answer takes the instance out and the platform
+  restarts it.
+- An external uptime check pages a human.
+- Also alarm on **traffic dropping to zero** for a tenant that normally sends: a silent failure no error counter
+  sees.
+- Senders retry meanwhile.
+
+**d. Memory, CPU, disk, network.**
+- **Host metrics** (CloudWatch or Datadog agent) with alarms at about 80 %.
+- **Disk** matters most for a database (SQLite file, Postgres WAL).
+- **Built-in limits that protect memory:**
+  - webhook body at most 1 MiB;
+  - pulled responses at most 2 MB (`FI_HTTP_MAX_BYTES`);
+  - the worker claims 10 events at a time;
+  - records reads at most 500 rows.
+- **Network errors** to a source become `TransientError`: the pull stops at the saved cursor, the source counts
+  in `failing_sources`, and the next tick tries again.
+- **Alarm:** a source stays failing for 3 ticks in a row.
+
+**Paging rule:**
+- Page a human for data at risk: 503s, the oldest pending event too old, the app down.
+- Open a ticket for one source failing or a dead-rate bump on one tenant.
 
 ## Part F. Safe to skip
 
