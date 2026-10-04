@@ -131,6 +131,12 @@ queue per tenant (their engineering blog describes per-tenant partitioning).
 Say: "SQS is the closest swap. Kafka changes the retry model. Either way keep a small table for lookup and
 replay."
 
+**Memory queue vs SQLite queue: which to read?**
+Learn behaviour from `adapters/memory/queue.py` (plain Python). Both pass the same contract tests, so the
+behaviour matches. The SQLite version only adds database guarantees: the claim is one atomic
+`UPDATE ... RETURNING`; `BEGIN IMMEDIATE` and the repeated check make two workers safe; a unique constraint
+enforces the dedupe key; a composite foreign key refuses a row whose tenant does not own its source.
+
 **Scaling and other worker questions?**
 More processes (the claim is atomic); one process handles one event at a time. Thread not async because
 the database calls block and one thread is simplest.
