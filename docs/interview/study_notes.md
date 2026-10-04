@@ -107,6 +107,12 @@ Assumed not: one event is milliseconds against 30 s. If it did, a second worker 
 save is idempotent (same key, same version) and fencing refuses the slow worker, so the cost is wasted
 work, not wrong data. Lease renewal (heartbeat) is the upgrade; or raise `FI_LEASE_SECONDS`.
 
+**What is `next_attempt_at`?**
+"Not before this time." The claim only takes pending or failed events whose `next_attempt_at` is now or
+earlier. A new event gets `now` (ready at once). After each failure it moves out with backoff: +2, +4, +8,
++16 s, and the 5th failure marks it dead (wait capped at `FI_BACKOFF_CAP_SECONDS`, 300). Replay sets it
+back to `now` and resets attempts. Backoff avoids hammering a struggling upstream or database.
+
 **Scaling and other worker questions?**
 More processes (the claim is atomic); one process handles one event at a time. Thread not async because
 the database calls block and one thread is simplest.
