@@ -136,6 +136,19 @@ with the item id, so search by source and key prefix (fails for custom batches, 
 Add-on: a `last_raw_event_id` column set in `_apply` (latest delivery only; full history needs a separate
 history table).
 
+**Why does a record copy `tenant_id` and `source_type` when a join on `source_id` would give them?**
+Deliberate duplication. `tenant_id`: every read filters by tenant, so the hot path needs no join; a
+composite foreign key `(source_id, tenant_id)` stops it drifting; it travels into search, analytics or a
+future per-tenant split without the sources table. `source_type`: the label that picks and checks the
+metadata model with no lookup, and "all Play Store reviews" needs no join. Cost: a few bytes; drift risk
+removed by the foreign key and the validator.
+
+**What does `_apply` do, and what if it fails halfway?**
+Find the source, let its connector transform the payload (1 to 0, 1 or many records; nothing saved yet),
+stamp `ingested_at`, upsert each (insert, update or skip; `ingested_at` only sticks on insert). Each record
+saves on its own: if record 2 of 3 fails, record 1 is stored, the event retries, and record 1 is re-saved
+harmlessly (same version).
+
 ## Search and analytics (downstream of records, not built)
 
 **How would search and analytics hang off this design?**
