@@ -341,6 +341,13 @@ Behaviour is the same (shared contract tests). Extras: webhook secrets are store
 "secrets at rest": encrypt the column or use a secrets manager); tenant names and API-key hashes are unique
 columns, so a duplicate becomes `ValueError` and then 409; tenant scoping is a `WHERE tenant_id = ...`.
 
+**IDOR: can a tenant read another's object by changing the id?**
+No. Every id in a request is checked against the caller's tenant: `tenant_source` for source ids (path or
+filter), `feedback.get(id, tenant_id)` for records, `_tenant_event` for raw events; lists filter by tenant. A
+foreign id is 404, same as missing. We do not rely on unguessable ids: record ids are uuid5 (deterministic from
+source id + external id), so ownership is the defence. The webhook is the one route with no tenant check, by
+design: the HMAC is its access check, and it returns no data. The composite FK backs it in the database.
+
 ## App structure (FastAPI)
 
 **What is `AppState` / `Ctx`?**
