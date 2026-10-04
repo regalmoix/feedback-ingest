@@ -120,6 +120,13 @@ id); `external_event_id` (id plus version, the dedupe key); `transform` mapping 
 common fields and the metadata model; edge cases returning 0 records or raising a permanent error. Only
 field names differ between sources.
 
+**How does the custom (batch) connector differ?**
+Enterpret's public webhook shape: `{"records": [...]}`. Each entry becomes its own record and its `kind`
+comes from its record type (REVIEW, CONVERSATION, FORUM_CONVERSATION_THREAD, SURVEY); other connectors
+take `kind` from `KIND_BY_SOURCE`. Dedupe is per batch (raw event key = hash of the whole body, the batch
+is one delivery), upsert is per record (by each entry's `id`). One bad entry sends the whole batch to dead
+(marked shortcut; upgrade: save the good ones, dead-letter only the bad one). Unknown type = permanent error.
+
 ## Search and analytics (downstream of records, not built)
 
 **How would search and analytics hang off this design?**
