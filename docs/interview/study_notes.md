@@ -104,7 +104,12 @@ source is not an enabled pull source or is already syncing.
 **Can two syncs of one source run at once?**
 No, in one process: a per-source lock, and the second caller gets 409. Across processes (`uvicorn --workers
 N`) the lock is not shared, so Discourse can be polled twice. Harmless (duplicates are dropped by the unique
-key), just wasted calls. Fix: a DB lease on the source row, like the event claim.
+key), just wasted calls. Fix: a DB lease on the source row, like the event claim:
+`UPDATE sources SET sync_lease_until = now + 90s WHERE id = :id AND (sync_lease_until IS NULL OR
+sync_lease_until < now) RETURNING id`. One row back = yours, zero = 409. Atomic across processes, expires if a
+process crashes, no new infrastructure. Lease longer than the 60 s pull deadline. Redis `SET NX PX` works too
+but adds a server just for a lock; Postgres `pg_try_advisory_lock` is simple but holds a connection for the
+whole sync. Correctness is already safe (`max()` cursor, unique key); the lease only saves wasted calls.
 
 **When does the cursor move?**
 After the page's payloads are saved, never before, and never backwards (`max(stored, new)`). Discourse moves
