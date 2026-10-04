@@ -114,6 +114,11 @@ whole sync. Correctness is already safe (`max()` cursor, unique key); the lease 
 **When does the cursor move?**
 After the page's payloads are saved, never before, and never backwards (`max(stored, new)`). Discourse moves
 it only on the final page of a window, so a crash mid-window re-reads that window; duplicates are dropped.
+Why only the final page: Discourse search is not guaranteed oldest-first. If page 1 (posts from 02-05) moved
+the cursor and we crashed before page 2 (a post from 02-02), the next sync would start after 02-05 and never
+read 02-02. Cost: a window over 10 pages (~500 posts) never reaches its final page, so the cursor is stuck until
+`window_days` is lowered with one PATCH. A source whose API returns results in time order could move it per page;
+the generic `_sync` loop already allows that.
 
 **Scheduler in prod: cron or Airflow?**
 Split it. A tiny trigger (cron, EventBridge, Celery beat) runs every minute, picks sources with
