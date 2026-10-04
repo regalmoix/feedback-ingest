@@ -1778,145 +1778,252 @@ next steps are Postgres and a per-tenant claim."
 
 ## Part D. "How would you swap Y for Z?"
 
+Every swap below follows the same shape:
+- **Background:** the technology in plain words. Enough to talk about it, no internals.
+- **What changes:** which files change, and which do not.
+- **Pros and cons** of making the change.
+- **Say this:** the interview line.
+- **If they probe deeper:** for very specific Postgres or Kafka internals you have not used, say so honestly,
+  then give the general principle.
+
+> **A safe line for any deep internals question:** "I haven't run X in production, so I won't guess at its
+> internals. The principle I'd rely on is Y, and I'd confirm the details in X's docs before building on it."
+> Interviewers at 4 YOE level look for sound principles and honesty, not memorised settings.
+
+The reason every swap below is small: **services talk to ports (interfaces), never to SQLite, httpx or a
+broker.** A swap is a new adapter behind the same port, plus one line in [wiring.py](../feedback_ingest/wiring.py).
+
 ### D1. SQLite to Postgres
 
-- **Seam:** the setting `FI_DATABASE_URL` ([config.py:10](../feedback_ingest/config.py#L10)) and the one function that builds the SQL adapters:
+**Background.**
+- **SQLite** is a database in a single file, inside our own process. There is no server to run, which makes it
+  perfect for a demo. Its big limit: **only one writer at a time**. Every write waits its turn for one lock.
+- **Postgres** is a database server. Many connections can write at the same time; it locks individual rows
+  instead of the whole database. It is the default choice for a real multi-tenant backend.
 
-[feedback_ingest/wiring.py:15-32](../feedback_ingest/wiring.py#L15-L32)
+**What changes:**
+1. **The setting** `FI_DATABASE_URL` ([config.py:10](../feedback_ingest/config.py#L10)), for example
+   `postgresql+psycopg://...`, plus a Postgres driver in `pyproject.toml`. `sql_adapters` in
+   [wiring.py:15-32](../feedback_ingest/wiring.py#L15-L32) already builds every SQL adapter from that URL.
+2. **Three queries get rewritten**, because today they are only safe thanks to SQLite's single writer:
+   - **The claim** ([raw_event_queue.py](../feedback_ingest/adapters/sqlalchemy/raw_event_queue.py)) adds
+     `FOR UPDATE SKIP LOCKED`. In plain words: "lock the rows I take, and skip any row someone else is already
+     locking instead of waiting for it". Many workers then claim in parallel without blocking each other.
+   - **`enqueue`** becomes `INSERT ... ON CONFLICT DO NOTHING`: "insert, and if the unique key already exists,
+     do nothing". One statement, so two identical webhooks arriving at the same instant cannot both insert.
+   - **The upsert** ([feedback_store.py](../feedback_ingest/adapters/sqlalchemy/feedback_store.py)) becomes
+     `INSERT ... ON CONFLICT DO UPDATE ... WHERE <new version >= stored version>`. That is the same `merge`
+     rule, done by the database in one statement.
+3. **Migrations** (Alembic). There are none today: tables are created at startup, and a startup check refuses a
+   table missing a column. A real database needs versioned schema changes.
 
-```python
-@contextmanager
-def sql_adapters(settings: Settings) -> Iterator[Adapters]:
-    engine = make_engine(settings.database_url)
-    http = HttpxClient(max_bytes=settings.http_max_bytes)
-    try:
-        Base.metadata.create_all(engine)
-        assert_schema_matches(engine)
-        yield Adapters(
-            tenants=SqlTenantStore(engine),
-            sources=SqlSourceStore(engine),
-            feedback=SqlFeedbackStore(engine),
-            queue=SqlRawEventQueue(engine),
-            http=http,
-            clock=SystemClock(),
-        )
-    finally:
-        http.close()
-        engine.dispose()
-```
+**What does not change:** services, connectors, routes, the domain, the memory fakes.
 
-- **Files that change:** add a Postgres driver to `pyproject.toml`; in [raw_event_queue.py](../feedback_ingest/adapters/sqlalchemy/raw_event_queue.py) add `SKIP LOCKED` to the claim and make `enqueue` an `INSERT ... ON CONFLICT DO NOTHING`; in [feedback_store.py](../feedback_ingest/adapters/sqlalchemy/feedback_store.py) turn the upsert into `INSERT ... ON CONFLICT DO UPDATE` with the version guard; add migrations.
-- **Files that do not:** services, connectors, routes, the domain, the memory fakes.
-- **Honest caveat:** the read-then-write upsert and enqueue are only race-free because SQLite lets one writer in at a time. On Postgres they would raise `IntegrityError` under a race (safe, but noisy) until rewritten. There are no migrations today, only a startup check that refuses a table missing a column. The full recipe is [extensions.md recipe 2](interview/extensions.md).
+**Pros and cons:**
+
+| Pros | Cons |
+|---|---|
+| Many writers at once, so more API instances and more workers actually help | a server to run, back up and monitor (or pay for managed RDS or Aurora) |
+| `jsonb` with indexes: can filter inside `metadata` (for example `rating = 1`) | the three queries must be rewritten, or races raise `IntegrityError` (safe, but noisy errors) |
+| Standbys, failover, point-in-time backups | migrations become mandatory |
+| Partitioning by tenant or by month (Part E2, S1) | |
+
+**Say this:** "The swap is a URL plus three queries. Today the upsert and enqueue read then write, which is
+only race-free because SQLite has one writer. On Postgres they become single `INSERT ... ON CONFLICT`
+statements, and the claim gets `SKIP LOCKED` so workers stop queueing behind each other."
+
+**If they probe deeper** (isolation levels, how MVCC works, vacuum): "The principle is that any
+check-then-write must be one atomic statement or be protected by a lock. `ON CONFLICT` and `SKIP LOCKED` are
+how Postgres gives you that. I'd confirm the exact isolation semantics in the docs." The full recipe is in
+[extensions.md recipe 2](interview/extensions.md).
 
 ### D2. The table queue to Kafka or SQS
 
-- **Seam:** the `RawEventQueue` port:
+**Background.**
+- **SQS** (AWS) is a managed queue. You send a message; a consumer receives it, and the message becomes
+  **invisible** for a while (the **visibility timeout**). If the consumer deletes it, it is done. If not, it
+  reappears and someone else gets it. After N failed receives it moves to a **dead-letter queue (DLQ)**. It runs
+  itself, with nothing to operate.
+- **Kafka** is a **log**: messages are appended in order and kept for days. Consumers do not delete messages;
+  each consumer group remembers an **offset** ("I have read up to message 5,000"). Many different systems can
+  read the same log independently, and you can rewind. It is powerful, and heavy to run.
+- **Our table** already does what both do: `pending` is "in the queue", the lease is the "invisible while
+  someone works on it", `dead` is the DLQ, and replay is "rewind".
 
-[feedback_ingest/ports/queue.py:8-24](../feedback_ingest/ports/queue.py#L8-L24)
+**How our concepts map:**
 
-```python
-class RawEventQueue(Protocol):
-    def enqueue(self, event: RawEvent) -> Enqueued: ...
-    def claim(self, now: datetime, lease_seconds: int, limit: int) -> list[RawEvent]: ...
-    def mark_processed(self, event: RawEvent) -> bool: ...
-    def mark_failed(self, event: RawEvent, error: str, next_attempt_at: datetime) -> bool: ...
-    def mark_dead(self, event: RawEvent, error: str) -> bool: ...
-    def replay(self, event_id: str, now: datetime) -> bool: ...
-    def get(self, event_id: str) -> RawEvent | None: ...
-    def list_by_status(
-        self,
-        status: EventStatus,
-        *,
-        tenant_id: str | None = None,
-        source_id: str | None = None,
-        limit: int = 100,
-    ) -> list[RawEvent]: ...
-    def counts(self, tenant_id: str | None = None) -> dict[EventStatus, int]: ...
-```
+| Ours | SQS | Kafka |
+|---|---|---|
+| lease (30 s) | visibility timeout | the consumer holds its offset until it commits |
+| `next_attempt_at` backoff | change the visibility timeout, or delay queues | no per-message delay: send to a **retry topic** that is read later |
+| `dead` | the built-in DLQ | a DLQ topic you create |
+| replay | re-send the message | rewind the offset, or re-publish |
+| `GET /admin/raw-events?status=dead` | not possible to query | not possible to query |
 
-- **Files that change:** a new adapter (for example `adapters/sqs/queue.py`) and one line in `wiring.py`.
-- **Files that do not:** services, connectors, routes.
-- **Honest caveat:** this is a new adapter **and** a new retry model. SQS maps the lease to a visibility timeout. Kafka has no per-message delay, so retries need retry topics, and it has no fence. Neither can answer `get`, `list_by_status` or `counts`, which the admin API and replay need. The realistic design keeps `raw_events` as the event log and puts only ids on the broker ([extensions.md recipe 3](interview/extensions.md)).
+**What changes:** a new adapter behind the `RawEventQueue` port
+([ports/queue.py](../feedback_ingest/ports/queue.py)), for example `adapters/sqs/queue.py`, plus one line in
+`wiring.py`.
+
+**The honest catch:** our port has `get`, `list_by_status` and `counts`. The admin API, the dead list and
+replay need them. **No broker can answer "show me all dead events for tenant X".** So the realistic design is a
+mix:
+- keep the `raw_events` table as the **record of truth** (payload, status, error);
+- put only the event **id** on SQS or Kafka, as the "wake up, there is work" signal;
+- workers take an id from the broker, then load and update the row in the table.
+
+You get the broker's push delivery and scaling, and keep the table's queries and replay.
+
+**Pros and cons:**
+
+| Option | Pros | Cons |
+|---|---|---|
+| **Keep the table** (today) | one system; queryable; replay by id | polling; one write lock on SQLite |
+| **SQS** | managed; retries and DLQ built in; scales by itself | cannot query or list; at-least-once (duplicates happen, our idempotency covers it) |
+| **Kafka** | many consumers (search, analytics, enrichment) read the same events; replay by rewinding; very high volume | heavy to operate; no per-message delay; ordering only per partition |
+
+**Say this:** "Swapping the queue changes the retry model, not just the adapter. On SQS our lease becomes the
+visibility timeout and dead becomes the DLQ. Kafka has no per-message delay, so retries go to a retry topic. In
+both cases I'd keep the `raw_events` table as the source of truth and put only ids on the broker, because the
+dead list and replay need to query."
+
+**If they probe deeper** (Kafka partitions, consumer group rebalancing, exactly-once): "I haven't run Kafka in
+production. The principle: partition by tenant or source to keep order where it matters and spread load, and
+stay at-least-once with idempotent consumers, which this design already has, rather than chase exactly-once."
+See [extensions.md recipe 3](interview/extensions.md).
 
 ### D3. Adding a new source
 
-- **Seam:** the `SourceConnector` Protocol ([connectors/base.py:23-31](../feedback_ingest/connectors/base.py#L23-L31)) and the registry tuple from Pattern 5.
-- **Worked example:** the custom connector, which takes Enterpret's public batch shape `{"records": [...]}`:
+**Background.** This is the main extensibility question in the assignment. The design goal is that adding Zendesk
+touches only "Zendesk things", never the pipeline, worker, routes or tables.
 
-[feedback_ingest/connectors/custom.py:34-45](../feedback_ingest/connectors/custom.py#L34-L45)
+**What changes: five steps** ([ADR-003, "How to add a new source"](decisions/ADR-003-connector-abstraction.md#how-to-add-a-new-source)):
 
-```python
-class CustomConnector(SourceConnector):
-    source_type: ClassVar[SourceType] = SourceType.CUSTOM
-    version: ClassVar[int] = 1
-    required_config: ClassVar[tuple[str, ...]] = ()
+| # | File | What you add | Example (the custom connector) |
+|---|---|---|---|
+| 1 | [domain/enums.py](../feedback_ingest/domain/enums.py) | a `SourceType` value and its kind (`review`, `conversation`, ...) | `CUSTOM`; it carries several kinds, so it uses `KIND_BY_RECORD_TYPE` |
+| 2 | [domain/metadata.py](../feedback_ingest/domain/metadata.py) | a metadata model, added to the `SourceMetadata` union | `CustomMetadata` |
+| 3 | `connectors/<type>.py` | input models, plus three class attributes (`source_type`, `version`, `required_config`) and three methods (`verify_signature`, `external_event_id`, `transform`) | [custom.py](../feedback_ingest/connectors/custom.py) |
+| 4 | [connectors/registry.py](../feedback_ingest/connectors/registry.py) | one entry in `CONNECTORS` (and `PULLERS` if it pulls) | |
+| 5 | `tests/fixtures/<type>/` | a normal, an edited and a malformed payload | [tests/fixtures/custom/](../tests/fixtures/custom/) |
 
-    def external_event_id(self, payload: Mapping[str, Any]) -> str:
-        return payload_hash(dict(payload))  # a batch is one delivery
+**Safety net:** [test_registry.py](../tests/unit/connectors/test_registry.py) and
+`test_every_source_type_has_a_metadata_model` fail until all five steps exist, so you cannot half-add a source.
 
-    # ponytail: one bad record dead-letters the whole batch; split a batch into one raw event per
-    # record at accept time if senders need partial acceptance
-    def transform(self, source: Source, payload: Mapping[str, Any]) -> list[FeedbackRecord]:
-        return [self._record(source, r) for r in CustomBatchIn.model_validate(payload).records]
-```
+**What does not change:** routes, services, the worker, the tables.
 
-The five steps ([ADR-003, "How to add a new source"](decisions/ADR-003-connector-abstraction.md#how-to-add-a-new-source)):
+**Pros and cons of this design (a Protocol plus a registry):**
+- **Pros:**
+  - one file per source;
+  - the contract test checks every connector the same way;
+  - easy to explain on a whiteboard.
+- **Cons:**
+  - still a code change and a deploy per source;
+  - a no-code, config-driven mapping (field A goes to field B) would let customers add sources themselves, but
+    is harder to validate and debug.
 
-1. A `SourceType` value and its kind in [domain/enums.py](../feedback_ingest/domain/enums.py). Custom carries several kinds, so it uses `KIND_BY_RECORD_TYPE` instead.
-2. A metadata model in [domain/metadata.py](../feedback_ingest/domain/metadata.py), added to the `SourceMetadata` union (`CustomMetadata`).
-3. The connector file: input models, three class attributes, three methods, built on `new_record` ([custom.py](../feedback_ingest/connectors/custom.py)).
-4. One line in the `CONNECTORS` tuple, and in `PULLERS` if it pulls.
-5. Fixtures in `tests/fixtures/<type>/`: normal, edited, malformed ([tests/fixtures/custom/](../tests/fixtures/custom/)).
+**One known limit to admit:** the custom webhook takes a batch `{"records": [...]}` as **one** raw event. One bad
+record sends the whole batch dead (the `ponytail:` comment at
+[custom.py:42-43](../feedback_ingest/connectors/custom.py#L42-L43)). The fix is to split the batch into one raw
+event per record when it is accepted.
 
-- **Files that do not change:** routes, services, the worker, the tables.
-- **Honest caveat:** the custom batch is one raw event, so one bad record sends the whole batch dead (its `ponytail:` comment, [custom.py:42-43](../feedback_ingest/connectors/custom.py#L42-L43)). [test_registry.py](../tests/unit/connectors/test_registry.py) and `test_every_source_type_has_a_metadata_model` fail until every step is done.
+**Say this:** "Five pieces: an enum value, a metadata model, a connector file, a registry line and fixtures. The
+contract test fails until all five exist, and nothing in the pipeline, worker, API or tables changes. The custom
+connector was added exactly this way."
 
 ### D4. Adding an enrichment stage (language detection or PII redaction)
 
-- **Seams:** `IngestionService.accept` (before storage) and `PipelineService._apply` (after the record exists), both seen in Part B.
-- **PII redaction** must happen before storage, in `accept`: compute `external_event_id` from the original payload (so duplicates still match), then replace emails and card numbers with placeholders, then enqueue. The HMAC check already ran on the raw bytes.
-- **Language detection** comes after the record exists: a separate job table and worker with the same claim, lease and fence pattern, writing to a new column such as `detected_language`. Not into `language`: the upsert rewrites every field on each edit and would wipe it.
-- **Files that do not change:** connectors, routes, the queue port.
-- **Honest caveat:** redacted raw payloads can never be replayed back to the original text, which is the point. A slow model inline in the pipeline would slow all ingestion, which is why it is a separate stage ([extensions.md recipe 6](interview/extensions.md)).
+**Background.**
+- **Enrichment** means adding information the source did not give us, for example which language a review is in.
+- **PII redaction** means removing personal data (emails, phone numbers, card numbers) before we keep it.
+- Neither is built. `language` is filled only when the source provides it.
+
+**Where each one goes, and why the position matters:**
+
+| Stage | Where | Why there |
+|---|---|---|
+| **PII redaction** | inside `IngestionService.accept`, **before** the raw row is saved | once saved, the personal data is on disk. The order inside `accept`: compute the delivery id from the **original** payload (so duplicates still match), then redact, then save. The HMAC was already checked on the raw bytes. |
+| **Language detection** | a **separate stage after** the record exists: its own job table and worker, using the same claim, lease and fence pattern | a model is slow; inline it would slow all ingestion. It writes to a new column such as `detected_language`, not `language`, because the upsert rewrites every field on each edit and would wipe it. |
+
+**What does not change:** connectors, routes, the queue port.
+
+**Pros and cons:**
+- **Redaction:**
+  - Pro: personal data never reaches our storage or logs.
+  - Con: a replay can never recover the original text. That is the point, but it means a redaction bug cannot be
+    undone.
+- **A separate enrichment stage:**
+  - Pro: ingestion stays fast, and a model outage does not block intake.
+  - Con: a short delay before the language appears, and one more queue to watch.
+
+**Say this:** "Redaction must run before the first write, or the data is already on disk. Slow enrichment like
+language detection runs as its own stage after the record exists, so a slow model never slows intake."
+See [extensions.md recipe 6](interview/extensions.md).
 
 ### D5. Pulling Play Store instead of push fixtures
 
-- **Seam:** the `PullConnector` Protocol and the `PULLERS` dict:
+**Background.** Google Play has **no review webhook**. Real Play Store reviews must be **polled** through
+Google's reviews API. Our Play Store connector takes pushes from fixtures as a stand-in. Say this first, before
+they find it.
 
-[feedback_ingest/connectors/base.py:33-38](../feedback_ingest/connectors/base.py#L33-L38)
+**What changes:**
+- [playstore.py](../feedback_ingest/connectors/playstore.py) gains `pull_config` and a `pull()` method that
+  calls Google's reviews list API through the `HttpClient` port. That is the `PullConnector` Protocol
+  ([connectors/base.py:33-38](../feedback_ingest/connectors/base.py#L33-L38)), the same one Discourse
+  implements.
+- `PULLERS` gains `SourceType.PLAYSTORE`, and `check_source` then accepts a pull-mode Play Store source.
 
-```python
-class PullConnector(SourceConnector, Protocol):
-    pull_config: ClassVar[tuple[str, ...]]  # extra config keys a pull-mode Source must have
+**What does not change:** `transform`, `external_event_id`, the pipeline, `PullService`, the scheduler. Pulled
+reviews go through the same `accept` as pushes, so dedupe and the version guard work as they are.
 
-    def pull(
-        self, source: Source, http: HttpClient, clock: Clock, deadline: datetime
-    ) -> Iterator[PullPage]: ...
-```
+**The two real gaps:**
+1. **Auth.** Google's API needs OAuth with a service account: a secret per source, and access tokens that
+   expire and must be refreshed. Our `HttpClient` port only does an unauthenticated `GET` today.
+2. **The cursor is a page token, not a time.** `_advance` assumes ISO timestamps when it compares cursors (its
+   `ponytail:` comment, [pull.py:80-81](../feedback_ingest/services/pull.py#L80-L81)). Each connector would need
+   to own its cursor comparison.
 
-- **Files that change:** [playstore.py](../feedback_ingest/connectors/playstore.py) gains `pull_config` and `pull()` (calling Google's reviews list API through the `HttpClient` port), and `PULLERS` gains `SourceType.PLAYSTORE`. `check_source` then accepts a pull-mode Play Store source.
-- **Files that do not:** `transform`, `external_event_id`, the pipeline, `PullService`, the scheduler. The pulled payloads go through the same `accept`, so dedupe and the version guard apply unchanged.
-- **Honest caveat:** Google's API needs OAuth service-account credentials, which means a secret per source and token refresh; the `HttpClient` port only does unauthenticated `GET` today. Its cursor is a page token, not a timestamp, and `_advance` assumes ISO timestamps (its `ponytail:` comment, [pull.py:80-81](../feedback_ingest/services/pull.py#L80-L81)).
+**Pros and cons:**
+- Pro: real Play Store data, and the same pipeline.
+- Con: credential storage and token refresh per customer, and Google's rate limits.
+
+**Say this:** "Play has no review webhook, so the push path here is a stand-in. Pulling is one more `PullConnector`
+plus a registry entry; the pipeline is untouched. The real work is OAuth per source and a page-token cursor."
 
 ### D6. Scaling workers horizontally
 
-- **Seam:** the settings `FI_WORKER_ENABLED`, `FI_CLAIM_BATCH`, `FI_LEASE_SECONDS`, and the worker's own note:
+**Background.**
+- **Horizontal scaling** means running more copies of something, rather than a bigger machine.
+- Today each app process runs the API, one worker thread and the scheduler together. With `uvicorn --workers 4`
+  you get four of each, including four schedulers, which would each poll Discourse. That is wasteful.
 
-[feedback_ingest/services/worker.py:13-18](../feedback_ingest/services/worker.py#L13-L18)
+**What changes:**
+1. A small `worker_main.py` entry point that builds the pipeline and the worker the way `main.py` does, without
+   the API (the `ponytail:` note at [worker.py:13-18](../feedback_ingest/services/worker.py#L13-L18)).
+2. Then run three kinds of process:
+   - **API processes**, with `FI_WORKER_ENABLED=false`, scaled by HTTP traffic;
+   - **N worker processes**, scaled by queue backlog;
+   - **exactly one scheduler**, or several if the per-source lease from the study notes is added.
 
-```python
-# ponytail: one worker thread per process; `uvicorn --workers N` runs N, which is safe because the
-# claim is atomic. All N share one environment, so for a single consumer run separate processes (one
-# with the worker on, the rest with FI_WORKER_ENABLED=false); a standalone worker entrypoint is the
-# upgrade.
-@dataclass
-class WorkerService:
-```
+**What does not change:** the claim and the fence already make N workers safe (C8).
 
-- **Files that change:** a small `worker_main.py` entry point that builds the pipeline and worker the way `main.py` does. Then run the API with the worker off and N worker processes, and the scheduler in exactly one process.
-- **Files that do not:** the claim and the fence already make N workers safe (C8).
-- **Honest caveat:** on SQLite, N workers wait on one write lock, so do D1 first. The lease must be longer than the slowest transform, or a second worker reclaims a live event (safe, but wasted work).
+**Pros and cons:**
+
+| Pros | Cons |
+|---|---|
+| scale the API and the workers separately, each by its own signal (requests vs backlog) | more processes to deploy and watch |
+| a crash in a worker does not take the API down | **on SQLite, more workers do not help**: they all wait on one write lock. Do D1 first |
+
+**Two tuning knobs to mention:**
+- **`FI_LEASE_SECONDS`** must be longer than the slowest event's processing. Otherwise a second worker reclaims
+  an event that is still being worked on. That is safe (the fence and the idempotent upsert), but wasted work.
+- **`FI_CLAIM_BATCH`** (10): bigger batches mean fewer claims but longer leases held.
+
+**Say this:** "Split the API and the workers into separate processes so each scales on its own signal: requests
+for the API, queue age for workers. The claim is atomic, so N workers are safe today; they only get faster after
+the move to Postgres."
+
+**If they probe deeper** (autoscaling rules, Kubernetes): "I'd scale workers on the age of the oldest pending
+event, not on CPU, because that's what customers feel. The platform specifics depend on where we deploy."
 
 ## Part E. "Why P over Q?"
 
