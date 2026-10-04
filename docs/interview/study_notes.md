@@ -93,6 +93,23 @@ dropped; an edit has a new time, so a new key, so it is kept and later updates t
 only `r1`, edits would be lost. Exceptions: a custom batch is keyed by a hash of the whole body (the batch
 is one delivery); an unreadable payload falls back to a body hash.
 
+## The pull path
+
+**Who starts a pull?**
+Two callers, one function (`PullService.sync`). The scheduler thread, every 5 minutes, for every enabled pull
+source. Or a tenant by hand: `POST /v1/sources/{id}/sync` with their own API key (not an admin route). The
+manual call runs inline and answers with the result: 200, or 502 if the source API failed, or 409 if the
+source is not an enabled pull source or is already syncing.
+
+**Can two syncs of one source run at once?**
+No, in one process: a per-source lock, and the second caller gets 409. Across processes (`uvicorn --workers
+N`) the lock is not shared, so Discourse can be polled twice. Harmless (duplicates are dropped by the unique
+key), just wasted calls. Fix: a DB lease on the source row, like the event claim.
+
+**When does the cursor move?**
+After the page's payloads are saved, never before, and never backwards (`max(stored, new)`). Discourse moves
+it only on the final page of a window, so a crash mid-window re-reads that window; duplicates are dropped.
+
 ## Records and metadata
 
 **What is `FeedbackRecord`?**
