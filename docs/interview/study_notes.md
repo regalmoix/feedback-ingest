@@ -137,6 +137,13 @@ behaviour matches. The SQLite version only adds database guarantees: the claim i
 `UPDATE ... RETURNING`; `BEGIN IMMEDIATE` and the repeated check make two workers safe; a unique constraint
 enforces the dedupe key; a composite foreign key refuses a row whose tenant does not own its source.
 
+**Why two attempt-limit checks (`>=` in `_retry`, `>` in `process`)?**
+They guard different paths. `_retry`'s `>=`: the 5th normal failure goes dead immediately, with the real
+error. Without it the event waits another backoff (32 s, up to 300 s), shows as `failed` as if it will
+retry, and dies only on the next claim. `process`'s `>` (checked before work): catches events whose
+earlier attempts crashed before anything was recorded (process killed); the claim already counted those
+attempts, so `> max` means "stop".
+
 **Scaling and other worker questions?**
 More processes (the claim is atomic); one process handles one event at a time. Thread not async because
 the database calls block and one thread is simplest.
