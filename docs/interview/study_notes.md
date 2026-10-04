@@ -159,9 +159,28 @@ a fix plus replay. Flaky failures retry with backoff. After 5 tries anything goe
 forever." Unknown errors are retried on purpose (safe if transient); the upgrade is classifying more as
 permanent once seen in production.
 
+**What does "lease lost" mean?**
+This worker's lease expired and another worker re-claimed the event before this one finished. Its
+"mark done" is refused (fencing: status, attempts and lease must match the copy it claimed), it logs
+"lease lost" and moves on. The row is not orphaned: the newer worker finishes it. Also happens if an
+admin replays the event mid-work.
+
 **Scaling and other worker questions?**
 More processes (the claim is atomic); one process handles one event at a time. Thread not async because
 the database calls block and one thread is simplest.
+
+## Tenancy and storage
+
+**Why does the pipeline use `sources.get(id, tenant_id=...)` and not `get_by_id` plus a check?**
+Same result, but the tenant is part of the lookup, so the check cannot be forgotten and a wrong-tenant
+source is simply "not found". House rule: every read that knows its tenant is tenant-scoped; `get_by_id`
+exists only for the webhook, where the tenant is not known yet. SQLite also refuses such a row outright
+(composite foreign key).
+
+**Anything the SQLite stores do beyond the memory ones?**
+Behaviour is the same (shared contract tests). Extras: webhook secrets are stored in plain text (known gap,
+"secrets at rest": encrypt the column or use a secrets manager); tenant names and API-key hashes are unique
+columns, so a duplicate becomes `ValueError` and then 409; tenant scoping is a `WHERE tenant_id = ...`.
 
 ## App structure (FastAPI)
 
