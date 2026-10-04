@@ -1299,466 +1299,476 @@ output overwrites the old record.
 
 ## Part C. "How does the app handle X?"
 
-Each answer is a trace through code you saw in Part B. Outputs are from the same run.
+Each answer has the same shape:
+1. **The situation**: a concrete example.
+2. **What happens**: the steps, each naming the function and linking the file.
+3. **Real result**: from the same run as Part B.
+4. **Say this**: the line for the interview.
+
+Code is linked, not pasted. Open a link only if you want to see the exact lines.
 
 ### C1. A duplicate webhook
 
-The resend goes through hops 1 to 4 exactly as before. In hop 5, `enqueue` finds the row with the same `(source_id, external_event_id)` and returns its id. `accept` compares ids ([ingestion.py:40](../feedback_ingest/services/ingestion.py#L40)) and reports a duplicate. Nothing is written, and the worker finds nothing new to claim:
+**The situation.** The Play Store review from Part B (`review.json`) is pushed to `src-play-1` a second time. This
+happens all the time in real life: a sender times out waiting for our answer and sends again.
 
+**What happens:**
+1. **The webhook checks all pass again**: the source is found, the signature matches, the body is parsed
+   ([api/ingest.py](../feedback_ingest/api/ingest.py), `_ingest`).
+2. **`IngestionService.accept` builds the delivery id**, the same as last time: review id plus its
+   `lastModified` time ([services/ingestion.py:28](../feedback_ingest/services/ingestion.py#L28)).
+3. **The queue's `enqueue` hits the unique key** `(source_id, external_event_id)`. It does not insert. It returns
+   the row that is already there.
+4. **`accept` compares ids** ([ingestion.py:40](../feedback_ingest/services/ingestion.py#L40)): the returned id
+   is not the new one, so `duplicate = True`.
+
+**Real result:**
 ```
 (202, {'raw_event_id': '752a6ec074004c658e0d0b67a152fa23', 'duplicate': True})
-worker run: []
+worker run: []          ← nothing new to process
 ```
 
-It still answers 202, because the sender's job is done: we have it. If the stored row is `dead`, the duplicate does not revive it; `accept` logs a warning instead ([ingestion.py:42-43](../feedback_ingest/services/ingestion.py#L42-L43)), because only a replay should.
+**Why still 202?** The sender's job is done: we have the review. An error would only make it retry forever.
 
-**Say this:** "The raw-event table has a unique key on source and delivery id, so a resend is dropped at the door and answered 202 with `duplicate: true`. Even if it got through, the record upsert is keyed by source and item id, so we would still have one record."
+**Edge case:** if the stored row is `dead`, a resend does not bring it back to life. `accept` logs a warning
+("duplicate of a dead raw event; left dead, replay it",
+[ingestion.py:42-43](../feedback_ingest/services/ingestion.py#L42-L43)). Only an explicit replay revives an
+event, so a sender retrying cannot loop a broken payload.
+
+**Two layers of dedupe:**
+- **Delivery:** the raw-event key `(source_id, external_event_id)` drops the resend at the door.
+- **Item:** the record key `(source_id, external_id)` means that even if a copy got through, there would still
+  be one record.
+
+**Say this:** "The raw-event table has a unique key on source and delivery id, so a resend is dropped at the
+door and answered 202 with `duplicate: true`. Even if it got through, the record upsert is keyed by source and
+item id, so we would still have one record."
 
 ### C2. The same review, edited, arriving out of order
 
-The edited review ([review_edited.json](../tests/fixtures/playstore/review_edited.json), last modified 2026-02-03, 4 stars) arrives first on `src-play-2`. The original (2026-02-02) arrives after it. The two have different external event ids, so both are stored and both are processed. The guard is in `merge`:
+**The situation.** A user writes a 2-star review on 02-02, then edits it to 4 stars on 02-03. The network
+delivers the **edit first** and the **original second**. If we simply saved the last arrival, the record would
+go back to the old 2-star text.
 
-[feedback_ingest/domain/models.py:105-112](../feedback_ingest/domain/models.py#L105-L112)
+| Arrives | Payload | Version time | Rating |
+|---|---|---|---|
+| 1st | [review_edited.json](../tests/fixtures/playstore/review_edited.json) | 2026-02-03 | 4 |
+| 2nd | the original | 2026-02-02 | 2 |
 
-```python
-def merge(
-    existing: FeedbackRecord, incoming: FeedbackRecord
-) -> tuple[FeedbackRecord, enums.UpsertOutcome]:
-    if incoming.version_at < existing.version_at:
-        if incoming.deleted_at is None or existing.deleted_at is not None:
-            return existing, enums.UpsertOutcome.SKIPPED_OLDER
-        deleted = existing.model_copy(update={"deleted_at": incoming.deleted_at})
-        return deleted, enums.UpsertOutcome.UPDATED
+**What happens:**
+1. **Both are stored and both are processed.** They are not duplicates: each delivery id includes its own
+   modified time, so the ids differ.
+2. **The connector's `transform`** turns each into a `FeedbackRecord` with the same `external_id` (the review
+   id).
+3. **The store's `upsert`** finds the existing record and calls **`merge(existing, incoming)`**
+   ([domain/models.py:105-120](../feedback_ingest/domain/models.py#L105-L120)).
+4. **`merge` compares version times.** The version time is `source_updated_at`, or `source_created_at` if there
+   was never an edit.
+   - **Incoming older** → keep the existing record (`skipped_older`).
+   - **Incoming equal or newer** → take the incoming content, but keep `id`, the first-seen time and
+     `ingested_at` (`updated`).
+
+**Real log lines:**
+```
+processed: inserted=1, updated=0, skipped_older=0 ... source_id=src-play-2    ← the edit (first arrival)
+processed: inserted=0, updated=0, skipped_older=1 ... source_id=src-play-2    ← the late original, ignored
 ```
 
-Real log lines for the two events:
+The record kept the newer text: `"Fixed in 4.2.2, thanks. Checkout works after rotating now."`, rating 4,
+`source_updated_at` `2026-02-03T02:40:00`.
 
-```
-processed: inserted=1, updated=0, skipped_older=0 ... source_id=src-play-2
-processed: inserted=0, updated=0, skipped_older=1 ... source_id=src-play-2
-```
+**Side note on ids.** The record id is `b91ac929...` here and `3e8a3f4d...` on `src-play-1`, for the same
+review. The id is a uuid5 of `source_id:external_id`, so the same review id under two different apps gives two
+records.
 
-The record kept the newer text and rating: `"Fixed in 4.2.2, thanks. Checkout works after rotating now."`, rating 4, `source_updated_at` `2026-02-03T02:40:00`. Its id is `b91ac929...`, not `3e8a3f4d...`, because the uuid5 includes the source id: two apps, two records.
+**Why "equal wins"?** A replay sends the same version again. "Equal wins" lets the replayed copy overwrite, which
+is how a connector fix reaches old records (C12).
 
-**Say this:** "Each record carries its source's version time, and the upsert only accepts an equal or newer version, so a late old edit is skipped. Equal wins on purpose, so a replay after a connector fix can overwrite."
+**Say this:** "Each record carries its source's version time, and the upsert only accepts an equal or newer
+version, so a late old edit is skipped. Equal wins on purpose, so a replay after a connector fix can overwrite."
 
 ### C3. A delete (tombstone)
 
-A **tombstone** is a record that stays in the table, marked deleted with `deleted_at`. Only Discourse reports deletes. Its event id uses the delete time first, so a delete is always a new event:
+**The situation.** A forum user posts on Discourse, then deletes the post. We should stop showing it, but not
+lose the fact that it existed.
 
-[feedback_ingest/connectors/discourse.py:30-35](../feedback_ingest/connectors/discourse.py#L30-L35)
+A **tombstone** is a record that stays in the table, marked deleted with `deleted_at`. Only Discourse webhooks
+report deletes today.
 
-```python
-    def external_event_id(self, payload: Mapping[str, Any]) -> str:
-        try:
-            post = DiscoursePostIn.model_validate(payload)
-        except ValidationError:
-            return payload_hash(dict(payload))
-        return f"{post.id}:{(post.deleted_at or post.updated_at or post.created_at).isoformat()}"
-```
+**What happens:**
+1. **The delete gets its own delivery id.** The Discourse connector's `external_event_id` uses the delete time
+   first: `post_id:(deleted_at or updated_at or created_at)`
+   ([connectors/discourse.py:30-35](../feedback_ingest/connectors/discourse.py#L30-L35)). So a delete is never
+   mistaken for a duplicate of the original post.
+2. **`transform`** copies `deleted_at` into the record.
+3. **`merge` makes the delete stick**, with two rules
+   ([models.py:105-120](../feedback_ingest/domain/models.py#L105-L120)):
+   - A delete applies **even if its timestamp is older** than the stored version. A late delete is never lost.
+   - Once set, `deleted_at` is **never cleared** (`existing.deleted_at or incoming.deleted_at`). A later edit
+     cannot undelete.
+4. **Reads hide tombstones** unless `include_deleted=true`
+   ([feedback_store.py:55-56](../feedback_ingest/adapters/sqlalchemy/feedback_store.py#L55-L56)).
 
-The connector copies `deleted_at` into the record, and `merge` makes it stick: "a delete always applies" (lines 109-112 above) and "never undone" (`existing.deleted_at or incoming.deleted_at`, [models.py:118](../feedback_ingest/domain/models.py#L118)). Reads hide tombstones unless asked ([feedback_store.py:55-56](../feedback_ingest/adapters/sqlalchemy/feedback_store.py#L55-L56)). Real run, after pushing [post.json](../tests/fixtures/discourse/post.json) and [post_deleted.json](../tests/fixtures/discourse/post_deleted.json) to a push-mode Discourse source:
-
+**Real result**, after pushing [post.json](../tests/fixtures/discourse/post.json) and
+[post_deleted.json](../tests/fixtures/discourse/post_deleted.json):
 ```
 GET /v1/records?source_id=src-forum-push                       -> external ids ['9001']
-GET /v1/records?source_id=src-forum-push&include_deleted=true  -> [('9001', None, ...), ('9002', '2026-02-12T10:00:00', '(post deleted by author)')]
+GET /v1/records?source_id=src-forum-push&include_deleted=true  -> [('9001', None, ...),
+                                                                   ('9002', '2026-02-12T10:00:00', '(post deleted by author)')]
 ```
 
-**Say this:** "A delete becomes a tombstone: the row stays with `deleted_at` set, reads hide it by default, and a later edit cannot undo it. Even a delete with an older timestamp still applies, so a late delete is never lost."
+**Why keep the row?** Downstream systems (search, analytics) need to know it was deleted, so they can remove it
+too. A hard delete would just look like the post never existed.
+
+**Say this:** "A delete becomes a tombstone: the row stays with `deleted_at` set, reads hide it by default, and
+a later edit cannot undo it. Even a delete with an older timestamp still applies, so a late delete is never
+lost."
 
 ### C4. A malformed payload goes dead, then is replayed
 
-[malformed.json](../tests/fixtures/playstore/malformed.json) has no `lastModified` and no `starRating`. Hop 4 cannot parse it, so its event id is the SHA-256 of the JSON, and the API answers 202. In hop 8 the input model raises `ValidationError`, and hop 7 sends it dead on the first attempt. The error text is built from field paths only, never from the customer's text:
+**The situation.** A Play Store payload arrives missing `lastModified` and `starRating`
+([malformed.json](../tests/fixtures/playstore/malformed.json)). Either the source changed its format, or it sent
+junk.
 
-[feedback_ingest/services/pipeline.py:91-95](../feedback_ingest/services/pipeline.py#L91-L95)
+**What happens:**
+1. **The webhook still answers 202.** The body is valid JSON and the signature is right, so we store it. We
+   never refuse data the sender thinks we have.
+2. **Its delivery id is a SHA-256 of the JSON.** `accept` cannot read the review id and time, so it falls back to
+   a content hash. Even a broken payload dedupes.
+3. **The worker claims it**, and the Play Store `transform` validates it with its Pydantic input model. Two
+   required fields are missing, so it raises `ValidationError`.
+4. **`PipelineService.process` sends it dead on the first try**
+   ([services/pipeline.py:38](../feedback_ingest/services/pipeline.py#L38)). A validation error is permanent:
+   retrying the same bytes cannot fix it.
+5. **The error text is built by `_describe`**
+   ([pipeline.py:91-95](../feedback_ingest/services/pipeline.py#L91-L95)) from **field paths only**, never the
+   field values. So no customer text leaks into errors or logs.
 
-```python
-def _describe(exc: ValidationError | PermanentError) -> str:
-    if isinstance(exc, PermanentError):
-        return str(exc)[:_MAX_ERROR]
-    errors = exc.errors(include_url=False, include_input=False)  # no customer text in the error
-    return "; ".join(f"{'.'.join(map(str, e['loc']))}: {e['msg']}" for e in errors)[:_MAX_ERROR]
-```
-
-Real `GET /admin/raw-events/5d8ab031...`:
-
+**Real `GET /admin/raw-events/5d8ab031...`:**
 ```json
 {
-  "id": "5d8ab031...",
-  "source_id": "src-play-1",
   "status": "dead",
   "attempts": 1,
-  "error": "comments.0.userComment.lastModified: Field required; comments.0.userComment.starRating: Field required",
-  "received_at": "2026-03-01T12:03:02",
-  "next_attempt_at": "2026-03-01T12:03:02"
+  "error": "comments.0.userComment.lastModified: Field required; comments.0.userComment.starRating: Field required"
 }
 ```
 
-To **replay** is to put an event back to `pending` so the worker runs it again:
+**Then the replay.** To **replay** is to reset an event to `pending` so the worker runs it again.
+- **Route:** `POST /admin/raw-events/{id}/replay` ([api/admin.py:45-51](../feedback_ingest/api/admin.py#L45-L51))
+  checks that the event is this tenant's, then calls the queue's `replay`.
+- **`replay`** ([adapters/memory/queue.py:58-72](../feedback_ingest/adapters/memory/queue.py#L58-L72)) sets:
+  - `status = pending`
+  - `attempts = 0`
+  - `next_attempt_at = now`
+  - `lease_until = None`
+  - `error = None`
+- **It refuses with 409** only if a worker holds a live lease on the event right now.
 
-[feedback_ingest/api/admin.py:45-51](../feedback_ingest/api/admin.py#L45-L51)
+**Real:** the replay answered `200 {'status': 'pending'}`. The connector had not changed, so the worker sent it
+dead again with the same error. In real life the order is: fix the connector, deploy, then replay (C12).
 
-```python
-@router.post("/raw-events/{event_id}/replay")
-def replay_raw_event(event_id: str, tenant: CurrentTenant, ctx: Ctx) -> dict[str, EventStatus]:
-    _tenant_event(event_id, tenant, ctx)
-    if not ctx.adapters.queue.replay(event_id, ctx.adapters.clock.now()):
-        msg = "event is being processed"
-        raise ConflictError(msg)
-    return {"status": EventStatus.PENDING}
-```
-
-[feedback_ingest/adapters/memory/queue.py:58-72](../feedback_ingest/adapters/memory/queue.py#L58-L72)
-
-```python
-    def replay(self, event_id: str, now: datetime) -> bool:
-        event = self._events.get(event_id)
-        if event is None or (
-            event.status == EventStatus.PROCESSING and not _is_claimable(event, now)
-        ):
-            return False  # a live lease: a worker owns it
-        self._update(
-            event_id,
-            status=EventStatus.PENDING,
-            attempts=0,
-            next_attempt_at=now,
-            lease_until=None,
-            error=None,
-        )
-        return True
-```
-
-Real: `POST /admin/raw-events/5d8ab031.../replay` answered `200 {'status': 'pending'}`, the row became `pending` with `attempts` 0, `next_attempt_at` 12:04:02 and no error. The connector was unchanged, so the worker sent it dead again with the same error. In real life you fix the connector, deploy, then replay (C12). A replay of an event a worker currently holds answers 409.
-
-**Say this:** "A malformed payload is stored, not rejected, so we never lose data the sender thinks we have. It goes dead on its first attempt with the field paths as the reason, and after a fix one replay call runs it again."
+**Say this:** "A malformed payload is stored, not rejected, so we never lose data the sender thinks we have. It
+goes dead on its first attempt with the field paths as the reason, and after a fix one replay call runs it
+again."
 
 ### C5. A flaky upstream: retry, backoff and the attempt cap
 
-**Backoff** is a delay between retries that grows each time. A `TransientError` (or any unknown exception) reaches `_retry`:
+**The situation.** The database is briefly locked, or a network call times out. Trying again in a few seconds
+would probably work.
 
-[feedback_ingest/services/pipeline.py:79-88](../feedback_ingest/services/pipeline.py#L79-L88)
+**Two kinds of failure, two treatments:**
 
-```python
-    def _retry(self, event: RawEvent, error: str, extra: dict[str, object]) -> EventStatus:
-        error = error[:_MAX_ERROR]
-        if event.attempts >= self.max_attempts:
-            log.warning("dead: %s", error, extra=extra)
-            return _mark_outcome(self.queue.mark_dead(event, error), EventStatus.DEAD, extra)
-        delay = min(2**event.attempts, self.backoff_cap_seconds)
-        next_at = self.clock.now() + timedelta(seconds=delay)
-        return _mark_outcome(
-            self.queue.mark_failed(event, error, next_at), EventStatus.FAILED, extra
-        )
+| Kind | Example | What happens |
+|---|---|---|
+| **Permanent** (`ValidationError`, `PermanentError`) | missing field, a 404 from the source | dead at once (C4) |
+| **Transient** (`TransientError`, or any unknown exception) | DB locked, timeout, 429, 5xx | retried with backoff |
+
+**What happens for a transient failure:** `PipelineService._retry`
+([pipeline.py:79-88](../feedback_ingest/services/pipeline.py#L79-L88)) does one of two things:
+- **attempts below 5:** `mark_failed` with `next_attempt_at = now + min(2 ** attempts, 300)` seconds;
+- **attempt 5:** `mark_dead`, keeping the last error.
+
+**Backoff** is a delay between retries that grows each time. Nobody has to re-enqueue anything: the row just
+becomes claimable again once its time comes.
+
+**Real run**, with a store that always raises `TransientError("database is locked")`:
 ```
-
-Real run: a feedback store that always raises `TransientError("database is locked")`, with the clock moved to each `next_attempt_at`:
-
+claim at 12:00:00 attempts=1 -> failed, next try 12:00:02   (+2 s)
+claim at 12:00:02 attempts=2 -> failed, next try 12:00:06   (+4 s)
+claim at 12:00:06 attempts=3 -> failed, next try 12:00:14   (+8 s)
+claim at 12:00:14 attempts=4 -> failed, next try 12:00:30   (+16 s)
+claim at 12:00:30 attempts=5 -> dead
 ```
-claim at 12:00:00 attempts=1 -> failed, next_attempt_at=12:00:02
-claim at 12:00:02 attempts=2 -> failed, next_attempt_at=12:00:06
-claim at 12:00:06 attempts=3 -> failed, next_attempt_at=12:00:14
-claim at 12:00:14 attempts=4 -> failed, next_attempt_at=12:00:30
-claim at 12:00:30 attempts=5 -> dead, next_attempt_at=12:00:30
-```
+That is four retries over 30 seconds, then dead with `error='TransientError: database is locked'`.
 
-So four retries, 2 + 4 + 8 + 16 = 30 seconds, then dead, with `error='TransientError: database is locked'`. The delay is `min(2 ** attempts, 300)`. For a pulled source, "upstream" is Discourse itself. The HTTP adapter sorts its answers the same way: 408, 429 and 5xx are transient, other 4xx are permanent:
+**The same sorting on the pull side.** The HTTP adapter's `_raise_for_status`
+([httpx_client.py:59-65](../feedback_ingest/adapters/http/httpx_client.py#L59-L65)) decides:
+- 408, 429 and any 5xx → transient;
+- any other 4xx → permanent.
 
-[feedback_ingest/adapters/http/httpx_client.py:59-65](../feedback_ingest/adapters/http/httpx_client.py#L59-L65)
+A failed pull stops at the saved cursor ([pull.py:67-69](../feedback_ingest/services/pull.py#L67-L69)), and
+the next scheduler tick retries.
 
-```python
-def _raise_for_status(status: int, url: str) -> None:
-    if status < HTTPStatus.MULTIPLE_CHOICES:
-        return
-    retryable = status in _RETRYABLE_4XX or status >= HTTPStatus.INTERNAL_SERVER_ERROR
-    kind = TransientError if retryable else PermanentError
-    msg = f"{status} from {_safe(url)}"
-    raise kind(msg)
-```
-
-A transient error during a pull stops that sync with the cursor where it was ([pull.py:67-69](../feedback_ingest/services/pull.py#L67-L69)); the next scheduler tick tries again from there.
-
-**Say this:** "Failures are sorted: permanent goes dead at once, transient retries with exponential backoff of 2, 4, 8, 16 seconds and goes dead on attempt 5. Dead is not lost: it is listed per tenant and replayable."
+**Say this:** "Failures are sorted: permanent goes dead at once, transient retries with exponential backoff of
+2, 4, 8, 16 seconds and goes dead on attempt 5. Dead is not lost: it is listed per tenant and replayable."
 
 ### C6. A worker crashes mid-event: lease expiry and fencing
 
-A **fence** is a condition on a write that makes it apply only if the row is still in the exact state the writer saw. The finish calls are fenced:
+**The situation.** Worker 1 claims an event, then the process is killed before it finishes. Who processes the
+event, and what if worker 1 was only slow and wakes up later?
 
-[feedback_ingest/adapters/memory/queue.py:103-109](../feedback_ingest/adapters/memory/queue.py#L103-L109)
+**Two ideas:**
+- **A lease:** a claim is only valid for 30 seconds (`lease_until`). After that, any worker may claim the event
+  again.
+- **A fence:** a condition on a write, so it applies only if the row is still exactly as the writer left it.
+  `mark_processed`, `mark_failed` and `mark_dead` all go through `_finish`
+  ([memory/queue.py:103-109](../feedback_ingest/adapters/memory/queue.py#L103-L109); SQL version
+  [raw_event_queue.py:109-115](../feedback_ingest/adapters/sqlalchemy/raw_event_queue.py#L109-L115)). It
+  writes only if the row still shows `processing` with the **same `attempts` and `lease_until`** this worker
+  claimed it with.
 
-```python
-    def _finish(self, event: RawEvent, **changes: object) -> bool:
-        stored = self._events.get(event.id)
-        fence = (EventStatus.PROCESSING, event.attempts, event.lease_until)
-        if stored is None or (stored.status, stored.attempts, stored.lease_until) != fence:
-            return False
-        self._update(event.id, lease_until=None, **changes)
-        return True
-```
-
-Real run on `src-play-3` (SQLite adapter, its fence is [raw_event_queue.py:109-115](../feedback_ingest/adapters/sqlalchemy/raw_event_queue.py#L109-L115)):
+**Real run on `src-play-3`:**
 
 | Time | Worker 1 | Worker 2 | Row |
 |---|---|---|---|
 | 12:05:02 | claims, then "dies" | | `processing`, attempts 1, lease until 12:05:32 |
-| 12:05:12 | | claims, gets `[]` | unchanged: the lease is live |
-| 12:05:33 | | claims and processes | `processed`, attempts 2 |
-| later | `mark_processed` returns `False` | | unchanged |
+| 12:05:12 | | tries to claim, gets nothing | unchanged: the lease is still live |
+| 12:05:33 | | claims (the lease expired) and processes | `processed`, attempts 2 |
+| later | wakes up, calls `mark_processed` → **`False`** | | unchanged |
 
-The reclaim changed `attempts` and `lease_until`, so worker 1's late write matches nothing. If a worker crashes on every attempt, nothing records a failure, but each claim still counted. The check at the top of `process` ([pipeline.py:40-46](../feedback_ingest/services/pipeline.py#L40-L46)) sends it dead at attempt 6 without running it again, with the error "none recorded (worker crashed; see logs)". Even if worker 1 had written the record, the upsert is idempotent, so the result would be the same.
+Worker 2's claim changed `attempts` (1 → 2) and `lease_until`. So worker 1's late write no longer matches the
+fence, and it is ignored. Even if worker 1 had already written the record, the upsert is idempotent, so the end
+state is the same.
 
-**Say this:** "A claim is a 30-second lease. If the worker dies, the lease runs out and another claim takes the event, and a fence on attempts and lease time stops the dead worker's late write. A worker that crashes every time still burns attempts, so the event goes dead instead of looping forever."
+**What if it crashes every time?** A crash records no failure, but each claim still counts an attempt. The check
+at the top of `process` ([pipeline.py:40-46](../feedback_ingest/services/pipeline.py#L40-L46)) sees attempt 6,
+which is over the cap of 5. It sends the event dead **without running it again**, with the error "none recorded
+(worker crashed; see logs)". A poison event cannot crash workers forever.
+
+**Say this:** "A claim is a 30-second lease. If the worker dies, the lease runs out and another claim takes the
+event, and a fence on attempts and lease time stops the dead worker's late write. A worker that crashes every
+time still burns attempts, so the event goes dead instead of looping forever."
 
 ### C7. The database is down when a push arrives
 
-`enqueue` raises a SQLAlchemy error. No route catches it; one handler maps it to 503 for every route:
+**The situation.** The disk is full, or the database is unreachable, at the moment a webhook arrives.
 
-[feedback_ingest/api/errors.py:43-48](../feedback_ingest/api/errors.py#L43-L48)
+**What happens:**
+1. **`accept` calls the queue's `enqueue`**, which raises a SQLAlchemy `OperationalError`.
+2. **No route catches it.** One app-wide handler, `add_error_handlers` in
+   [api/errors.py:43-48](../feedback_ingest/api/errors.py#L43-L48), maps the three storage errors
+   (`OperationalError`, `InterfaceError`, `TimeoutError`) to **503 "storage unavailable"** for every route, and
+   logs it with the source id.
+3. **The 202 is never sent**, because it only goes out after the insert commits.
 
-```python
-def add_error_handlers(app: FastAPI) -> None:
-    app.add_exception_handler(NotFoundError, _respond(HTTPStatus.NOT_FOUND))
-    app.add_exception_handler(UnauthorizedError, _respond(HTTPStatus.UNAUTHORIZED))
-    app.add_exception_handler(ConflictError, _respond(HTTPStatus.CONFLICT))
-    for exc in (sa_exc.OperationalError, sa_exc.InterfaceError, sa_exc.TimeoutError):
-        app.add_exception_handler(exc, _storage_unavailable)
-```
-
-Real, with `enqueue` made to raise `OperationalError`:
-
+**Real result:**
 ```
 503 {'detail': 'storage unavailable'}
 ERROR feedback_ingest.api.errors storage unavailable: POST /v1/sources/src-play-1/events ... source_id=src-play-1
 ```
 
-202 is only sent after the row is committed. So a 503 means "we do not have it", and the sender retries later.
+**What 503 tells the sender:** "We do not have it, try again." Webhook senders normally retry on a non-2xx
+answer, so the event arrives once the database is back. The other parts during the outage (the worker, health,
+pull) are covered in Part E2, S5.
 
-**Say this:** "We save before we say yes. If the database is down the webhook answers 503, never 202, so the sender keeps the event and retries, and nothing acknowledged is ever lost."
+**Say this:** "We save before we say yes. If the database is down the webhook answers 503, never 202, so the
+sender keeps the event and retries, and nothing acknowledged is ever lost."
 
 ### C8. Two workers at once
 
-Two workers happen by accident: `uvicorn --workers N` starts one worker thread per process. Safety comes from hop 6: the claim checks "still claimable" and changes the row in the same statement, so a row taken by someone else in between is skipped, not taken twice. This test races four real SQLite connections:
+**The situation.** You run `uvicorn --workers 4` for more capacity. Each process starts its own worker thread,
+so four workers now poll the same `raw_events` table. Can two of them take the same event?
 
-[tests/adapters/test_sqlalchemy.py:69-92](../tests/adapters/test_sqlalchemy.py#L69-L92)
+**Why they cannot:** the claim is **one SQL statement** (the queue's `claim`,
+[raw_event_queue.py:32](../feedback_ingest/adapters/sqlalchemy/raw_event_queue.py#L32)). It checks "is this
+row still claimable?" and sets it to `processing` in the same step. If worker A takes a row a moment before
+worker B, B's statement no longer matches that row and skips it. No gap exists between "check" and "take".
 
-```python
-def test_concurrent_claims_are_disjoint(engine: Engine, sql: Adapters) -> None:
-    a = sql
-    seed(a)
-    now = a.clock.now()
-    for n in range(40):
-        a.queue.enqueue(event(SOURCE_A1, f"e{n}", now))
-    workers = 4
-    barrier = threading.Barrier(workers)
+**Proof:** a test races four threads, each with its own SQLite connection, over 40 events
+(`test_concurrent_claims_are_disjoint`,
+[tests/adapters/test_sqlalchemy.py:69-92](../tests/adapters/test_sqlalchemy.py#L69-L92)). Every id is claimed
+exactly once: 40 claims, 40 distinct ids.
 
-    def drain() -> list[str]:
-        own = make_engine(str(engine.url))
-        own.connect().close()
-        queue = SqlRawEventQueue(own)
-        barrier.wait()
-        claimed: list[str] = []
-        while batch := queue.claim(now, lease_seconds=60, limit=3):
-            claimed += [e.id for e in batch]
-        own.dispose()
-        return claimed
+**And a late finisher** is stopped by the fence (C6).
 
-    with ThreadPoolExecutor(workers) as pool:
-        results = [f.result() for f in [pool.submit(drain) for _ in range(workers)]]
-    claimed = [event_id for result in results for event_id in result]
-    assert len(claimed) == len(set(claimed)) == 40
-```
+**The honest limit:** safe is not the same as fast.
+- **SQLite:** writers queue for one write lock, so four workers are not four times faster.
+- **Postgres:** the claim would add `SKIP LOCKED`, so workers skip rows another worker is locking instead of
+  waiting. The `ponytail:` comment at
+  [raw_event_queue.py:30-31](../feedback_ingest/adapters/sqlalchemy/raw_event_queue.py#L30-L31) names this
+  upgrade.
 
-Forty events, four threads, every id claimed exactly once. If a stale worker still finishes late, the fence from C6 refuses it. On SQLite the writers queue for one write lock, so more workers do not mean more throughput. On Postgres the claim would add `SKIP LOCKED`, which the `ponytail:` comment at [raw_event_queue.py:30-31](../feedback_ingest/adapters/sqlalchemy/raw_event_queue.py#L30-L31) names.
-
-**Say this:** "The claim is one conditional update, so only one worker can flip a row to processing, and the fence stops a late finisher. It is safe today. To make it fast with many workers I would move to Postgres and add SKIP LOCKED to the claim."
+**Say this:** "The claim is one conditional update, so only one worker can flip a row to processing, and the
+fence stops a late finisher. It is safe today. To make it fast with many workers I would move to Postgres and
+add SKIP LOCKED to the claim."
 
 ### C9. A tenant asks for another tenant's data
 
-Three layers stop it. First, routes take the tenant only from the API key (hop 11) and every store read takes that tenant id. Second, a foreign id answers 404, the same as a missing one, so ids do not leak. The admin routes use the same check:
+**The situation.** Acme's API key asks for `GET /v1/records/<Lumenote's record id>`, or replays one of
+Lumenote's raw events. Maybe a bug in Acme's script, maybe probing.
 
-[feedback_ingest/api/admin.py:59-64](../feedback_ingest/api/admin.py#L59-L64)
+**Three layers stop it:**
+1. **The tenant comes only from the API key.**
+   - `current_tenant` ([api/deps.py:48](../feedback_ingest/api/deps.py#L48)) hashes the `X-API-Key` header and
+     looks the tenant up.
+   - Every store read then takes that tenant id. The request body or URL can never pick the tenant.
+   - For webhooks, the tenant comes from the source row instead.
+2. **A foreign id looks exactly like a missing one: 404, not 403.**
+   - Sources go through `tenant_source` ([deps.py:59](../feedback_ingest/api/deps.py#L59)).
+   - Raw events go through `_tenant_event` ([api/admin.py:59-64](../feedback_ingest/api/admin.py#L59-L64)).
+   - Both answer "not found" when the tenant does not match, so Acme cannot even learn the id exists.
+3. **The database refuses a mixed-up row.**
+   - `raw_events` and `feedback_records` have a **composite foreign key** on `(source_id, tenant_id)` pointing
+     at `sources` ([tables.py:37](../feedback_ingest/adapters/sqlalchemy/tables.py#L37),
+     [tables.py:57](../feedback_ingest/adapters/sqlalchemy/tables.py#L57)).
+   - A **foreign key** is a rule that the value must exist in another table. Using the pair means a row cannot
+     carry Lumenote's source with Acme's tenant id, even if code had a bug.
 
-```python
-def _tenant_event(event_id: str, tenant: Tenant, ctx: Ctx) -> RawEvent:
-    event = ctx.adapters.queue.get(event_id)
-    if event is None or event.tenant_id != tenant.id:
-        msg = f"raw event {event_id} not found"
-        raise NotFoundError(msg)
-    return event
-```
+**Real:** with Acme's key, Lumenote's source and record both answer 404. Part B's last hop, where the record is
+read back through `GET /v1/records`, shows these responses.
 
-Third, the database: both `raw_events` and `feedback_records` have a foreign key on the pair `(source_id, tenant_id)` to `sources` ([tables.py:37](../feedback_ingest/adapters/sqlalchemy/tables.py#L37), [tables.py:57](../feedback_ingest/adapters/sqlalchemy/tables.py#L57)). A **foreign key** is a rule that a value must exist in another table. Using the pair means a row cannot name tenant A's source with tenant B's id. Real responses with Acme's key are in hop 11 (404 for the source, 404 for the record).
-
-**Say this:** "The tenant always comes from the API key or, for webhooks, from the source row, never from the request body, and every query is scoped by it. Another tenant's id answers 404 like a missing one, and a composite foreign key makes a cross-tenant row impossible in the database itself."
+**Say this:** "The tenant always comes from the API key or, for webhooks, from the source row, never from the
+request body, and every query is scoped by it. Another tenant's id answers 404 like a missing one, and a
+composite foreign key makes a cross-tenant row impossible in the database itself."
 
 ### C10. A disabled source
 
-A source has `enabled` (default true), changed with `PATCH /v1/sources/{id}` ([api/sources.py:48-59](../feedback_ingest/api/sources.py#L48-L59)). Three places read it. A webhook answers 409 after the signature check (hop 3; real: `409 {'detail': 'source is disabled'}`). The scheduler only lists enabled pull sources (`list_enabled`, [scheduler.py:47](../feedback_ingest/services/scheduler.py#L47)). And a manual sync refuses it:
+**The situation.** A customer pauses their Twitter feed: `PATCH /v1/sources/{id}` with `{"enabled": false}`
+([api/sources.py:48-59](../feedback_ingest/api/sources.py#L48-L59)). Sources are disabled, never deleted, so
+their records and history stay.
 
-[feedback_ingest/api/sync.py:16-26](../feedback_ingest/api/sync.py#L16-L26)
+**Three places check `enabled`:**
 
-```python
-@router.post("/v1/sources/{source_id}/sync")
-def sync_source(
-    source: Annotated[Source, Depends(tenant_source)], ctx: Ctx, response: Response
-) -> PullResult:
-    if source.mode is not SourceMode.PULL or not source.enabled:
-        msg = f"source {source.id} is not an enabled pull source"
-        raise ConflictError(msg)
-    result = ctx.pull.sync(source)
-    if result.error is not None:
-        response.status_code = HTTPStatus.BAD_GATEWAY
-    return result
-```
+| Door | What happens |
+|---|---|
+| **Webhook** | `409 {'detail': 'source is disabled'}`. The check runs *after* the signature check, so only a caller who proved it is the sender learns the source's state. |
+| **Scheduler** | `list_enabled` only returns enabled pull sources ([scheduler.py:47](../feedback_ingest/services/scheduler.py#L47)), so a disabled one is never polled. |
+| **Manual sync** | `sync_source` ([api/sync.py:16-26](../feedback_ingest/api/sync.py#L16-L26)) answers 409 "not an enabled pull source". |
 
-Events already in `raw_events` are still processed: disabling stops intake, not the backlog.
+**What it does not stop:** events already in `raw_events` are still processed. Disabling stops **intake**, not
+the backlog. Once we answered 202, the event is our responsibility.
 
-**Say this:** "Disabling a source stops intake at both doors: its webhook answers 409 and the scheduler skips it. What was already accepted still gets processed, because it is ours once we answered 202."
+**Example:** 50 tweets are queued, then the source is disabled. All 50 still become records; tweet 51 gets
+409.
+
+**Say this:** "Disabling a source stops intake at both doors: its webhook answers 409 and the scheduler skips
+it. What was already accepted still gets processed, because it is ours once we answered 202."
 
 ### C11. The Discourse pull cursor, across pages and windows
 
-A **cursor** is a bookmark: where the next pull starts. A **window** is the date range one pull searches: from the cursor (or `start_after` while the cursor is empty) to cursor plus `window_days` (7 by default), capped at tomorrow.
+Part B2 (P4 to P6) covers the cursor rules in detail. This is the short version with a two-sync example.
 
-[feedback_ingest/connectors/discourse_pull.py:36-45](../feedback_ingest/connectors/discourse_pull.py#L36-L45)
+**Two terms:**
+- **Cursor:** a bookmark, where the next pull starts.
+- **Window:** the date range one sync searches. It runs from the cursor (or `start_after` while the cursor is
+  empty) to cursor plus `window_days` (7 by default), capped at tomorrow.
 
-```python
-    since = source.cursor or source.config["start_after"]  # check_source parsed start_after
-    since_at = NAIVE_UTC.validate_python(since)
-    now = clock.now()
-    try:
-        window = timedelta(days=int(source.config.get("window_days", 7)))
-        # `before:` is a date, so tomorrow at most keeps today's posts in the search
-        until = min(now + timedelta(days=1), since_at + window)
-    except OverflowError as exc:
-        raise PermanentError(str(exc)) from exc
-    query = f"after:{since_at.date()} before:{until.date()}"
-```
+**What one sync does:**
+1. **`pull_pages`** ([connectors/discourse_pull.py](../feedback_ingest/connectors/discourse_pull.py)) works
+   out the window and searches it page by page. For each page it fetches the full posts, one call per topic.
+2. **Each page is handed to `PullService._sync`**
+   ([services/pull.py:56-66](../feedback_ingest/services/pull.py#L56-L66)). It passes every post to the same
+   `accept` a webhook uses, then calls `_advance` to save the page's cursor.
+3. **Only the final page carries a new cursor.** Discourse search is not ordered oldest-first, so moving it
+   earlier could skip posts if we crashed.
+4. **`_next_cursor`** ([discourse_pull.py:72-76](../feedback_ingest/connectors/discourse_pull.py#L72-L76))
+   picks the new cursor: the latest of `since`, the newest post minus 60 s, and the window end if the window is
+   already in the past.
+5. **`_advance`** ([pull.py:82-87](../feedback_ingest/services/pull.py#L82-L87)) never moves the stored cursor
+   backwards.
 
-Each search page is turned into a `PullPage` (a list of payloads plus a cursor). Only the final page carries a new cursor, because Discourse search is not ordered oldest first:
-
-[feedback_ingest/connectors/discourse_pull.py:57-64](../feedback_ingest/connectors/discourse_pull.py#L57-L64)
-
-```python
-        newest = max(
-            [hit.created_at for hit in search.posts] + ([newest] if newest else []), default=None
-        )
-        final = not grouped.more_full_page_results
-        cursor = _next_cursor(since_at, newest, until, now) if final else since
-        yield PullPage(payloads=_fetch_posts(base_url, http, search, check), cursor=cursor)
-        if final:
-            return
-```
-
-[feedback_ingest/connectors/discourse_pull.py:72-76](../feedback_ingest/connectors/discourse_pull.py#L72-L76)
-
-```python
-# 60 s overlap: a post committed late with an older timestamp is re-read, dedup absorbs the repeat.
-# A window wholly in the past advances to its end, so an empty week does not stall the cursor.
-def _next_cursor(since: datetime, newest: datetime | None, until: datetime, now: datetime) -> str:
-    moved = max(newest - _OVERLAP, since) if newest else since
-    return (max(moved, until) if until < now else moved).isoformat()
-```
-
-The service stores every payload of a page through the same `accept` as a push, and only then saves that page's cursor:
-
-[feedback_ingest/services/pull.py:56-66](../feedback_ingest/services/pull.py#L56-L66)
-
-```python
-        try:
-            for page in PULLERS[source.type].pull(source, self.http, self.clock, deadline):
-                # ponytail: whole-page accept loop; batch enqueue if a page ever holds thousands
-                # of items
-                for payload in page.payloads:
-                    if self.ingestion.accept(source, payload).duplicate:
-                        duplicates += 1
-                    else:
-                        accepted += 1
-                cursor = self._advance(source, page.cursor)
-                pages += 1
-```
-
-Real run on `src-forum` (`start_after = 2026-02-01`, clock 2026-03-01, the test stub [tests/discourse_mock.py](../tests/discourse_mock.py) serves two pages):
-
+**Real run** on `src-forum` (`start_after = 2026-02-01`, clock at 2026-03-01; the test stub serves two pages for
+any window):
 ```
 sync 1 -> 200 {'pages': 2, 'accepted': 4, 'duplicates': 0, 'cursor': '2026-02-08T00:00:00', 'error': None}
 sync 2 -> 200 {'pages': 2, 'accepted': 0, 'duplicates': 4, 'cursor': '2026-02-15T00:00:00', 'error': None}
 ```
+- **Sync 1** searched 02-01 to 02-08. The window is wholly in the past, so the cursor jumped to its end.
+- **Sync 2** searched the next week. The stub returned the same four posts, so all four were duplicates,
+  dropped by the unique key.
 
-Sync 1 searched `after:2026-02-01 before:2026-02-08`. Page 1 kept the old cursor. The final page moved it to the window end, because the whole window is in the past (an empty week must not stall it). Sync 2 searched the next week; the stub returns the same posts for any window, so all four were duplicates. When the window reaches today, the cursor follows the data instead. Real calls to `_next_cursor`: since 2026-02-27, newest post 2026-02-28 09:15, now 2026-03-01 12:00 returns `2026-02-28T09:14:00` (newest minus a 60 s **overlap**, so a post committed late is re-read); with no posts it returns `2026-02-27T00:00:00`. `_advance` ([pull.py:82-87](../feedback_ingest/services/pull.py#L82-L87)) never moves the stored cursor backwards. A failure on page 2 keeps page 1's rows and the old cursor, so the next run re-reads the window and dedupe absorbs the repeats.
+**When the window reaches today,** the cursor follows the newest post instead. Example: since 02-27, newest post
+02-28 09:15, now 03-01 12:00 → `2026-02-28T09:14:00`. With no posts it stays at `2026-02-27T00:00:00`.
 
-**Say this:** "The cursor only moves after a page's rows are committed, and only on the final page of a window, so a crash re-reads instead of skipping. The 60-second overlap and repeated windows cause re-reads on purpose, and the raw-event unique key turns them into duplicates."
+**On a failure** (say page 2 times out), page 1's posts are already saved and the cursor has not moved. The next
+sync re-reads the window, and the repeats become duplicates.
+
+**Say this:** "The cursor only moves after a page's rows are committed, and only on the final page of a window,
+so a crash re-reads instead of skipping. The 60-second overlap and repeated windows cause re-reads on purpose,
+and the raw-event unique key turns them into duplicates."
 
 ### C12. Replay after a connector fix
 
-Every connector has a `version` ([playstore.py:51-54](../feedback_ingest/connectors/playstore.py#L51-L54)) and every record stores it as `connector_version`. The fix: change the connector, bump `version`, deploy, then bulk replay:
+**The situation.** Last week's deploy had a bug in the Play Store connector: say it dropped the device name
+from metadata. 2,000 records were saved wrong. How do you fix them without asking the source to resend
+anything?
 
-[feedback_ingest/api/admin.py:22-37](../feedback_ingest/api/admin.py#L22-L37)
+**What happens:**
+1. **Fix the connector and bump its `version`** (a class attribute,
+   [connectors/playstore.py:53](../feedback_ingest/connectors/playstore.py#L53)). Every record stores it as
+   `connector_version`, so you can tell fixed records from old ones.
+2. **Deploy.**
+3. **Bulk replay:** `POST /admin/raw-events/replay?status=processed&source_id=src-play-1`
+   ([api/admin.py:22-37](../feedback_ingest/api/admin.py#L22-L37)).
+   - It lists that tenant's events with the given status (optionally one source, up to 500 per call) and replays
+     each.
+   - It answers `{"replayed": n}`. Call it again for the next 500.
+4. **The worker re-runs each event with the new `transform`.** The version time is unchanged (same payload), so
+   `merge` sees **equal**, and equal wins. The record is overwritten with the corrected content and
+   `connector_version = 2`.
 
-```python
-@router.post("/raw-events/replay")
-def replay_raw_events(
-    tenant: CurrentTenant,
-    ctx: Ctx,
-    source_id: str | None = None,
-    status: Literal["dead", "failed", "processed"] = "dead",
-    limit: Limit = 500,
-) -> dict[str, int]:
-    queue, now = ctx.adapters.queue, ctx.adapters.clock.now()
-    if source_id is not None and ctx.adapters.sources.get(source_id, tenant_id=tenant.id) is None:
-        msg = f"source {source_id} not found"
-        raise NotFoundError(msg)
-    events = queue.list_by_status(
-        EventStatus(status), tenant_id=tenant.id, source_id=source_id, limit=limit
-    )
-    return {"replayed": sum(queue.replay(event.id, now) for event in events)}
-```
+**Pinned by a contract test:** `same_version_from_a_newer_connector_replaces_the_row`
+([tests/adapters/contract_upsert.py:84-91](../tests/adapters/contract_upsert.py#L84-L91)). The same version
+with `text="new"` and `connector_version=2` replaces the old row, on both SQLite and the memory fake.
 
-Replayed events run the new `transform`. Their version time is unchanged, so `merge` sees "equal", and equal wins (the `equal` row in hop 10's table). The contract test that pins it:
+**Why this works at all:** the raw payload of every event is kept in `raw_events`. Nothing has to be fetched
+from the source again, which matters for webhook sources that cannot resend old events.
 
-[tests/adapters/contract_upsert.py:84-91](../tests/adapters/contract_upsert.py#L84-L91)
-
-```python
-def same_version_from_a_newer_connector_replaces_the_row(a: Adapters) -> None:
-    seed(a)
-    now = a.clock.now()
-    a.feedback.upsert(record(SOURCE_A1, "r1", now, text="old"))
-    reprocessed = record(SOURCE_A1, "r1", now, text="new", connector_version=2)
-    assert a.feedback.upsert(reprocessed) == UpsertOutcome.UPDATED
-    [stored] = a.feedback.list_for_tenant(TENANT_A.id)
-    assert (stored.text, stored.connector_version) == ("new", 2)
-```
-
-The raw payloads were kept, so nothing has to be fetched again from the source.
-
-**Say this:** "We keep every raw payload, so a connector bug is fixed by deploying the fix and replaying the affected events, filtered by source and status. Equal version times win in the upsert, so the reprocessed records overwrite the bad ones."
+**Say this:** "We keep every raw payload, so a connector bug is fixed by deploying the fix and replaying the
+affected events, filtered by source and status. Equal version times win in the upsert, so the reprocessed
+records overwrite the bad ones."
 
 ### C13. A burst of 10,000 events
 
-Each webhook does one small insert and answers 202, so the door stays fast; the work waits in `raw_events`. The worker then drains at its own pace, without sleeping while there is work:
+**The situation.** A big customer turns on their Intercom webhook and their backlog of 10,000 conversations
+arrives within a minute.
 
-[feedback_ingest/services/worker.py:65-73](../feedback_ingest/services/worker.py#L65-L73)
+**What happens:**
+1. **The webhook stays fast.** Each request does one small insert and answers 202. The work itself waits in
+   `raw_events`.
+2. **The worker drains at its own pace.** `WorkerService._loop`
+   ([services/worker.py:65-73](../feedback_ingest/services/worker.py#L65-L73)) claims up to 10 events per pass
+   (`claim_batch`) and does not sleep while there is work. It only waits one poll interval when a pass finds
+   nothing.
+3. **Writers wait instead of failing.** SQLite writers wait up to 5 seconds for the write lock (`busy_timeout`).
+4. **Nothing is lost if we fall behind.** The backlog is on disk and survives a restart.
 
-```python
-    def _loop(self) -> None:
-        while not self._stop.is_set():
-            try:
-                busy = self.run_once() > 0
-            except Exception:
-                log.exception("worker iteration failed")
-                busy = False
-            if not busy:
-                self._stop.wait(self.poll_seconds)
-```
+**The honest limits:**
+- **One SQLite writer at a time.** That is the throughput ceiling. Postgres is the next step.
+- **No fairness between tenants.** The claim takes the oldest due rows across all tenants. While this
+  customer's 10,000 drain, another tenant's single review waits behind them: a **noisy neighbour**. You can see
+  it per tenant on `GET /admin/queue`. The fix is a per-tenant (round-robin) claim, or a queue per tenant or
+  tier.
+- **Pull has its own ceiling:** about 500 posts per day per window on Discourse (the `ponytail:` note in
+  [discourse_pull.py:29-30](../feedback_ingest/connectors/discourse_pull.py#L29-L30)).
 
-Each pass claims up to 10 events (`claim_batch`, [config.py:14](../feedback_ingest/config.py#L14)). SQLite writers wait up to 5 seconds for the lock instead of failing. The honest limits: one SQLite writer at a time, and one tenant's burst sits ahead of everyone else, because the claim takes the oldest due rows across all tenants. That is visible per tenant on `GET /admin/queue`. The pull side has its own ceiling, marked `ponytail:` in [discourse_pull.py:29-30](../feedback_ingest/connectors/discourse_pull.py#L29-L30): about 500 posts per day per window.
-
-**Say this:** "The API only does one insert per event, so 202s stay fast and the backlog drains behind it, and nothing is lost if we fall behind. The weak spots are SQLite's single writer and fairness between tenants. The next steps are Postgres and a per-tenant claim."
+**Say this:** "The API only does one insert per event, so 202s stay fast and the backlog drains behind it, and
+nothing is lost if we fall behind. The weak spots are SQLite's single writer and fairness between tenants. The
+next steps are Postgres and a per-tenant claim."
 
 <details><summary>Check yourself</summary>
 
-- An older edit arrives after a newer one. Is it a duplicate? *No: its external event id has its own time. It is stored and processed, and `merge` returns `skipped_older`.*
-- A transient error repeats on every attempt. When does the event go dead? *On attempt 5, about 30 s after the first try.*
-- Why does a worker's late `mark_processed` fail after a reclaim? *The fence: `attempts` and `lease_until` no longer match what it claimed.*
+- An older edit arrives after a newer one. Is it a duplicate? *No: its delivery id has its own time. It is
+  stored and processed, and `merge` returns `skipped_older`.*
+- A transient error repeats on every attempt. When does the event go dead? *On attempt 5, about 30 s after the
+  first try.*
+- Why does a worker's late `mark_processed` fail after a reclaim? *The fence: `attempts` and `lease_until` no
+  longer match what it claimed.*
 - What does a 503 on a webhook tell the sender? *That nothing was saved, so it must retry.*
+- You disable a source with 50 events queued. What happens to them? *They are still processed; only new intake
+  is refused.*
+- A connector bug saved bad records last week. What two things make the fix possible? *The raw payload is kept,
+  and the upsert lets an equal version overwrite.*
 
 </details>
 
