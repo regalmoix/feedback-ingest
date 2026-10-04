@@ -236,6 +236,16 @@ and can always be rebuilt.
 Say: "Records are the truth. Search is fed after each save through an outbox so a failed index call is
 not lost. Analytics gets a 1:1 mirror through change data capture. Both are rebuildable."
 
+**Connector bug: how do I find what to replay?**
+Two cases. (1) Records saved but wrong: the record has no link to its raw event, and bulk replay filters only by
+status and source, not `connector_version` or time. So today you replay all `processed` events of the affected
+source; extra replays are harmless (idempotent, equal wins, older edits skip). Gap: the list is newest first, max
+500, and replayed `processed` rows stay `processed`, so a second call can repeat the same 500. (2) No record
+because `transform` raised: the event is dead (at once, or after 5 tries for an unknown exception); fix, then
+replay `dead`, which pages naturally since replayed rows leave the dead list. A bug that silently returned no
+records is case 1 (`processed`, zero records). Fix to propose: a `received_at` range on bulk replay, and
+`last_raw_event_id` on the record for lineage.
+
 ## The worker
 
 **What does the worker do?**

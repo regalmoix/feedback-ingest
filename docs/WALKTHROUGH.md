@@ -1712,7 +1712,11 @@ anything?
    ([api/admin.py:22-37](../feedback_ingest/api/admin.py#L22-L37)).
    - It lists that tenant's events with the given status (optionally one source, up to 500 per call) and replays
      each.
-   - It answers `{"replayed": n}`. Call it again for the next 500.
+   - It answers `{"replayed": n}`.
+   - **Careful with more than 500:** the list is newest first. Replayed `dead` events leave the dead list, so
+     calling again reaches the next 500. Replayed `processed` events come back as `processed` with the same
+     `received_at`, so the next call can pick the same 500 again. A large `processed` replay needs a filter that
+     is not built yet (a `received_at` range, or record-to-raw-event lineage).
 4. **The worker re-runs each event with the new `transform`.** The version time is unchanged (same payload), so
    `merge` sees **equal**, and equal wins. The record is overwritten with the corrected content and
    `connector_version = 2`.
