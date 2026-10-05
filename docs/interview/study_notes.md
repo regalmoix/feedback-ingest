@@ -132,6 +132,16 @@ double pulls (manual plus scheduled, or two workers). Per-source schedules also 
 backoff for sources that keep failing, and room for each API's rate limits. Airflow suits a few big batch jobs
 (backfills, analytics), not thousands of small syncs every few minutes.
 
+**Surge on a pull source: workers do not help the fetch, so how does pull scale?**
+Split it: processing (raw event to record) scales with workers; the fetch per source is sequential, and that is
+mostly fine because the source's rate limit is the real ceiling (parallel calls to one forum earn 429s). What a
+surge breaks today and the fix: one scheduler thread syncs sources one by one (fix: a job per source, run in
+parallel with a per-source lease; parallel across sources, sequential within one); topic fetches inside a page
+are sequential (fix: fetch them concurrently, cursor still moves at the end); a busy day passes the 10-page cap
+(fix: poll more often so each slice is small; long term an id-ordered feed whose cursor is "last post id", which
+can move every page and resume mid-way); rate limits (honour `Retry-After`, per-source budget). Push has no such
+limit: parallel webhooks are one insert each.
+
 ## Records and metadata
 
 **What is `FeedbackRecord`?**
