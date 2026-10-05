@@ -142,6 +142,16 @@ are sequential (fix: fetch them concurrently, cursor still moves at the end); a 
 can move every page and resume mid-way); rate limits (honour `Retry-After`, per-source budget). Push has no such
 limit: parallel webhooks are one insert each.
 
+**No rate limit: how would you scale pull for a big backlog or a live surge?**
+Turn one sequential cursor into many chunks with their own progress. Backlog: split the range into day (or id)
+chunks stored as `pull_jobs` rows with status and lease, claimed by parallel workers with the same claim/retry
+as `raw_events`; 20 workers clear it ~20x faster and a failed chunk retries alone. The cursor becomes a
+low-water mark (watermark): everything before the oldest unfinished chunk is done (days 1-10 done, 11 failed,
+12-20 done: mark is day 11). Inside a chunk, list ids (cheap) then fan out detail fetches as parallel tasks.
+Live surge: poll more often so slices are small, split by id range when ids increase, and keep live and
+backfill in separate lanes so history never delays fresh data. Prefer push when the source offers it.
+Overlapping chunks are fine: the unique key drops repeats.
+
 ## Records and metadata
 
 **What is `FeedbackRecord`?**
