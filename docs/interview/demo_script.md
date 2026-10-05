@@ -14,6 +14,9 @@ the demo is in [whiteboard.md](whiteboard.md).
   meta.discourse.org forum).
 - It deletes and recreates `demo.db`, so every run starts clean.
 - Every command is printed with a leading `$` before it runs, so the interviewer sees exactly what is called.
+- Each step opens with a coloured header and a one-line "why", ends with **Δ what changed** (raw events by
+  status and records, per tenant, before vs after), and adds `▶` notes on what to look at. API keys and
+  signatures in the echoed commands are cut to their first characters. `NO_COLOR=1` turns colours off.
 - The script stops at the first failure (`set -euo pipefail` and `curl --fail-with-body`), so a run that reaches
   `done` means every step passed.
 - If there is no network: step 9 fails and the script stops. Say so, then run
@@ -300,12 +303,11 @@ start_server
 curl -sS --fail-with-body "$BASE/admin/queue" -H "X-API-Key: $LUMENOTE_KEY"
 ```
 
-**They see:** before the kill, the queue shows `"pending":20`. After the restart, "queue as it drains" prints the
-counts three times, ending with `"pending":0` and `processed` up by 20.
+**They see:** before the kill, the queue shows `"pending":20`. After the restart the final queue shows
+`"pending":0`, and the delta shows `+20 lumenote.raw_events.processed` and `+20 lumenote.records`.
 
-Two things that look odd in the output: the `FI_WORKER_ENABLED=false` prefix applies to that one
-`start_server` call only, so the restart after `kill -9` has the worker on; and the 20 pushes still echo their
-`$ curl` lines although their replies go to `/dev/null`, because `show` prints the command to stderr.
+One thing that looks odd: the `FI_WORKER_ENABLED=false` prefix applies to that one `start_server` call only, so
+the restart after `kill -9` has the worker on. The 20 pushes run quietly (their commands and replies are hidden).
 
 **Say:** "I restart with the worker off, so the backlog is certainly there. Twenty webhooks get 202 and sit as
 pending rows. Then `kill -9`: no shutdown, no flush. The new process finds the rows on disk and drains them. The
