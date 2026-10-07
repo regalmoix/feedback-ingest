@@ -5,6 +5,49 @@ Read sections 1, 4 and 8 before the HM chat. Read everything before the CTO roun
 
 ---
 
+## 0. What the HM (Abhay, platform lead) told you, and what it changes for the CTO round
+
+**His notes, condensed** (from the call; private, don't quote numbers back as facts you found publicly):
+- **Growth target:** they grow about 4-5x a year; the goal is 10x, the bar investors now use for AI companies (it was 3x). That means more sales, more infrastructure load, and more features and use cases.
+- **Confidence:** they were doing ML before LLMs, and customer interest in AI has grown a lot.
+- **Engineering culture:**
+  - Very high velocity: the team ships about 100 PRs a week.
+  - The CTO still codes.
+  - There's a leaderboard on token spend and code shipped, and no budget cap on AI or dev tools.
+  - Levels run L3 junior, L4 senior, L5 staff; you'd be about L4-L5.
+  - They care about individual career growth and want strong ICs.
+- **Platform focus:**
+  - Agent infrastructure: measure quality, reduce turn latency, reduce cost.
+  - Most agent use is **not interactive** (automations and workflows), so it can be optimised.
+  - The example: about **$4 per automation down to $1** by finding where tokens burn (system prompt, model choice and so on).
+  - They sell **credits, not tokens**, so a cheaper LLM bill means more margin.
+- **Models:**
+  - Inference: classification, clustering and annotation run mostly on open-weight models (Qwen and others), fine-tuned and self-hosted. They're moving away from frontier models for this.
+  - Agentic: the user picks the model per session or workflow, and they nudge towards the right one. They're exploring choosing the model automatically.
+  - Agent, MCP and automation traffic is now higher than the dashboard's.
+  - Next goals: quality rubrics at low cost. The customer question they hear most is "how much will this cost me?"
+- **Customers:**
+  - Engineers talk to customers directly: shared Slack channels with customer stakeholders.
+  - An FDE team builds pilots.
+  - Enterprise deals are $100K-1M with 3-4 year commitments. Newer, smaller customers pay $20-50K, onboard faster, and commit for about 6 months. They expect 2-3x more customers, mostly smaller.
+- **Economics:** they only recently started charging for agentic model usage (inference was always paid via credits). Revenue is now set to recover most of the compute and model spend.
+
+**What this changes for tomorrow:**
+1. **Your "why Enterpret" now has a concrete hook:** "Abhay described taking an automation from $4 to $1 by understanding where tokens burn. That's exactly my kind of problem: measurable, with a direct revenue link because you sell credits."
+2. **Pick your complex-problem story for cost, latency or quality,** if you have one: profiling, batching, caching, choosing a cheaper path, measuring before and after. Arnav will like numbers.
+3. **Nit #1 (customer exposure) is answered by their setup:** "I liked that engineers here sit in shared Slack channels with customers. That's the exposure I'm missing and want."
+4. **Show AI-native velocity:** how you use AI tools daily, how you verify their output, and that you'd thrive in a 100-PRs-a-week team.
+5. **Say you want the IC track (L4 to L5),** with ownership of a hard platform area.
+
+**Sharp questions for Arnav:**
+- "How do you measure agent quality today: rubrics, LLM judges, customer signals? What's missing?"
+- "For non-interactive automations, where does most of the cost go: the prompt, retries or model choice? What's the plan to get from $4 to $1?"
+- "You moved inference to fine-tuned open-weight models. What drove it: cost, latency or quality? What was hard about self-hosting?"
+- "Auto-picking the model per task: route by task type, or learn from outcomes?"
+- "At 10x growth, what breaks first: ingestion, inference capacity or the agent platform?"
+
+---
+
 ## 1. Enterpret in 60 seconds
 
 - **What it does:** the homepage calls it "customer intelligence infrastructure for teams building with AI". *(enterpret.com)*
